@@ -1,0 +1,3 @@
+[submodule "ui_files"]
+	path = ui_files
+	url = https://github.com/kadir1243/siha_arayuz.git
