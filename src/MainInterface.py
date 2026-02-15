@@ -1,19 +1,37 @@
 from enum import Enum
 
-from PySide6.QtCore import QAbstractListModel, QObject, Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QAbstractListModel, QObject, Qt, QTimer, QModelIndex
+from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem
 from PySide6.QtWidgets import QMainWindow, QPushButton, QListWidgetItem, QToolButton
 
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnectionInterface import ServerConnectionInterface
 from ui_files_python.siha_interface import Ui_MainWindow
 
+class TrackableDataUpdate:
+    # TODO: Add these
+    @staticmethod
+    def update_speed() -> str:
+        pass
+    @staticmethod
+    def update_velocity() -> str:
+        pass
+    @staticmethod
+    def update_altitude() -> str:
+        pass
+    @staticmethod
+    def update_yaw() -> str:
+        pass
+    @staticmethod
+    def update_pitch() -> str:
+        pass
+
 class TrackableDataEnum(Enum):
-    SPEED = "speed"
-    VELOCITY = "velocity"
-    ALTITUDE = "altitude"
-    YAW = "yaw"
-    PITCH = "pitch"
+    SPEED = (0, "Speed", TrackableDataUpdate.update_speed)
+    VELOCITY = (1, "Velocity", TrackableDataUpdate.update_velocity)
+    ALTITUDE = (2, "Altitude", TrackableDataUpdate.update_altitude)
+    YAW = (3, "Yaw", TrackableDataUpdate.update_yaw)
+    PITCH = (4, "Pitch", TrackableDataUpdate.update_pitch)
 
     @staticmethod
     def list():
@@ -40,11 +58,17 @@ class StringListModel(QAbstractListModel):
     def __init__(self, parent: QObject | None = None):
         QAbstractListModel.__init__(self, parent)
 
+class TrackableData:
+    timer: QTimer
+    index: int
+
 class MainWindow(QMainWindow):
     ui: Ui_MainWindow
     uav_connection: UavConnection = UavConnection()
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
+    watcher_datas: dict[TrackableDataEnum, TrackableData] = dict()
+    watcher_items: QStandardItemModel
 
     def __init__(self):
         QMainWindow.__init__(self)
@@ -53,12 +77,42 @@ class MainWindow(QMainWindow):
 
         self.ui.actionConfigurate_SIHA.triggered.connect(self._actionConfigurate_SIHA)
         self.ui.actionConfigurateServer.triggered.connect(self._actionConfigurateServer)
+        self.watcher_items = QStandardItemModel(self)
+        self.ui.watch_list.setModel(self.watcher_items)
+        for e in TrackableDataEnum.list():
+            self.__add_to_watch_list_signal(e)
+
+        self.ui.remove_from_watch.clicked.connect(self.__remove_from_watch_signal)
+        self.ui.watch_list.hideColumn(1) # id column
 
     def __add_to_watch_list_signal(self, e: TrackableDataEnum):
-        self.ui.watch_list.addItem(QListWidgetItem(e.value))
+        timer: QTimer = QTimer()
+        timer.timeout.connect(lambda: self.__add_to_watch_list_signal(e))
+
+        data: TrackableData = TrackableData()
+        data.timer = timer
+        self.watcher_datas.update({e: data})
+        items: list[QStandardItem] = [QStandardItem(e.value[0]), QStandardItem(e.value[1]), QStandardItem(), QStandardItem("")]
+
+        self.watcher_items.appendRow(items)
+
+    def __timer_update(self, e: TrackableDataEnum):
+        length: int = self.watcher_items.rowCount(QModelIndex())
+        for i in range(length):
+            item: QStandardItem = self.watcher_items.item(i)
+            if item.takeColumn(0) == e.value[0]:
+                item.removeColumn(3)
+                item.insertColumn(3, [QStandardItem(e.value[2]())])
 
     def _add_to_watch(self):
         pass
+
+    def __remove_from_watch_signal(self):
+        indexes: list[QModelIndex] = self.ui.watch_list.selectedIndexes()
+        if indexes is not None:
+            for index in indexes:
+                self.watcher_items.removeRow(index.row(), index.parent())
+        self.ui.watch_list.setModel(self.watcher_items)
 
     def _actionConfigurateServer(self):
         if self.server_connection_dialog is not None:
