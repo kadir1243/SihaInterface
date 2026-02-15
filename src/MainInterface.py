@@ -1,12 +1,14 @@
 from enum import Enum
+from functools import partial
 
-from PySide6.QtCore import QAbstractListModel, QObject, Qt, QTimer, QModelIndex
-from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem
-from PySide6.QtWidgets import QMainWindow, QPushButton, QListWidgetItem, QToolButton, QTableWidgetItem
+from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning
+from PySide6.QtGui import QAction, QStandardItem
+from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu
 
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnectionInterface import ServerConnectionInterface
 from ui_files_python.siha_interface import Ui_MainWindow
+
 
 class TrackableDataUpdate:
     # TODO: Add these
@@ -26,8 +28,11 @@ class TrackableDataUpdate:
     def update_pitch() -> str:
         pass
 
+TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
+
 class TrackableDataEnum(Enum):
     # (id, name, update function, update interval (ms))
+    # setting update interval to -1 disables timer
     # TODO: Add update interval
     SPEED = (0, "Speed", TrackableDataUpdate.update_speed, -1)
     VELOCITY = (1, "Velocity", TrackableDataUpdate.update_velocity, -1)
@@ -36,11 +41,11 @@ class TrackableDataEnum(Enum):
     PITCH = (4, "Pitch", TrackableDataUpdate.update_pitch, -1)
 
     @staticmethod
-    def list():
+    def list() -> list[TrackableDataEnum]:
         return list(map(lambda c: c, TrackableDataEnum))
 
     @staticmethod
-    def from_id(id: int):
+    def from_id(id: int) -> TrackableDataEnum:
         e: TrackableDataEnum
         for e in TrackableDataEnum.list():
             if e.value[0] == id:
@@ -53,21 +58,6 @@ class UavConnection:
     serial_band: int | None = None
     ip: str | None = None
 
-class StringListModel(QAbstractListModel):
-    values: dict[TrackableDataEnum, str] = dict()
-
-    def rowCount(self, /, parent=...):
-        return super().rowCount(parent)
-
-    def data(self, index, /, role=...):
-        return super().data(index, role)
-
-    def headerData(self, section, orientation, /, role=...):
-        return super().headerData(section, orientation, role)
-
-    def __init__(self, parent: QObject | None = None):
-        QAbstractListModel.__init__(self, parent)
-
 class TrackableData:
     timer: QTimer
     timer_started: bool = False
@@ -77,7 +67,7 @@ class MainWindow(QMainWindow):
     uav_connection: UavConnection = UavConnection()
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
-    watcher_datas: dict[TrackableDataEnum, TrackableData] = dict()
+    watcher_datas: dict[int, TrackableData] = dict()
 
     def __init__(self):
         QMainWindow.__init__(self)
@@ -86,13 +76,28 @@ class MainWindow(QMainWindow):
 
         self.ui.actionConfigurate_SIHA.triggered.connect(self._actionConfigurate_SIHA)
         self.ui.actionConfigurateServer.triggered.connect(self._actionConfigurateServer)
+
+        add_to_watch_menu: QMenu = QMenu(parent=self)
+
         for e in TrackableDataEnum.list():
-            self.__add_to_watch_list(e)
+            action: QAction = QAction(text=e.value[1], parent=self)
+            action.triggered.connect(partial(self.add_to_watch_list, e))
+            TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]] = action
+            add_to_watch_menu.addAction(action)
+
+        self.ui.add_to_watch.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self.ui.add_to_watch.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        self.ui.add_to_watch.setMenu(add_to_watch_menu)
+
+        for e in TrackableDataEnum.list():
+            self.add_to_watch_list(e)
 
         self.ui.remove_from_watch.clicked.connect(self.__remove_from_watch_signal)
         self.ui.watch_list.setColumnHidden(0, True) # hide id column
 
-    def __add_to_watch_list(self, e: TrackableDataEnum):
+    def add_to_watch_list(self, e: TrackableDataEnum):
+        if e.value[0] in self.watcher_datas:
+            return
         timer: QTimer = QTimer()
         interval: int = e.value[3]
         data: TrackableData = TrackableData()
@@ -104,7 +109,7 @@ class MainWindow(QMainWindow):
             data.timer_started = True
 
         data.timer = timer
-        self.watcher_datas[e] = data
+        self.watcher_datas[e.value[0]] = data
 
         rowCount: int = self.ui.watch_list.rowCount()
         self.ui.watch_list.setRowCount(rowCount + 1)
@@ -113,6 +118,8 @@ class MainWindow(QMainWindow):
         self.ui.watch_list.setItem(rowCount, 1, QTableWidgetItem(e.value[1]))
         self.ui.watch_list.setItem(rowCount, 2, QTableWidgetItem(""))
         self.ui.watch_list.setItem(rowCount, 3, QTableWidgetItem("Unknown"))
+
+        TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].setDisabled(True)
 
     def trigger_update_value(self, e: TrackableDataEnum):
         if self.uav_connection.connection_type is None:
@@ -132,16 +139,23 @@ class MainWindow(QMainWindow):
             i: int = 0
             for index in indexes:
                 row: int = index.row()
-                if rows.__contains__(row):
+                if row in rows:
                     continue
                 rows.append(row)
                 target_row: int = row - i
+
                 if target_row > self.ui.watch_list.rowCount() or target_row < 0:
-                    print("You broke something, wrong target row found when trying to remove. Skipping")
+                    qWarning("You broke something, wrong target row found when trying to remove. Skipping")
                     continue
-                data = self.watcher_datas.pop(TrackableDataEnum.from_id(self.ui.watch_list.item(target_row, 0).row()))
-                if data.timer_started:
-                    data.timer.stop()
+                data_id = int(self.ui.watch_list.item(target_row, 0).text())
+
+                if data_id in self.watcher_datas:
+                    data = self.watcher_datas.pop(data_id)
+                    if data.timer_started:
+                        data.timer.stop()
+                else:
+                    qWarning("Something is broken, watcher_datas does not has trackable data?")
+                TRACKABLE_DATA_ENUM_ACTIONS[data_id].setDisabled(False)
                 self.ui.watch_list.removeRow(target_row)
                 i = i + 1
 
@@ -188,7 +202,7 @@ class MainWindow(QMainWindow):
                 self.uav_connection_dialog.ui.invalid_input_error_label.show()
         else:
             pass # TODO: Serial connection
-        print("UAV Connect Button Not Implemented yet") # TODO: UAV Connect Button
+        qInfo("UAV Connect Button Not Implemented yet") # TODO: UAV Connect Button
 
         self.uav_connection.connection_type = self.uav_connection_dialog.connection_type
         if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
@@ -198,14 +212,14 @@ class MainWindow(QMainWindow):
         self.ui.device_connection_warning.hide()
 
     def _uav_disconnect(self, button: QPushButton, dialog: FightingUAVConnectionInterface):
-        print("UAV Disconnect Button Not Implemented yet") # TODO: UAV Disconnect Button
+        qInfo("UAV Disconnect Button Not Implemented yet") # TODO: UAV Disconnect Button
         self.uav_connection.connection_type = None
 
     def _server_connect(self, button: QPushButton, dialog: ServerConnectionInterface):
-        print("Server Connect Button Not Implemented yet") # TODO: Server Connect Button
+        qInfo("Server Connect Button Not Implemented yet") # TODO: Server Connect Button
 
     def _server_disconnect(self, button: QPushButton, dialog: ServerConnectionInterface):
-        print("Server Disconnect Button Not Implemented yet") # TODO: Server Disconnect Button
+        qInfo("Server Disconnect Button Not Implemented yet") # TODO: Server Disconnect Button
 
     @staticmethod
     def is_ip_address_valid(ip_address: str) -> bool:
