@@ -2,7 +2,7 @@ from enum import Enum
 
 from PySide6.QtCore import QAbstractListModel, QObject, Qt, QTimer, QModelIndex
 from PySide6.QtGui import QAction, QStandardItemModel, QStandardItem
-from PySide6.QtWidgets import QMainWindow, QPushButton, QListWidgetItem, QToolButton
+from PySide6.QtWidgets import QMainWindow, QPushButton, QListWidgetItem, QToolButton, QTableWidgetItem
 
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnectionInterface import ServerConnectionInterface
@@ -27,15 +27,25 @@ class TrackableDataUpdate:
         pass
 
 class TrackableDataEnum(Enum):
-    SPEED = (0, "Speed", TrackableDataUpdate.update_speed)
-    VELOCITY = (1, "Velocity", TrackableDataUpdate.update_velocity)
-    ALTITUDE = (2, "Altitude", TrackableDataUpdate.update_altitude)
-    YAW = (3, "Yaw", TrackableDataUpdate.update_yaw)
-    PITCH = (4, "Pitch", TrackableDataUpdate.update_pitch)
+    # (id, name, update function, update interval (ms))
+    # TODO: Add update interval
+    SPEED = (0, "Speed", TrackableDataUpdate.update_speed, -1)
+    VELOCITY = (1, "Velocity", TrackableDataUpdate.update_velocity, -1)
+    ALTITUDE = (2, "Altitude", TrackableDataUpdate.update_altitude, -1)
+    YAW = (3, "Yaw", TrackableDataUpdate.update_yaw, -1)
+    PITCH = (4, "Pitch", TrackableDataUpdate.update_pitch, -1)
 
     @staticmethod
     def list():
         return list(map(lambda c: c, TrackableDataEnum))
+
+    @staticmethod
+    def from_id(id: int):
+        e: TrackableDataEnum
+        for e in TrackableDataEnum.list():
+            if e.value[0] == id:
+                return e
+        return None
 
 class UavConnection:
     connection_type: ConnectionType | None = None
@@ -60,7 +70,7 @@ class StringListModel(QAbstractListModel):
 
 class TrackableData:
     timer: QTimer
-    index: int
+    timer_started: bool = False
 
 class MainWindow(QMainWindow):
     ui: Ui_MainWindow
@@ -68,7 +78,6 @@ class MainWindow(QMainWindow):
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
     watcher_datas: dict[TrackableDataEnum, TrackableData] = dict()
-    watcher_items: QStandardItemModel
 
     def __init__(self):
         QMainWindow.__init__(self)
@@ -77,42 +86,64 @@ class MainWindow(QMainWindow):
 
         self.ui.actionConfigurate_SIHA.triggered.connect(self._actionConfigurate_SIHA)
         self.ui.actionConfigurateServer.triggered.connect(self._actionConfigurateServer)
-        self.watcher_items = QStandardItemModel(self)
-        self.ui.watch_list.setModel(self.watcher_items)
         for e in TrackableDataEnum.list():
-            self.__add_to_watch_list_signal(e)
+            self.__add_to_watch_list(e)
 
         self.ui.remove_from_watch.clicked.connect(self.__remove_from_watch_signal)
-        self.ui.watch_list.hideColumn(1) # id column
+        self.ui.watch_list.setColumnHidden(0, True) # hide id column
 
-    def __add_to_watch_list_signal(self, e: TrackableDataEnum):
+    def __add_to_watch_list(self, e: TrackableDataEnum):
         timer: QTimer = QTimer()
-        timer.timeout.connect(lambda: self.__add_to_watch_list_signal(e))
-
+        interval: int = e.value[3]
         data: TrackableData = TrackableData()
+        if interval != -1:
+            timer.setInterval(interval)
+            timer.timeout.connect(lambda: self.trigger_update_value(e))
+            self.trigger_update_value(e) # fire once when adding to try to set data
+            timer.start()
+            data.timer_started = True
+
         data.timer = timer
-        self.watcher_datas.update({e: data})
-        items: list[QStandardItem] = [QStandardItem(e.value[0]), QStandardItem(e.value[1]), QStandardItem(), QStandardItem("")]
+        self.watcher_datas[e] = data
 
-        self.watcher_items.appendRow(items)
+        rowCount: int = self.ui.watch_list.rowCount()
+        self.ui.watch_list.setRowCount(rowCount + 1)
 
-    def __timer_update(self, e: TrackableDataEnum):
-        length: int = self.watcher_items.rowCount(QModelIndex())
+        self.ui.watch_list.setItem(rowCount, 0, QTableWidgetItem(str(e.value[0])))
+        self.ui.watch_list.setItem(rowCount, 1, QTableWidgetItem(e.value[1]))
+        self.ui.watch_list.setItem(rowCount, 2, QTableWidgetItem(""))
+        self.ui.watch_list.setItem(rowCount, 3, QTableWidgetItem("Unknown"))
+
+    def trigger_update_value(self, e: TrackableDataEnum):
+        if self.uav_connection.connection_type is None:
+            return
+        length: int = self.ui.watch_list.rowCount()
         for i in range(length):
-            item: QStandardItem = self.watcher_items.item(i)
-            if item.takeColumn(0) == e.value[0]:
-                item.removeColumn(3)
-                item.insertColumn(3, [QStandardItem(e.value[2]())])
-
-    def _add_to_watch(self):
-        pass
+            if self.ui.watch_list.item(i, 0) == e.value[0]:
+                self.ui.watch_list.setItem(i, 3, QStandardItem(e.value[2]()))
+                break
 
     def __remove_from_watch_signal(self):
         indexes: list[QModelIndex] = self.ui.watch_list.selectedIndexes()
         if indexes is not None:
+            indexes.sort()
+
+            rows: list[int] = list()
+            i: int = 0
             for index in indexes:
-                self.watcher_items.removeRow(index.row(), index.parent())
-        self.ui.watch_list.setModel(self.watcher_items)
+                row: int = index.row()
+                if rows.__contains__(row):
+                    continue
+                rows.append(row)
+                target_row: int = row - i
+                if target_row > self.ui.watch_list.rowCount() or target_row < 0:
+                    print("You broke something, wrong target row found when trying to remove. Skipping")
+                    continue
+                data = self.watcher_datas.pop(TrackableDataEnum.from_id(self.ui.watch_list.item(target_row, 0).row()))
+                if data.timer_started:
+                    data.timer.stop()
+                self.ui.watch_list.removeRow(target_row)
+                i = i + 1
 
     def _actionConfigurateServer(self):
         if self.server_connection_dialog is not None:
