@@ -4,6 +4,7 @@ from functools import partial
 from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning
 from PySide6.QtGui import QAction, QStandardItem
 from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu
+from pymavlink.mavutil import mavlink_connection
 
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnectionInterface import ServerConnectionInterface
@@ -13,19 +14,19 @@ from ui_files_python.siha_interface import Ui_MainWindow
 class TrackableDataUpdate:
     # TODO: Add these
     @staticmethod
-    def update_speed() -> str:
+    def update_speed(ui: MainWindow) -> str:
         pass
     @staticmethod
-    def update_velocity() -> str:
+    def update_velocity(ui: MainWindow) -> str:
         pass
     @staticmethod
-    def update_altitude() -> str:
+    def update_altitude(ui: MainWindow) -> str:
         pass
     @staticmethod
-    def update_yaw() -> str:
+    def update_yaw(ui: MainWindow) -> str:
         pass
     @staticmethod
-    def update_pitch() -> str:
+    def update_pitch(ui: MainWindow) -> str:
         pass
 
 TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
@@ -45,10 +46,10 @@ class TrackableDataEnum(Enum):
         return list(map(lambda c: c, TrackableDataEnum))
 
     @staticmethod
-    def from_id(id: int) -> TrackableDataEnum:
+    def from_id(i: int) -> TrackableDataEnum:
         e: TrackableDataEnum
         for e in TrackableDataEnum.list():
-            if e.value[0] == id:
+            if e.value[0] == i:
                 return e
         return None
 
@@ -58,15 +59,19 @@ class UavConnection:
     serial_band: int | None = None
     ip: str | None = None
 
+class ServerConnection:
+    port: int | None = None
+    ip: str | None = None
+
 class TrackableData:
-    timer: QTimer
-    timer_started: bool = False
+    timer: QTimer | None = None
 
 class MainWindow(QMainWindow):
     ui: Ui_MainWindow
     uav_connection: UavConnection = UavConnection()
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
+    server_connection: ServerConnection = ServerConnection()
     watcher_datas: dict[int, TrackableData] = dict()
 
     def __init__(self):
@@ -98,19 +103,6 @@ class MainWindow(QMainWindow):
     def add_to_watch_list(self, e: TrackableDataEnum):
         if e.value[0] in self.watcher_datas:
             return
-        timer: QTimer = QTimer()
-        interval: int = e.value[3]
-        data: TrackableData = TrackableData()
-        if interval != -1:
-            timer.setInterval(interval)
-            timer.timeout.connect(lambda: self.trigger_update_value(e))
-            self.trigger_update_value(e) # fire once when adding to try to set data
-            timer.start()
-            data.timer_started = True
-
-        data.timer = timer
-        self.watcher_datas[e.value[0]] = data
-
         rowCount: int = self.ui.watch_list.rowCount()
         self.ui.watch_list.setRowCount(rowCount + 1)
 
@@ -121,13 +113,25 @@ class MainWindow(QMainWindow):
 
         TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].setDisabled(True)
 
+        interval: int = e.value[3]
+        data: TrackableData = TrackableData()
+
+        self.watcher_datas[e.value[0]] = data
+        if interval != -1:
+            timer: QTimer = QTimer()
+            data.timer = timer
+            timer.setInterval(interval)
+            timer.timeout.connect(lambda: self.trigger_update_value(e))
+            self.trigger_update_value(e) # fire once when adding to try to set data
+            timer.start()
+
     def trigger_update_value(self, e: TrackableDataEnum):
         if self.uav_connection.connection_type is None:
             return
         length: int = self.ui.watch_list.rowCount()
         for i in range(length):
             if self.ui.watch_list.item(i, 0) == e.value[0]:
-                self.ui.watch_list.setItem(i, 3, QStandardItem(e.value[2]()))
+                self.ui.watch_list.setItem(i, 3, QStandardItem(e.value[2](self)))
                 break
 
     def __remove_from_watch_signal(self):
@@ -151,7 +155,7 @@ class MainWindow(QMainWindow):
 
                 if data_id in self.watcher_datas:
                     data = self.watcher_datas.pop(data_id)
-                    if data.timer_started:
+                    if data.timer is not None:
                         data.timer.stop()
                 else:
                     qWarning("Something is broken, watcher_datas does not has trackable data?")
@@ -164,6 +168,9 @@ class MainWindow(QMainWindow):
             return
         self.server_connection_dialog = ServerConnectionInterface(self)
         self.server_connection_dialog.show()
+        if self.server_connection.ip is not None:
+            self.server_connection_dialog.ui.server_ip = self.server_connection.ip
+            self.server_connection_dialog.ui.server_port = self.server_connection.port
         self.server_connection_dialog.ui.connect.clicked.connect(lambda button: self._server_connect(button, self.server_connection_dialog))
         self.server_connection_dialog.ui.disconnect.clicked.connect(lambda button: self._server_disconnect(button, self.server_connection_dialog))
         self.server_connection_dialog.finished.connect(lambda e: self._reset_dialog(False))
@@ -209,16 +216,28 @@ class MainWindow(QMainWindow):
             self.uav_connection.serial_band = self.uav_connection_dialog.ui.serial_band.text()
         else:
             self.uav_connection.ip = self.uav_connection_dialog.ui.ip_address.text()
+        self.ui.camera_view.startUpdater()
         self.ui.device_connection_warning.hide()
 
     def _uav_disconnect(self, button: QPushButton, dialog: FightingUAVConnectionInterface):
+        self.ui.camera_view.stopUpdater()
         qInfo("UAV Disconnect Button Not Implemented yet") # TODO: UAV Disconnect Button
         self.uav_connection.connection_type = None
 
     def _server_connect(self, button: QPushButton, dialog: ServerConnectionInterface):
+        # TODO: Test connection
+        if dialog.ui.server_ip.text() is not None:
+            dialog.ui.server_ip.setText(dialog.ui.server_ip.placeholderText())
+        if dialog.ui.server_port.text() is not None:
+            dialog.ui.server_port.setText(dialog.ui.server_port.placeholderText())
+        self.server_connection.ip = dialog.ui.server_ip
+        self.server_connection.port = dialog.ui.server_port
+
         qInfo("Server Connect Button Not Implemented yet") # TODO: Server Connect Button
 
     def _server_disconnect(self, button: QPushButton, dialog: ServerConnectionInterface):
+        self.server_connection.ip = None
+        self.server_connection.port = None
         qInfo("Server Disconnect Button Not Implemented yet") # TODO: Server Disconnect Button
 
     @staticmethod
