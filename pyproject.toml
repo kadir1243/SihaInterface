@@ -3,4 +3,4 @@ name = "fighting_uav_interface"
 version = "0.1.0"
 description = "Interface for Fighting UAV"
 requires-python = ">=3.14"
-dependencies = ["pyside6", "pymavlink"]
+dependencies = ["pyside6", "pymavlink", "requests"]

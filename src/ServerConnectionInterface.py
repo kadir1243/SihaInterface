@@ -7,7 +7,6 @@ from ui_files_python.connect_to_server import Ui_ServerConfig
 
 
 class ServerConnectionInterface(QDialog):
-    _ip_regex: QRegularExpression = QRegularExpression("[\\d.]+")
     _port_regex: QRegularExpression = QRegularExpression("[\\d]+")
     ui: Ui_ServerConfig
 
@@ -17,6 +16,5 @@ class ServerConnectionInterface(QDialog):
         self.ui.setupUi(self)
         self.ui.invalid_input_error_label.hide()
 
-        self.ui.server_ip.setValidator(QRegularExpressionValidator(self._ip_regex))
-        self.ui.server_port.setValidator(QRegularExpressionValidator(self._port_regex))
+        self.ui.server_port_input.setValidator(QRegularExpressionValidator(self._port_regex))
 
