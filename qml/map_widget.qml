@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Shapes
 import QtLocation
 import QtPositioning
 
@@ -12,11 +13,6 @@ Item {
         PluginParameter {
             name: "osm.mapping.providersrepository.disabled"
             value: "true"
-        }
-
-        PluginParameter {
-            name: "osm.mapping.custom.host"
-            value: "https://tile.openstreetmap.org/%z/%x/%y.png"
         }
     }
     Map {
@@ -52,31 +48,19 @@ Item {
         }
         MouseArea {
             anchors.fill: parent
-            acceptedButtons: Qt.LeftButton | Qt.RightButton
+            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
             onClicked: (mouse)=> {
-                mouseInputHandler.handle_mouse_input(mouse.button, map.toCoordinate(mapToItem(parent, mouse.x, mouse.y)))
+                mouseInputHandler.handle_mouse_input_to_map(mouse.button, map.toCoordinate(mapToItem(parent, mouse.x, mouse.y)))
             }
         }
-        MapItemView{
-            model: datamodel
+        MapItemView {
+            model: plane_data_model
             delegate: MapQuickItem{
                 id: item
                 // begin configuration
                 property var position: model.position
                 property var plane_type: model.plane_type
-                onPositionChanged: restart();
-                function restart(){ // FIXME: IDK how this thing even works. I need to do more research
-                    anim.stop()
-                    anim.from = position
-                    anim.to = position
-                    anim.start()
-                }
-                CoordinateAnimation {
-                    id: anim
-                    target: item
-                    duration: 60 * 1000
-                    property: "coordinate"
-                }
+                coordinate: position;
                 // end of configuration
                 anchorPoint.x: plane_image.width/2
                 anchorPoint.y: plane_image.height/2
@@ -100,6 +84,45 @@ Item {
                     height: 20
                 }
             }
+        }
+        MapItemView {
+            model: coord_data_model
+            delegate: MapQuickItem {
+                id: item2
+                // begin configuration
+                property var position: model.position
+                property var coord_type: model.coord_type
+                coordinate: position
+                // end of configuration
+                anchorPoint.x: rect.width / 2
+                anchorPoint.y: rect.height / 2
+                sourceItem: Rectangle {
+                    id: rect
+
+                    function getColor() {
+                        if (coord_type === 5 || coord_type === 6 || coord_type === 7 || coord_type === 8 || coord_type === 9) {
+                            return "red"
+                        } else if (coord_type === 1) {
+                            return "blue"
+                        }
+                        return "purple"
+                    }
+
+                    color: getColor()
+                    width: 20
+                    height: 20
+                }
+            }
+        }
+        MapPolygon {
+            property var gc1: coords_for_geofence.gc1
+            property var gc2: coords_for_geofence.gc2
+            property var gc3: coords_for_geofence.gc3
+            property var gc4: coords_for_geofence.gc4
+            id: geofence
+            color: "#32cd32FF"
+            path: [gc1, gc2, gc3, gc4]
+
         }
     }
 }

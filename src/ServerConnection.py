@@ -1,4 +1,5 @@
 import requests
+from PySide6.QtCore import qDebug
 from requests import Response
 
 # FIXME: This should be set to false
@@ -91,8 +92,24 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
     data = r.json()
     d: TelemetryResponseData = TelemetryResponseData()
     d.sunucusaati = data.get("sunucusaati")
+    # TODO: I need to write
     return d
 
 
 TELEMETRY_DATA: TelemetryData = TelemetryData()
 SERVER_TELEMETRY_RESPONSE: TelemetryResponseData = TelemetryResponseData()
+
+class QrCoords:
+    qrEnlem: float
+    qrBoylam: float
+
+def get_kamikaze_coords(target_address: str) -> QrCoords:
+    if not target_address.startswith("http"):
+        target_address = "http://" + target_address
+    r: Response = requests.get(target_address + "/api/qr_koordinati")
+    r.raise_for_status()
+    data = r.json()
+    d: QrCoords = QrCoords()
+    d.qrEnlem = data.get("qrEnlem")
+    d.qrBoylam = data.get("qrBoylam")
+    return d

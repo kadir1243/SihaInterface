@@ -3,14 +3,17 @@ from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug
 from PySide6.QtGui import QAction, QStandardItem
+from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu
 from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
     MAVLink_vfr_hud_message, MAVLink_battery_status_message
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
-from src import ServerConnection
+from src.MapWidget import GeofenceData, ZERO_GEO_COORDS
+from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
-from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, TELEMETRY_DATA
+from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, TELEMETRY_DATA, QrCoords, \
+    get_kamikaze_coords
 from src.ServerConnectionInterface import ServerConnectionInterface
 from ui_files_python.siha_interface import Ui_MainWindow
 
@@ -118,6 +121,7 @@ class MainWindow(QMainWindow):
     uav_connection: UavConnection = UavConnection()
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
+    geofence_dialog: SetGeofenceInterface | None = None
     server_connection: ServerConnection = ServerConnection()
     trackable_packet_timers: dict[TrackableDataPacketTimer, QTimer] = dict()
     watcher_datas: list[int] = list()
@@ -151,12 +155,66 @@ class MainWindow(QMainWindow):
         self.ui.watch_list.setColumnHidden(0, True) # hide id column
         self.ui.fly_mode_combobox.currentIndexChanged.connect(self._change_index)
         self.ui.actionForce_Send_Testing_Telemetry_Data.triggered.connect(self.__change_state_for_force_sending_telemetry)
+        self.ui.get_kamikaze_coords_from_server.clicked.connect(self.__get_kamikaze_coords)
+        self.ui.start_kamikaze.clicked.connect(self.__start_kamikaze)
+        self.ui.set_fence.clicked.connect(self.__set_fence_clicked)
+
+    def __set_fence_clicked(self):
+        if self.geofence_dialog is not None:
+            return
+
+        self.geofence_dialog = SetGeofenceInterface(self)
+
+        if self.ui.map_view.coords_for_geofence.gc1_v != ZERO_GEO_COORDS:
+            self.geofence_dialog.ui.gc1.setText(str(self.ui.map_view.coords_for_geofence.gc1_v.latitude()) + " " + str(self.ui.map_view.coords_for_geofence.gc1_v.longitude()))
+        if self.ui.map_view.coords_for_geofence.gc2_v != ZERO_GEO_COORDS:
+            self.geofence_dialog.ui.gc2.setText(str(self.ui.map_view.coords_for_geofence.gc2_v.latitude()) + " " + str(self.ui.map_view.coords_for_geofence.gc2_v.longitude()))
+        if self.ui.map_view.coords_for_geofence.gc3_v != ZERO_GEO_COORDS:
+            self.geofence_dialog.ui.gc3.setText(str(self.ui.map_view.coords_for_geofence.gc3_v.latitude()) + " " + str(self.ui.map_view.coords_for_geofence.gc3_v.longitude()))
+        if self.ui.map_view.coords_for_geofence.gc4_v != ZERO_GEO_COORDS:
+            self.geofence_dialog.ui.gc4.setText(str(self.ui.map_view.coords_for_geofence.gc4_v.latitude()) + " " + str(self.ui.map_view.coords_for_geofence.gc4_v.longitude()))
+        self.geofence_dialog.show()
+        self.geofence_dialog.ui.save.clicked.connect(self.__set_fence_dialog_save)
+        self.geofence_dialog.finished.connect(self.__reset_geofence_dialog)
+
+    def __set_fence_dialog_save(self):
+        gc1 = self.geofence_dialog.ui.gc1.text().split()
+        gc2 = self.geofence_dialog.ui.gc2.text().split()
+        gc3 = self.geofence_dialog.ui.gc3.text().split()
+        gc4 = self.geofence_dialog.ui.gc4.text().split()
+
+        if len(gc1) != 2 or len(gc2) != 2 or len(gc3) != 2 or len(gc4) != 2:
+            return
+        self.ui.map_view.coords_for_geofence.gc1_v = QGeoCoordinate(float(gc1[0]), float(gc1[1]))
+        self.ui.map_view.coords_for_geofence.gc2_v = QGeoCoordinate(float(gc2[0]), float(gc2[1]))
+        self.ui.map_view.coords_for_geofence.gc3_v = QGeoCoordinate(float(gc3[0]), float(gc3[1]))
+        self.ui.map_view.coords_for_geofence.gc4_v = QGeoCoordinate(float(gc4[0]), float(gc4[1]))
+        self.ui.map_view.coords_for_geofence.gc_changed.emit()
+        qDebug("New geofence coords: " + str(self.ui.map_view.coords_for_geofence.gc1_v) + ", " + str(self.ui.map_view.coords_for_geofence.gc2_v) + ", " + str(self.ui.map_view.coords_for_geofence.gc3_v) + ", " + str(self.ui.map_view.coords_for_geofence.gc4_v))
+        self.geofence_dialog.close()
+
+    def __reset_geofence_dialog(self):
+        self.geofence_dialog = None
+
+    def __start_kamikaze(self):
+        if self.uav_connection.connection_type is None:
+            return
+        longitude = float(self.ui.kamikaze_longitude.text())
+        latitude = float(self.ui.kamikaze_latitude.text())
+        qWarning("Kamikaze not implemented yet") # TODO
+
+    def __get_kamikaze_coords(self):
+        if self.server_connection.ip is None:
+            return
+        qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.ip + ":" + str(self.server_connection.port))
+        self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
+        self.ui.kamikaze_latitude.setText(str(qr_coords.qrEnlem))
 
     def __change_state_for_force_sending_telemetry(self, state: bool):
         self.force_sending_telemetry = state
 
     def _change_index(self, index: int):
-        # TODO: Is some packet needed for mavlink? IDK Someone help meeeeee
+        # TODO: Is some packet needed for mavlink?
         TELEMETRY_DATA.iha_otonom = index
 
     def add_to_watch_list(self, e: TrackableDataEnum):
@@ -325,10 +383,12 @@ class MainWindow(QMainWindow):
             self.uav_connection.connection_type = None
             self.ui.device_connection_warning.show()
             self.mavlink_connection.close()
+            self.ui.map_view.mavlink_connection = None
             return
         self.uav_connection.connection_type = self.uav_connection_dialog.connection_type # Only set connection_type after successfully connecting
         self.ui.camera_view.startUpdater()
         self.ui.device_connection_warning.hide()
+        self.ui.map_view.mavlink_connection = self.mavlink_connection
 
     def _uav_disconnect(self, button: QPushButton, dialog: FightingUAVConnectionInterface):
         if self.uav_connection.connection_type is None:
