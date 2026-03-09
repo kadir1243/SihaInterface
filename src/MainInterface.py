@@ -386,14 +386,12 @@ class MainWindow(QMainWindow):
             self.ui.map_view.mavlink_connection = None
             return
         self.uav_connection.connection_type = self.uav_connection_dialog.connection_type # Only set connection_type after successfully connecting
-        self.ui.camera_view.startUpdater()
         self.ui.device_connection_warning.hide()
         self.ui.map_view.mavlink_connection = self.mavlink_connection
 
     def _uav_disconnect(self, button: QPushButton, dialog: FightingUAVConnectionInterface):
         if self.uav_connection.connection_type is None:
             return
-        self.ui.camera_view.stopUpdater()
         self.uav_connection.connection_type = None
 
     def _server_connect(self, button: QPushButton, dialog: ServerConnectionInterface):
