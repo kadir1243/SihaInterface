@@ -1,44 +1,18 @@
 import struct
 
 import lz4.block
-from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug
+from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
 from PySide6.QtWidgets import QWidget, QLabel
 
+class SocketWrapper(QObject):
+    socket: QUdpSocket | None = None
+    parentWidget: CameraWidget
 
-class CameraWidget(QLabel):
-    reconnect_timer: QTimer
-    connection_thread: QThread
-    udpSocket: QUdpSocket
-
-    def __init__(self, parent: QWidget | None = None):
-        QLabel.__init__(self, parent=parent)
-
-        self.reconnect_timer = QTimer(self)
-        self.udpSocket = QUdpSocket()
-        self.udpSocket.readyRead.connect(self.readPendingDatagrams)
-        self.udpSocket.errorOccurred.connect(self.error_happened_in_socket)
-        self.connection_thread = QThread(self)
-        self.connection_thread.setObjectName("Camera Connection Thread")
-        self.connection_thread.finished.connect(self.udpSocket.close)
-        self.connection_thread.started.connect(self.bindSocket)
-        self.connection_thread.start()
-
-    def resizeEvent(self, event, /):
-        if event.size().height() == 0 or event.size().width() == 0: # Widget should be hidden, for some reason hide and show does not work on qsplitter
-            if self.connection_thread.isRunning():
-                self.connection_thread.quit()
-                self.connection_thread.wait()
-                qDebug("Thread ended")
-        else:
-            if not self.connection_thread.isRunning():
-                self.connection_thread.start()
-        super().resizeEvent(event)
-
-    def error_happened_in_socket(self, error: QAbstractSocket.SocketError):
-        qWarning(self.udpSocket.errorString())
-        qWarning(str(error.value))
+    def __init__(self, parentWidget: CameraWidget):
+        super().__init__()
+        self.parentWidget = parentWidget
 
     # My Internal Server Code
     #def split_bylen(item, maxlen):  # I don't remember where i copied this from, but thanks for answer in stackoverflow :D
@@ -73,9 +47,12 @@ class CameraWidget(QLabel):
     frame_data_map: dict[int, bytes]
     amount_of_parts_received: int
     connected_server_id: int
-
     def bindSocket(self):
-        self.udpSocket.bind(QHostAddress("127.0.0.1"), port=8000)
+        if not self.socket:
+            self.socket = QUdpSocket()
+            self.socket.readyRead.connect(self.readPendingDatagrams)
+            self.socket.errorOccurred.connect(self.error_happened_in_socket)
+        self.socket.bind(QHostAddress("127.0.0.1"), port=8000)
         self.last_index_of_frame = 0
         self.last_amount_of_parts = 0
         self.frame_data_map = {}
@@ -83,8 +60,8 @@ class CameraWidget(QLabel):
         self.connected_server_id = 0
 
     def readPendingDatagrams(self):
-        while self.udpSocket.hasPendingDatagrams():
-            datagram = self.udpSocket.receiveDatagram()
+        while self.socket.hasPendingDatagrams():
+            datagram = self.socket.receiveDatagram()
             data = datagram.data()
             header = struct.unpack("!IIIIB", data[:17])
             part_of_frame: int = header[0]
@@ -126,10 +103,56 @@ class CameraWidget(QLabel):
                     self.amount_of_parts_received = 0
                     continue
                 img = QImage(lz4.block.decompress(blob), 640, 480, QImage.Format.Format_RGB888)
-                self.setPixmap(QPixmap.fromImageInPlace(img).scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio))
+                self.parentWidget.setPixmap(QPixmap.fromImageInPlace(img).scaled(self.parentWidget.size(), Qt.AspectRatioMode.KeepAspectRatio))
                 self.frame_data_map.clear()
                 self.amount_of_parts_received = 0
+    def error_happened_in_socket(self, error: QAbstractSocket.SocketError):
+        qWarning("%s" % self.socket.errorString())
+        qWarning("%s" % error.value)
+    def close(self):
+        self.socket.close()
 
+
+class CameraWidget(QLabel):
+    reconnect_timer: QTimer
+    connection_thread: QThread | None = None
+    socketWorker: SocketWrapper | None = None
+
+    def __init__(self, parent: QWidget | None = None):
+        QLabel.__init__(self, parent=parent)
+
+        self.reconnect_timer = QTimer(self)
+
+    def resizeEvent(self, event, /):
+        if event.size().height() == 0 or event.size().width() == 0: # Widget should be hidden, for some reason hide and show does not work on qsplitter
+            if self.connection_thread:
+                self.close()
+        else:
+            if not self.connection_thread:
+                self.bindSocket()
+        super().resizeEvent(event)
+
+    def bindSocket(self):
+        if self.connection_thread:
+            qDebug("Connection Thread already started")
+            return
+        self.socketWorker = SocketWrapper(self)
+        self.connection_thread = QThread(self)
+        self.connection_thread.setObjectName("Camera Connection Thread")
+        self.connection_thread.finished.connect(self.socketWorker.close)
+        self.connection_thread.started.connect(self.socketWorker.bindSocket)
+        self.socketWorker.moveToThread(self.connection_thread)
+        self.connection_thread.start()
+
+    def close(self):
+        if not self.connection_thread:
+            qDebug("Connection Thread already closed")
+            return
+        self.connection_thread.quit()
+        self.connection_thread.wait()
+        self.connection_thread = None
+        self.socketWorker = None
+        qDebug("Closed Connection Thread")
 
     def start_reconnect_timer(self):
         self.reconnect_timer.start()
