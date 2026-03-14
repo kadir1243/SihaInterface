@@ -1,5 +1,5 @@
 import requests
-from PySide6.QtCore import qDebug
+from PySide6.QtCore import qDebug, QTime
 from requests import Response
 
 # FIXME: This should be set to false
@@ -20,14 +20,11 @@ class GpsSaati:
     saniye: int = 0
     milisaniye: int = 0
 
-    def __init__(self, msec: int):
-        second = msec // 100
-        self.milisaniye = second % 1
-        minute = second // 60
-        self.dakika = minute % 1
-        hour = minute // 60
-        self.saat = hour
-
+    def __init__(self, time: QTime):
+        self.milisaniye = time.msec()
+        self.saniye = time.second()
+        self.dakika = time.minute()
+        self.saat = time.hour()
 
 class TelemetryData:
     takim_numarasi: int = -1
@@ -45,7 +42,7 @@ class TelemetryData:
     hedef_merkez_Y: int = 0
     hedef_genislik: int = 0
     hedef_yukseklik: int = 0
-    gps_saati: GpsSaati = GpsSaati(0)
+    gps_saati: GpsSaati = GpsSaati(QTime())
 
 class TelemetryResponseUavData:
     takim_numarasi: int
@@ -59,45 +56,49 @@ class TelemetryResponseUavData:
     zaman_farki: int
 
 class TelemetryResponseData:
-    sunucusaati: GpsSaati = GpsSaati(0) # I don't really care 'gun' field in response
+    sunucusaati: GpsSaati = GpsSaati(QTime()) # I don't really care 'gun' field in response
     konumBilgileri: list[TelemetryResponseUavData] = []
+
+SERVER_IS_UNREACHABLE_COUNTER: int = 0 # When this hits 100, disconnect from server
 
 def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> TelemetryResponseData:
     if not target_address.startswith("http"):
         target_address = "http://" + target_address
-    r: Response = requests.post(target_address + "/api/telemetri_gonder", json={
-        "takim_numarasi": telemetry_data.takim_numarasi,
-        "iha_enlem": telemetry_data.iha_enlem,
-        "iha_boylam": telemetry_data.iha_boylam,
-        "iha_irtifa": telemetry_data.iha_irtifa,
-        "iha_dikilme": telemetry_data.iha_dikilme,
-        "iha_yonelme": telemetry_data.iha_yonelme,
-        "iha_yatis": telemetry_data.iha_yatis,
-        "iha_hiz": telemetry_data.iha_hiz,
-        "iha_batarya": telemetry_data.iha_batarya,
-        "iha_otonom": telemetry_data.iha_otonom,
-        "iha_kilitlenme": telemetry_data.iha_kilitlenme,
-        "hedef_merkez_X": telemetry_data.hedef_merkez_X,
-        "hedef_merkez_Y": telemetry_data.hedef_merkez_Y,
-        "hedef_genislik": telemetry_data.hedef_genislik,
-        "hedef_yukseklik": telemetry_data.hedef_yukseklik,
-        "gps_saati": {
-            "saat": telemetry_data.gps_saati.saat,
-            "dakika": telemetry_data.gps_saati.dakika,
-            "saniye": telemetry_data.gps_saati.saniye,
-            "milisaniye": telemetry_data.gps_saati.milisaniye
-        }
-    }, headers={"Content-Type": "application/json"}, timeout=100)
-    r.raise_for_status()
-    data = r.json()
-    d: TelemetryResponseData = TelemetryResponseData()
-    d.sunucusaati = data.get("sunucusaati")
-    # TODO: I need to write
-    return d
+    try:
+        r: Response = requests.post(target_address + "/api/telemetri_gonder", json={
+            "takim_numarasi": telemetry_data.takim_numarasi,
+            "iha_enlem": telemetry_data.iha_enlem,
+            "iha_boylam": telemetry_data.iha_boylam,
+            "iha_irtifa": telemetry_data.iha_irtifa,
+            "iha_dikilme": telemetry_data.iha_dikilme,
+            "iha_yonelme": telemetry_data.iha_yonelme,
+            "iha_yatis": telemetry_data.iha_yatis,
+            "iha_hiz": telemetry_data.iha_hiz,
+            "iha_batarya": telemetry_data.iha_batarya,
+            "iha_otonom": telemetry_data.iha_otonom,
+            "iha_kilitlenme": telemetry_data.iha_kilitlenme,
+            "hedef_merkez_X": telemetry_data.hedef_merkez_X,
+            "hedef_merkez_Y": telemetry_data.hedef_merkez_Y,
+            "hedef_genislik": telemetry_data.hedef_genislik,
+            "hedef_yukseklik": telemetry_data.hedef_yukseklik,
+            "gps_saati": {
+                "saat": telemetry_data.gps_saati.saat,
+                "dakika": telemetry_data.gps_saati.dakika,
+                "saniye": telemetry_data.gps_saati.saniye,
+                "milisaniye": telemetry_data.gps_saati.milisaniye
+            }
+        }, headers={"Content-Type": "application/json"}, timeout=100)
+        r.raise_for_status()
+        data = r.json()
+        d: TelemetryResponseData = TelemetryResponseData()
+        d.sunucusaati = data.get("sunucusaati")
+        # TODO: I need to write that
+        return d
+    except ConnectionError as e:
+        global SERVER_IS_UNREACHABLE_COUNTER
+        SERVER_IS_UNREACHABLE_COUNTER += 1
 
-
-TELEMETRY_DATA: TelemetryData = TelemetryData()
-SERVER_TELEMETRY_RESPONSE: TelemetryResponseData = TelemetryResponseData()
+        return None
 
 class QrCoords:
     qrEnlem: float

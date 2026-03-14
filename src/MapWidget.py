@@ -5,7 +5,7 @@ from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget
 from pymavlink.mavutil import mavfile
 
-from src.ServerConnection import TELEMETRY_DATA, SERVER_TELEMETRY_RESPONSE
+from src.ServerConnection import TelemetryResponseData
 
 
 class PlaneData:
@@ -97,10 +97,10 @@ class MouseInputHandler(QObject):
             case Qt.MouseButton.MiddleButton.value:
                 data.coord_type = self.gc_cycle + 5
             case _:
-                qWarning("Invalid mouse input {}".format(button))
+                qWarning("Invalid mouse input %s" % button)
                 return
         if data.coord_type == self.gc_cycle + 5: # I hope i will remember how this works
-            qDebug("Gc cycle: " + str(self.gc_cycle))
+            qDebug("Gc cycle: %s" % self.gc_cycle)
             match self.gc_cycle:
                 case 0 | 4:
                     self.parent.coords_for_geofence.gc1_v = coordinate
@@ -114,16 +114,16 @@ class MouseInputHandler(QObject):
                     self.parent.coords_for_geofence.gc4_v = coordinate
             for mdata in self.parent.coord_data_model.m_datas:
                 if mdata.coord_type == self.gc_cycle + 5 or mdata.coord_type == 9: # 9 is 5
-                    qDebug("Removing mdata: " + str(mdata.position) + ", with type: " + str(mdata.coord_type))
+                    qDebug("Removing mdata: %s, with type: %s" % (mdata.position, mdata.coord_type))
                     self.parent.coord_data_model.m_datas.remove(mdata)
                     break
             self.parent.coords_for_geofence.gc_changed.emit()
             self.gc_cycle = self.gc_cycle + 1
-            qDebug("next Gc cycle: " + str(self.gc_cycle))
+            qDebug("next Gc cycle: %s" % self.gc_cycle)
         self.parent.coord_data_model.m_datas.append(data)
         self.parent.coord_data_model.layoutChanged.emit()
 
-        qDebug("Pressed the mouse button {} in coordinates {} {} {}".format(button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
+        qDebug("Pressed the mouse button %s in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
 
 ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
 
@@ -176,10 +176,9 @@ class MapWidget(QQuickWidget):
         self.setSource("qml/map_widget.qml")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 
-    def update_plane_data(self):
+    def update_plane_data(self, our_team_number: int, last_server_response: TelemetryResponseData):
         self.plane_data_model.m_datas.clear()
-        our_team_number: int = TELEMETRY_DATA.takim_numarasi
-        for uav in SERVER_TELEMETRY_RESPONSE.konumBilgileri:
+        for uav in last_server_response.konumBilgileri:
             # TODO: Add types to uav
             plane_type: int
             if our_team_number == uav.takim_numarasi:

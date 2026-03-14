@@ -1,7 +1,7 @@
 import struct
 
 import lz4.block
-from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt
+from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
 from PySide6.QtWidgets import QWidget, QLabel
@@ -16,7 +16,7 @@ class CameraWidget(QLabel):
         QLabel.__init__(self, parent=parent)
 
         self.reconnect_timer = QTimer(self)
-        self.udpSocket = QUdpSocket(self)
+        self.udpSocket = QUdpSocket()
         self.udpSocket.readyRead.connect(self.readPendingDatagrams)
         self.udpSocket.errorOccurred.connect(self.error_happened_in_socket)
         self.connection_thread = QThread(self)
@@ -26,11 +26,11 @@ class CameraWidget(QLabel):
         self.connection_thread.start()
 
     def resizeEvent(self, event, /):
-        if event.size().height() == 0:
+        if event.size().height() == 0 or event.size().width() == 0: # Widget should be hidden, for some reason hide and show does not work on qsplitter
             if self.connection_thread.isRunning():
                 self.connection_thread.quit()
                 self.connection_thread.wait()
-                qInfo("Thread ended")
+                qDebug("Thread ended")
         else:
             if not self.connection_thread.isRunning():
                 self.connection_thread.start()
