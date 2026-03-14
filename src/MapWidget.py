@@ -5,7 +5,7 @@ from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget
 from pymavlink.mavutil import mavfile
 
-from src.ServerConnection import TelemetryResponseData
+from src.ServerConnection import TelemetryResponseData, ServerAdsData
 
 
 class PlaneData:
@@ -64,6 +64,33 @@ class SpecialCoordsDataModel(QAbstractListModel):
         position: int = Qt.ItemDataRole.UserRole + 1
         coord_type: int = Qt.ItemDataRole.UserRole + 2
         return {position: QByteArray(b"position"), coord_type: QByteArray(b"coord_type")}
+
+class AdsData:
+    position: QGeoCoordinate
+    size: float
+
+class AdsDataModel(QAbstractListModel):
+    m_datas: list[AdsData] = []
+
+    def data(self, index, /, role=...):
+        if (not index.isValid()) or index.row() < 0 or index.row() >= len(self.m_datas):
+            return None
+        data = self.m_datas[index.row()]
+        if role == Qt.ItemDataRole.UserRole + 1:
+            return data.position
+        if role == Qt.ItemDataRole.UserRole + 2:
+            return data.size
+        return None
+
+    def rowCount(self, /, parent=...):
+        if parent.isValid():
+            return 0
+        return len(self.m_datas)
+
+    def roleNames(self, /) -> dict[int, QByteArray]:
+        position: int = Qt.ItemDataRole.UserRole + 1
+        size: int = Qt.ItemDataRole.UserRole + 2
+        return {position: QByteArray(b"position"), size: QByteArray(b"size")}
 
 class ModelHelper:
     @Slot(QAbstractItemModel, int, str)
@@ -160,6 +187,7 @@ class MapWidget(QQuickWidget):
     coords_for_geofence: GeofenceData = None
     mouse_input_handler: MouseInputHandler
     mavlink_connection: mavfile | None = None
+    ads_data_model: AdsDataModel
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
@@ -167,10 +195,12 @@ class MapWidget(QQuickWidget):
         self.coord_data_model = SpecialCoordsDataModel()
         self.mouse_input_handler = MouseInputHandler(self)
         self.coords_for_geofence = GeofenceData(self)
+        self.ads_data_model = AdsDataModel()
 
         self.engine().rootContext().setContextProperty("plane_data_model", self.plane_data_model)
         self.engine().rootContext().setContextProperty("coord_data_model", self.coord_data_model)
         self.engine().rootContext().setContextProperty("coords_for_geofence", self.coords_for_geofence)
+        self.engine().rootContext().setContextProperty("ads_data_model", self.ads_data_model)
         self.engine().rootContext().setContextProperty("mouseInputHandler", self.mouse_input_handler)
         self.engine().rootContext().setContextProperty("very_internal_data_helper", ModelHelper())
         self.setSource("qml/map_widget.qml")
@@ -187,3 +217,17 @@ class MapWidget(QQuickWidget):
                 plane_type = 1
             self.plane_data_model.m_datas.append(PlaneData(QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type))
         self.plane_data_model.layoutChanged.emit()
+
+    def update_plane_data_without_server(self, pos: QGeoCoordinate):
+        self.plane_data_model.m_datas.clear()
+        self.plane_data_model.m_datas.append(PlaneData(pos, 0))
+        self.plane_data_model.layoutChanged.emit()
+
+    def update_ads_data(self, ads_list: list[ServerAdsData]):
+        self.ads_data_model.m_datas.clear()
+        for ads in ads_list:
+            data: AdsData = AdsData()
+            data.position = QGeoCoordinate(ads.hssEnlem, ads.hssBoylam)
+            data.size = ads.hssYariCap
+            self.ads_data_model.m_datas.append(data)
+        self.ads_data_model.layoutChanged.emit()

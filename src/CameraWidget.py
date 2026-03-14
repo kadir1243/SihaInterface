@@ -144,7 +144,12 @@ class CameraWidget(QLabel):
 
     def bindSocket(self):
         if self.connection_thread:
-            qDebug("Connection Thread already started")
+            if not self.connection_thread.isRunning():
+                qWarning("Camera thread is not running but thought as running? Trying to restart thread")
+                self.closeSocket()
+                self.bindSocket()
+                return
+            qDebug("Camera Connection Thread already started")
             return
         self.socketWorker = SocketWrapper(self)
         self.connection_thread = QThread(self)
@@ -155,14 +160,15 @@ class CameraWidget(QLabel):
         self.connection_thread.start()
 
     def closeSocket(self):
-        if not self.connection_thread:
-            qDebug("Connection Thread already closed")
+        if not self.connection_thread or not self.connection_thread.isRunning():
+            self.connection_thread = None
+            qDebug("Camera Connection Thread already closed")
             return
         self.connection_thread.quit()
         self.connection_thread.wait()
         self.connection_thread = None
         self.socketWorker = None
-        qDebug("Closed Connection Thread")
+        qDebug("Closed Camera Connection Thread")
 
     def start_reconnect_timer(self):
         self.reconnect_timer.start()

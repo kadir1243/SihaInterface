@@ -114,3 +114,26 @@ def get_kamikaze_coords(target_address: str) -> QrCoords:
     d.qrEnlem = data.get("qrEnlem")
     d.qrBoylam = data.get("qrBoylam")
     return d
+
+class ServerAdsData:
+    id: int
+    hssEnlem: float
+    hssBoylam: float
+    hssYariCap: float
+
+def get_ads(target_address: str) -> list[ServerAdsData]:
+    if not target_address.startswith("http"):
+        target_address = "http://" + target_address
+    r: Response = requests.get(target_address + "/api/hss_koordinatlari")
+    r.raise_for_status()
+    data = r.json()
+
+    ads_list: list[ServerAdsData] = list()
+    for d in data["hss_koordinat_bilgileri"]:
+        data: ServerAdsData = ServerAdsData()
+        data.id = d["id"]
+        data.hssEnlem = d["hssEnlem"]
+        data.hssBoylam = d["hssBoylam"]
+        data.hssYariCap = d["hssYaricap"]
+        ads_list.append(data)
+    return ads_list

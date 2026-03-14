@@ -122,7 +122,19 @@ Item {
             id: geofence
             color: "#32cd32FF"
             path: [gc1, gc2, gc3, gc4]
-
         }
+        MapItemView {
+            model: ads_data_model
+            delegate: MapCircle {
+                id: item2
+                property var position: model.position
+                property var size: model.size
+                center: position
+                opacity: 0.5
+                radius: size
+                color: 'red'
+            }
+        }
+
     }
 }

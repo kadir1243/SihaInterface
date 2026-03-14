@@ -15,7 +15,7 @@ from src.MapWidget import ZERO_GEO_COORDS
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
-    get_kamikaze_coords, TelemetryData, TelemetryResponseData
+    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads
 from src.ServerConnectionInterface import ServerConnectionInterface
 from ui_files_python.siha_interface import Ui_MainWindow
 
@@ -223,6 +223,14 @@ class MainWindow(QMainWindow):
         self.server_connection.telemetry_timer.setInterval(500)
         self.server_connection.telemetry_timer.timeout.connect(self.__send_telemetry)
         self.ui.arm_mode.currentIndexChanged.connect(self.__setArmStatus)
+        self.ui.refresh_ads.clicked.connect(self.__refresh_ads)
+
+    def __refresh_ads(self):
+        if not self.server_connection.ip:
+            return
+
+        self.ui.map_view.update_ads_data(get_ads(self.server_connection.ip + ":" + str(self.server_connection.port)))
+
 
     last_mode_set_by_user: int = -1
 
