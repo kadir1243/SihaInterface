@@ -1,7 +1,7 @@
 import struct
 
 import lz4.block
-from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject
+from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
 from PySide6.QtWidgets import QWidget, QLabel
@@ -9,10 +9,12 @@ from PySide6.QtWidgets import QWidget, QLabel
 class SocketWrapper(QObject):
     socket: QUdpSocket | None = None
     parentWidget: CameraWidget
+    update_camera_in_ui: Signal = Signal(QPixmap)
 
     def __init__(self, parentWidget: CameraWidget):
         super().__init__()
         self.parentWidget = parentWidget
+        self.update_camera_in_ui.connect(lambda img: self.parentWidget.setPixmap(img.scaled(self.parentWidget.size(), Qt.AspectRatioMode.KeepAspectRatio)))
 
     # My Internal Server Code
     #def split_bylen(item, maxlen):  # I don't remember where i copied this from, but thanks for answer in stackoverflow :D
@@ -103,7 +105,7 @@ class SocketWrapper(QObject):
                     self.amount_of_parts_received = 0
                     continue
                 img = QImage(lz4.block.decompress(blob), 640, 480, QImage.Format.Format_RGB888)
-                self.parentWidget.setPixmap(QPixmap.fromImageInPlace(img).scaled(self.parentWidget.size(), Qt.AspectRatioMode.KeepAspectRatio))
+                self.update_camera_in_ui.emit(QPixmap.fromImageInPlace(img))
                 self.frame_data_map.clear()
                 self.amount_of_parts_received = 0
     def error_happened_in_socket(self, error: QAbstractSocket.SocketError):
@@ -124,13 +126,21 @@ class CameraWidget(QLabel):
         self.reconnect_timer = QTimer(self)
 
     def resizeEvent(self, event, /):
-        if event.size().height() == 0 or event.size().width() == 0: # Widget should be hidden, for some reason hide and show does not work on qsplitter
+        if event.size().height() == 0 or event.size().width() == 0: # Widget should be hidden, for some reason hide and show does not get called on qsplitter
             if self.connection_thread:
-                self.close()
+                self.closeSocket()
         else:
             if not self.connection_thread:
                 self.bindSocket()
         super().resizeEvent(event)
+
+    def hideEvent(self, event, /):
+        super().hideEvent(event)
+        self.closeSocket()
+
+    def showEvent(self, event, /):
+        super().showEvent(event)
+        self.bindSocket()
 
     def bindSocket(self):
         if self.connection_thread:
@@ -144,7 +154,7 @@ class CameraWidget(QLabel):
         self.socketWorker.moveToThread(self.connection_thread)
         self.connection_thread.start()
 
-    def close(self):
+    def closeSocket(self):
         if not self.connection_thread:
             qDebug("Connection Thread already closed")
             return
