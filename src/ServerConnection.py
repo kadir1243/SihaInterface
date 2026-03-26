@@ -92,7 +92,14 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
         data = r.json()
         d: TelemetryResponseData = TelemetryResponseData()
         d.sunucusaati = data.get("sunucusaati")
-        # TODO: I need to write that
+        uav_s = list()
+        for s in d["konumBilgileri"]:
+            data: TelemetryResponseUavData = TelemetryResponseUavData()
+            data.iha_enlem = s["iha_enlem"]
+            data.iha_boylam = s["iha_boylam"]
+            uav_s.append(data)
+        d.konumBilgileri = uav_s
+        # FIXME: I don't need any other data for now, i will add it when i needed
         return d
     except ConnectionError as e:
         global SERVER_IS_UNREACHABLE_COUNTER

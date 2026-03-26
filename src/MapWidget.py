@@ -1,3 +1,5 @@
+import math
+
 from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, QAbstractItemModel, \
     Property, Signal
 from PySide6.QtPositioning import QGeoCoordinate
@@ -11,9 +13,11 @@ from src.ServerConnection import TelemetryResponseData, ServerAdsData
 class PlaneData:
     position: QGeoCoordinate
     plane_type: int # 0 for blue, 1 for red, 2 for green, 3 for yellow
-    def __init__(self, position: QGeoCoordinate, plane_type: int):
+    rotation: float
+    def __init__(self, position: QGeoCoordinate, plane_type: int, rotation: float):
         self.position = position
         self.plane_type = plane_type
+        self.rotation = rotation
 
 class PlaneDataModel(QAbstractListModel):
     m_datas: list[PlaneData] = []
@@ -26,6 +30,8 @@ class PlaneDataModel(QAbstractListModel):
             return data.position
         if role == Qt.ItemDataRole.UserRole + 2: # plane_type
             return data.plane_type
+        if role == Qt.ItemDataRole.UserRole + 3: # rotation
+            return data.rotation
         return None
 
     def rowCount(self, /, parent=...):
@@ -36,7 +42,8 @@ class PlaneDataModel(QAbstractListModel):
     def roleNames(self, /) -> dict[int, QByteArray]:
         position: int = Qt.ItemDataRole.UserRole + 1
         plane_type: int = Qt.ItemDataRole.UserRole + 2
-        return {position: QByteArray(b"position"), plane_type: QByteArray(b"plane_type")}
+        rotation: int = Qt.ItemDataRole.UserRole + 3
+        return {position: QByteArray(b"position"), plane_type: QByteArray(b"plane_type"), rotation: QByteArray(b"rotation")}
 
 class SpecialCoordsData:
     position: QGeoCoordinate
@@ -102,6 +109,13 @@ class ModelHelper:
 
         return None
 
+def distance(coord1: QGeoCoordinate, coord2: QGeoCoordinate) -> float:
+    x1 = coord1.latitude()
+    x2 = coord2.latitude()
+    y1 = coord1.longitude()
+    y2 = coord2.longitude()
+    return math.sqrt(math.pow(x1 - x2, 2) + math.pow(y1 - y2, 2))
+
 class MouseInputHandler(QObject):
     parent: MapWidget
     gc_cycle: int = 0
@@ -114,6 +128,8 @@ class MouseInputHandler(QObject):
         if not coordinate.isValid():
             qWarning("Invalid mouse input coordinate.")
             return
+        qDebug("Pressed the mouse button %s in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
+
         data: SpecialCoordsData = SpecialCoordsData()
         data.position = coordinate
         match button:
@@ -121,6 +137,13 @@ class MouseInputHandler(QObject):
                 data.coord_type = 1
             case Qt.MouseButton.RightButton.value:
                 data.coord_type = 2
+                for m_data in self.parent.user_ads_data_model.m_datas:
+                    d = distance(coordinate, m_data.position) * 100000
+                    qDebug("Distance: %s, radius: %s" % (d, m_data.size))
+                    if d <= m_data.size:
+                        self.parent.user_ads_data_model.m_datas.remove(m_data)
+                        self.parent.user_ads_data_model.layoutChanged.emit()
+                        return # Remove ads functionality
             case Qt.MouseButton.MiddleButton.value:
                 data.coord_type = self.gc_cycle + 5
             case _:
@@ -149,8 +172,6 @@ class MouseInputHandler(QObject):
             qDebug("next Gc cycle: %s" % self.gc_cycle)
         self.parent.coord_data_model.m_datas.append(data)
         self.parent.coord_data_model.layoutChanged.emit()
-
-        qDebug("Pressed the mouse button %s in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
 
 ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
 
@@ -187,7 +208,8 @@ class MapWidget(QQuickWidget):
     coords_for_geofence: GeofenceData = None
     mouse_input_handler: MouseInputHandler
     mavlink_connection: mavfile | None = None
-    ads_data_model: AdsDataModel
+    server_ads_data_model: AdsDataModel
+    user_ads_data_model: AdsDataModel
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
@@ -195,12 +217,14 @@ class MapWidget(QQuickWidget):
         self.coord_data_model = SpecialCoordsDataModel()
         self.mouse_input_handler = MouseInputHandler(self)
         self.coords_for_geofence = GeofenceData(self)
-        self.ads_data_model = AdsDataModel()
+        self.server_ads_data_model = AdsDataModel()
+        self.user_ads_data_model = AdsDataModel()
 
         self.engine().rootContext().setContextProperty("plane_data_model", self.plane_data_model)
         self.engine().rootContext().setContextProperty("coord_data_model", self.coord_data_model)
         self.engine().rootContext().setContextProperty("coords_for_geofence", self.coords_for_geofence)
-        self.engine().rootContext().setContextProperty("ads_data_model", self.ads_data_model)
+        self.engine().rootContext().setContextProperty("server_ads_data_model", self.server_ads_data_model)
+        self.engine().rootContext().setContextProperty("user_ads_data_model", self.user_ads_data_model)
         self.engine().rootContext().setContextProperty("mouseInputHandler", self.mouse_input_handler)
         self.engine().rootContext().setContextProperty("very_internal_data_helper", ModelHelper())
         self.setSource("qml/map_widget.qml")
@@ -215,19 +239,23 @@ class MapWidget(QQuickWidget):
                 plane_type = 0
             else:
                 plane_type = 1
-            self.plane_data_model.m_datas.append(PlaneData(QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type))
+            self.plane_data_model.m_datas.append(PlaneData(QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, uav.iha_yatis))
         self.plane_data_model.layoutChanged.emit()
 
-    def update_plane_data_without_server(self, pos: QGeoCoordinate):
+    def update_plane_data_without_server(self, pos: QGeoCoordinate, rotation: float):
         self.plane_data_model.m_datas.clear()
-        self.plane_data_model.m_datas.append(PlaneData(pos, 0))
+        self.plane_data_model.m_datas.append(PlaneData(pos, 0, rotation))
         self.plane_data_model.layoutChanged.emit()
 
-    def update_ads_data(self, ads_list: list[ServerAdsData]):
-        self.ads_data_model.m_datas.clear()
+    def update_server_ads_data(self, ads_list: list[ServerAdsData]):
+        self.server_ads_data_model.m_datas.clear()
         for ads in ads_list:
             data: AdsData = AdsData()
             data.position = QGeoCoordinate(ads.hssEnlem, ads.hssBoylam)
             data.size = ads.hssYariCap
-            self.ads_data_model.m_datas.append(data)
-        self.ads_data_model.layoutChanged.emit()
+            self.server_ads_data_model.m_datas.append(data)
+        self.server_ads_data_model.layoutChanged.emit()
+
+    def update_ads_data(self, ads: AdsData):
+        self.user_ads_data_model.m_datas.append(ads)
+        self.user_ads_data_model.layoutChanged.emit()

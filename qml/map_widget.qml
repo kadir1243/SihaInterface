@@ -60,6 +60,7 @@ Item {
                 // begin configuration
                 property var position: model.position
                 property var plane_type: model.plane_type
+                property var rotation: model.rotation
                 coordinate: position;
                 // end of configuration
                 anchorPoint.x: plane_image.width/2
@@ -78,7 +79,7 @@ Item {
                         }
                         return "ErrorNoPlaneImageForPlaneType"
                     }
-                    // TODO: add rotation
+                    transform: Rotation { angle: rotation }
                     source: getImage()
                     width: 20
                     height: 20
@@ -124,7 +125,7 @@ Item {
             path: [gc1, gc2, gc3, gc4]
         }
         MapItemView {
-            model: ads_data_model
+            model: server_ads_data_model
             delegate: MapCircle {
                 id: item2
                 property var position: model.position
@@ -135,6 +136,17 @@ Item {
                 color: 'red'
             }
         }
-
+        MapItemView {
+            model: user_ads_data_model
+            delegate: MapCircle {
+                id: item4
+                property var position: model.position
+                property var size: model.size
+                center: position
+                opacity: 0.5
+                radius: size
+                color: 'yellow'
+            }
+        }
     }
 }

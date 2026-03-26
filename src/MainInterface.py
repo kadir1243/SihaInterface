@@ -11,7 +11,8 @@ from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
-from src.MapWidget import ZERO_GEO_COORDS
+from src.AddADSInterface import AddADSInterface
+from src.MapWidget import ZERO_GEO_COORDS, AdsData
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
@@ -72,6 +73,12 @@ class TrackableDataUpdate:
         if mainwindow.ui.arm_mode.currentIndex() != arm:
             mainwindow.last_arm_change_was_from_uav = True
             mainwindow.ui.arm_mode.setCurrentIndex(arm)
+        index: int = packet.custom_mode
+        if index > 9:
+            index = index - 1  # FIXME: I hardcoded index after 9
+        if mainwindow.ui.fly_mode_combobox.currentIndex() != index:
+            mainwindow.last_mode_change_was_from_uav = True
+            mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
 
 TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
 
@@ -109,6 +116,37 @@ class TrackableDataEnum(Enum):
             if e.value[0] == i:
                 return e
         return None
+
+class UAV_Modes(Enum):
+    MANUAL = ('MANUAL', 0)
+    CIRCLE = ('CIRCLE', 1)
+    STABILIZE = ('STABILIZE', 2)
+    TRAINING = ('TRAINING', 3)
+    ACRO = ('ACRO', 4)
+    FLY_BY_WIRE_A = ('FBWA', 5)
+    FLY_BY_WIRE_B = ('FBWB', 6)
+    CRUISE = ('CRUISE', 7)
+    AUTOTUNE = ('AUTOTUNE', 8)
+    AUTO = ('AUTO', 10)
+    ReturnToLaunch = ('RTL', 11)
+    LOITER = ('LOITER', 12)
+    TAKEOFF = ('TAKEOFF', 13)
+    AVOID_ADSB = ('AVOID_ADSB', 14)
+    GUIDED = ('GUIDED', 15)
+    INITIALISING = ('INITIALISING', 16)
+    QSTABILIZE = ('QSTABILIZE', 17)
+    QHOVER = ('QHOVER', 18)
+    QLOITER = ('QLOITER', 19)
+    QLAND = ('QLAND', 20)
+    QRTL = ('QRTL', 21)
+    QAUTOTUNE = ('QAUTOTUNE', 22)
+    QACRO = ('QACRO', 23)
+    THERMAL = ('THERMAL', 24)
+    LOITERALTQLAND = ('LOITERALTQLAND', 25)
+
+    @staticmethod
+    def list() -> list[UAV_Modes]:
+        return list(map(lambda c: c, UAV_Modes))
 
 class UavConnection:
     connection_type: ConnectionType | None = None
@@ -179,6 +217,7 @@ class MainWindow(QMainWindow):
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
     geofence_dialog: SetGeofenceInterface | None = None
+    add_ads_dialog: AddADSInterface | None = None
     server_connection: ServerConnection = ServerConnection()
     mavlink_connection: mavfile
     force_sending_telemetry: bool = False
@@ -187,11 +226,18 @@ class MainWindow(QMainWindow):
     next_telemetry: TelemetryData = TelemetryData()
     last_server_telemetry_response: TelemetryResponseData = TelemetryResponseData()
     last_arm_change_was_from_uav: bool = False
+    last_mode_change_was_from_uav: bool = False
+    plane_on_map_update_timer: QTimer = QTimer(interval=500)
 
     def __init__(self):
         QMainWindow.__init__(self)
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+
+        mode: UAV_Modes
+        for mode in UAV_Modes.list():
+            self.ui.fly_mode_combobox.insertItem(mode.value[1], mode.value[0])
+        self.ui.fly_mode_combobox.setCurrentIndex(-1)
 
         self.ui.actionConfigurate_UAV.triggered.connect(self._actionConfigurate_UAV)
         self.ui.actionConfigurateServer.triggered.connect(self._actionConfigurateServer)
@@ -224,13 +270,35 @@ class MainWindow(QMainWindow):
         self.server_connection.telemetry_timer.timeout.connect(self.__send_telemetry)
         self.ui.arm_mode.currentIndexChanged.connect(self.__setArmStatus)
         self.ui.refresh_ads.clicked.connect(self.__refresh_ads)
+        self.ui.add_ads.clicked.connect(self.__add_ads_button_clicked)
+        self.plane_on_map_update_timer.timeout.connect(self.__update_plane_on_map_without_server)
+
+    def __add_ads_button_clicked(self):
+        if not (self.add_ads_dialog is None):
+            return
+        self.add_ads_dialog = AddADSInterface(self)
+        self.add_ads_dialog.show()
+        self.add_ads_dialog.ui.add_new.clicked.connect(self.__add_ads_add_new_button_clicked)
+        self.add_ads_dialog.ui.buttons.clicked.connect(self.__close_add_ads_dialog)
+
+    def __close_add_ads_dialog(self):
+        self.add_ads_dialog.close()
+        self.add_ads_dialog = None
+
+    def __add_ads_add_new_button_clicked(self):
+        radius = float(self.add_ads_dialog.ui.ads_radius.text())
+        latitude = float(self.add_ads_dialog.ui.ads_latitude.text())
+        longitude = float(self.add_ads_dialog.ui.ads_longitude.text())
+        data = AdsData()
+        data.position = QGeoCoordinate(latitude, longitude)
+        data.size = radius
+        self.ui.map_view.update_ads_data(data)
 
     def __refresh_ads(self):
         if not self.server_connection.ip:
             return
 
-        self.ui.map_view.update_ads_data(get_ads(self.server_connection.ip + ":" + str(self.server_connection.port)))
-
+        self.ui.map_view.update_server_ads_data(get_ads(self.server_connection.ip + ":" + str(self.server_connection.port)))
 
     last_mode_set_by_user: int = -1
 
@@ -315,8 +383,14 @@ class MainWindow(QMainWindow):
         self.force_sending_telemetry = state
 
     def _change_index(self, index: int):
-        # TODO: Is some packet needed for mavlink?
-        self.next_telemetry.iha_otonom = index
+        if self.last_mode_change_was_from_uav:
+            self.last_mode_change_was_from_uav = False
+            return
+        if index > 8:
+            index = index + 1
+        qDebug("Sending mode with index: %s" % index)
+        self.mavlink_connection.set_mode_apm(index)
+        self.next_telemetry.iha_otonom = index == 10
 
     def add_to_watch_list(self, e: TrackableDataEnum):
         if not TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].isEnabled():
@@ -495,6 +569,8 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
         self.ui.arm_mode.setEnabled(True)
+        if self.server_connection.ip is None:
+            self.plane_on_map_update_timer.start()
 
     def _uav_disconnect(self, button: QPushButton, dialog: FightingUAVConnectionInterface):
         if self.uav_connection.connection_type is None:
@@ -534,8 +610,17 @@ class MainWindow(QMainWindow):
             qWarning("Can not connect to server: %s" % e)
             dialog.ui.invalid_input_error_label.show()
             self.ui.server_connection_warning.show()
+            self.server_connection.ip = None
             return
+        if self.plane_on_map_update_timer.isActive():
+            self.plane_on_map_update_timer.stop()
         self.server_connection.telemetry_timer.start()
+
+    def __update_plane_on_map_without_server(self):
+        if self.uav_connection.connection_type is None or self.server_connection.ip is not None:
+            self.plane_on_map_update_timer.stop()
+            return
+        self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam), self.next_telemetry.iha_yatis)
 
     def __send_telemetry(self):
         if self.uav_connection.connection_type is None and not self.force_sending_telemetry:
