@@ -12,13 +12,14 @@ from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_atti
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
+from src.ColorSelectorInterface import ColorSelectorInterface
 from src.MapWidget import ZERO_GEO_COORDS, AdsData
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
     get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads
 from src.ServerConnectionInterface import ServerConnectionInterface
-from ui_files_python.siha_interface import Ui_MainWindow
+from ui_files_python.uav_interface import Ui_MainWindow
 
 class TrackableDataUpdate:
     @staticmethod
@@ -216,6 +217,7 @@ class MainWindow(QMainWindow):
     uav_connection: UavConnection = UavConnection()
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
+    color_selector_dialog: ColorSelectorInterface | None = None
     geofence_dialog: SetGeofenceInterface | None = None
     add_ads_dialog: AddADSInterface | None = None
     server_connection: ServerConnection = ServerConnection()
@@ -241,6 +243,7 @@ class MainWindow(QMainWindow):
 
         self.ui.actionConfigurate_UAV.triggered.connect(self._actionConfigurate_UAV)
         self.ui.actionConfigurateServer.triggered.connect(self._actionConfigurateServer)
+        self.ui.actionSet_Colors.triggered.connect(self._actionConfigurateSetColors)
 
         add_to_watch_menu: QMenu = QMenu(parent=self)
 
@@ -441,6 +444,12 @@ class MainWindow(QMainWindow):
         self.server_connection_dialog.ui.connect.clicked.connect(lambda button: self._server_connect(button, self.server_connection_dialog))
         self.server_connection_dialog.ui.disconnect.clicked.connect(lambda button: self._server_disconnect())
         self.server_connection_dialog.finished.connect(lambda e: self._reset_dialog(False))
+
+    def _actionConfigurateSetColors(self):
+        if self.color_selector_dialog is not None:
+            return
+        self.color_selector_dialog = ColorSelectorInterface(self)
+        self.color_selector_dialog.show()
 
     def _actionConfigurate_UAV(self):
         if self.uav_connection_dialog is not None:

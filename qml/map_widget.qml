@@ -65,6 +65,7 @@ Item {
                 // end of configuration
                 anchorPoint.x: plane_image.width/2
                 anchorPoint.y: plane_image.height/2
+                autoFadeIn: false
                 sourceItem: Image {
                     id: plane_image
                     function getImage() {
@@ -79,10 +80,16 @@ Item {
                         }
                         return "ErrorNoPlaneImageForPlaneType"
                     }
-                    transform: Rotation { angle: rotation }
+                    transform: Rotation {
+                        angle: rotation
+                        origin.x: plane_image.width / 2
+                        origin.y: plane_image.height / 2
+                    }
                     source: getImage()
-                    width: 20
-                    height: 20
+                    width: 32
+                    height: 32
+                    horizontalAlignment: Image.AlignHCenter
+                    verticalAlignment: Image.AlignVCenter
                 }
             }
         }
