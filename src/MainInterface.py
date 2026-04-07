@@ -156,6 +156,19 @@ class UAV_Modes(Enum):
     def list() -> list[UAV_Modes]:
         return list(map(lambda c: c, UAV_Modes))
 
+class SupportedLanguages(Enum):
+    English = (0, lambda: QCoreApplication.translate("SupportedLanguages", "English", None), QLocale.Language.English, QLocale.Country.UnitedStates)
+    Turkish = (1, lambda: QCoreApplication.translate("SupportedLanguages", "Turkish", None), QLocale.Language.Turkish, QLocale.Country.Turkey)
+    @staticmethod
+    def from_id(i: int) -> SupportedLanguages:
+        e: SupportedLanguages
+        for e in SupportedLanguages:
+            if e.value[0] == i:
+                return e
+        return None
+
+LANGUAGE_ACTIONS: dict[int, QAction] = {}
+
 class UavConnection:
     connection_type: ConnectionType | None = None
     serial_port: int | None = None
@@ -273,6 +286,16 @@ class MainWindow(QMainWindow):
             if e.value[5]:
                 self.add_to_watch_list(e)
 
+        for lang in SupportedLanguages:
+            lang_id = lang.value[0]
+            action: QAction = QAction(lang.value[1](), self)
+            action.setObjectName(str(lang_id))
+            action.setCheckable(True)
+            action.triggered.connect(partial(self.change_lang_to, lang_id))
+            LANGUAGE_ACTIONS[lang_id] = action
+            self.ui.menuChange_Language.addAction(action)
+        LANGUAGE_ACTIONS[0].setChecked(True)
+
         self.ui.remove_from_watch.clicked.connect(self.__remove_from_watch_signal)
         self.ui.watch_list.setColumnHidden(0, True) # hide id column
         self.ui.fly_mode_combobox.currentIndexChanged.connect(self._change_index)
@@ -287,7 +310,6 @@ class MainWindow(QMainWindow):
         self.ui.refresh_ads.clicked.connect(self.__refresh_ads)
         self.ui.add_ads.clicked.connect(self.__add_ads_button_clicked)
         self.plane_on_map_update_timer.timeout.connect(self.__update_plane_on_map_without_server)
-        self.ui.actionSet_Language.triggered.connect(self.change_lang_clicked)
 
     def retranslateWatcher(self):
         length: int = self.ui.watch_list.rowCount()
@@ -313,33 +335,12 @@ class MainWindow(QMainWindow):
             if dialog is not None:
                 dialog.ui.retranslateUi(dialog)
 
-    change_lang_dialog: QDialog = None
-
-    def change_lang_clicked(self):
-        if self.change_lang_dialog is not None:
-            return
-        self.change_lang_dialog = QDialog(self)
-        self.change_lang_dialog.setWindowTitle("Change Language")
-        combobox = QComboBox(self.change_lang_dialog)
-        combobox.insertItem(0, "English")
-        combobox.insertItem(1, "Turkish")
-        combobox.setCurrentIndex(self.current_lang)
-        combobox.currentIndexChanged.connect(self.change_lang_to)
-        self.change_lang_dialog.show()
-        self.change_lang_dialog.finished.connect(self.close_change_lang_dialog)
-
     translator: QTranslator
     def change_lang_to(self, index: int):
+        slang = SupportedLanguages.from_id(index)
+        LANGUAGE_ACTIONS[self.current_lang].setChecked(False)
         self.current_lang = index
-        lang: QLocale.Language
-        territory: QLocale.Country
-        if index == 0:
-            lang = QLocale.Language.English
-            territory = QLocale.Country.UnitedStates
-        elif index == 1:
-            lang = QLocale.Language.Turkish
-            territory = QLocale.Country.Turkey
-        locale: QLocale = QLocale(lang, territory)
+        locale: QLocale = QLocale(slang.value[2], slang.value[3])
         QLocale.setDefault(locale)
         QApplication.removeTranslator(self.translator)
         qDebug("Changing Language to %s" % locale.name())
@@ -348,16 +349,13 @@ class MainWindow(QMainWindow):
                 self.ui.retranslateUi(self)
                 self.retranslateWatcher()
                 self.retranslateOpenDialogs()
+                LANGUAGE_ACTIONS[index].setChecked(True)
+                for s_lang in SupportedLanguages:
+                    LANGUAGE_ACTIONS[s_lang.value[0]].setText(s_lang.value[1]())
             else:
                 qWarning("Could not install translator")
         else:
             qWarning("Could not load translation to %s!" % self.translator.language())
-        if self.change_lang_dialog is not None:
-            self.change_lang_dialog.close()
-            self.change_lang_dialog = None
-
-    def close_change_lang_dialog(self):
-        self.change_lang_dialog = None
 
     def __add_ads_button_clicked(self):
         if self.add_ads_dialog is not None:
