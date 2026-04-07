@@ -93,10 +93,12 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
         d: TelemetryResponseData = TelemetryResponseData()
         d.sunucusaati = data.get("sunucusaati")
         uav_s = list()
-        for s in d["konumBilgileri"]:
+        for s in data["konumBilgileri"]:
             data: TelemetryResponseUavData = TelemetryResponseUavData()
+            data.takim_numarasi = s["takim_numarasi"]
             data.iha_enlem = s["iha_enlem"]
             data.iha_boylam = s["iha_boylam"]
+            data.iha_yatis = s["iha_yatis"]
             uav_s.append(data)
         d.konumBilgileri = uav_s
         # FIXME: I don't need any other data for now, i will add it when i needed

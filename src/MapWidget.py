@@ -99,16 +99,6 @@ class AdsDataModel(QAbstractListModel):
         size: int = Qt.ItemDataRole.UserRole + 2
         return {position: QByteArray(b"position"), size: QByteArray(b"size")}
 
-class ModelHelper:
-    @Slot(QAbstractItemModel, int, str)
-    def data(self, model: QAbstractItemModel, row: int, userrole: str):
-        roleNames: dict[int, QByteArray] = model.roleNames()
-        for index, roleName in enumerate(roleNames):
-            if userrole == roleName:
-                return model.data(model.index(row, 0), index)
-
-        return None
-
 def distance(coord1: QGeoCoordinate, coord2: QGeoCoordinate) -> float:
     x1 = coord1.latitude()
     x2 = coord2.latitude()
@@ -226,7 +216,6 @@ class MapWidget(QQuickWidget):
         self.engine().rootContext().setContextProperty("server_ads_data_model", self.server_ads_data_model)
         self.engine().rootContext().setContextProperty("user_ads_data_model", self.user_ads_data_model)
         self.engine().rootContext().setContextProperty("mouseInputHandler", self.mouse_input_handler)
-        self.engine().rootContext().setContextProperty("very_internal_data_helper", ModelHelper())
         self.setSource("qml/map_widget.qml")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 
@@ -239,7 +228,7 @@ class MapWidget(QQuickWidget):
                 plane_type = 0
             else:
                 plane_type = 1
-            self.plane_data_model.m_datas.append(PlaneData(QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, uav.iha_yatis))
+            self.plane_data_model.m_datas.append(PlaneData(QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, (uav.iha_yatis * 4) + 180))
         self.plane_data_model.layoutChanged.emit()
 
     def update_plane_data_without_server(self, pos: QGeoCoordinate, rotation: float):

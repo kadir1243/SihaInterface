@@ -60,7 +60,7 @@ Item {
                 // begin configuration
                 property var position: model.position
                 property var plane_type: model.plane_type
-                property var rotation: model.rotation
+                property var rotation_: model.rotation // rotation is a member after qt 6.11
                 coordinate: position;
                 // end of configuration
                 anchorPoint.x: plane_image.width/2
@@ -70,18 +70,18 @@ Item {
                     id: plane_image
                     function getImage() {
                         if (plane_type === 0) {
-                            return "../ui_files/blue_plane.png"
+                            return "../ui_files/blue_plane.svg"
                         } else if (plane_type === 1) {
-                            return "../ui_files/red_plane.png"
+                            return "../ui_files/red_plane.svg"
                         } else if (plane_type === 2) {
-                            return "../ui_files/green_plane.png"
+                            return "../ui_files/green_plane.svg"
                         } else if (plane_type === 3) {
-                            return "../ui_files/yellow_plane.png"
+                            return "../ui_files/yellow_plane.svg"
                         }
                         return "ErrorNoPlaneImageForPlaneType"
                     }
                     transform: Rotation {
-                        angle: rotation
+                        angle: rotation_
                         origin.x: plane_image.width / 2
                         origin.y: plane_image.height / 2
                     }

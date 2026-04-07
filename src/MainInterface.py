@@ -2,10 +2,12 @@ import math
 from enum import Enum
 from functools import partial
 
-from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, Slot
+from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, Slot, \
+    QLocale, QTranslator, QCoreApplication
 from PySide6.QtGui import QAction
 from PySide6.QtPositioning import QGeoCoordinate
-from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu, QTableWidget
+from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu, QTableWidget, QDialog, \
+    QComboBox, QApplication
 from pymavlink import mavutil
 from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
     MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message
@@ -20,6 +22,11 @@ from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCo
     get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads
 from src.ServerConnectionInterface import ServerConnectionInterface
 from ui_files_python.uav_interface import Ui_MainWindow
+
+def to_degree(x: float) -> float:
+    if x < 0:
+        x = x + 2 * math.pi
+    return x * (180 / math.pi)
 
 class TrackableDataUpdate:
     @staticmethod
@@ -46,18 +53,18 @@ class TrackableDataUpdate:
         return str(packet.lat / 1e7)
     @staticmethod
     def update_yaw(mainwindow:MainWindow, packet: MAVLink_attitude_message) -> str:
-        yaw = math.degrees(packet.yaw)
-        mainwindow.next_telemetry.iha_yatis = yaw
+        yaw = to_degree(packet.yaw)
+        mainwindow.next_telemetry.iha_yatis = (yaw - 180) / 4
         return str(yaw)
     @staticmethod
     def update_pitch(mainwindow:MainWindow, packet: MAVLink_attitude_message) -> str:
-        pitch = math.degrees(packet.pitch)
+        pitch = to_degree(packet.pitch)
         mainwindow.next_telemetry.iha_yonelme = pitch
         return str(pitch)
     @staticmethod
     def update_roll(mainwindow:MainWindow, packet: MAVLink_attitude_message) -> str:
-        roll = math.degrees(packet.roll)
-        mainwindow.next_telemetry.iha_dikilme = roll
+        roll = to_degree(packet.roll)
+        mainwindow.next_telemetry.iha_dikilme = (roll - 180) / 4
         return str(roll)
     @staticmethod
     def update_gps_time(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
@@ -93,18 +100,18 @@ class TrackableDataPacketTimer(Enum):
 
 class TrackableDataEnum(Enum):
     # (id, name, update function, updater packet, is it telemetry data, is it in watch_list widget)
-    GROUND_SPEED = (0, "Ground Speed", TrackableDataUpdate.update_ground_speed, TrackableDataPacketTimer.VFR_HUD, False, True)
-    VELOCITY = (1, "Velocity", TrackableDataUpdate.update_velocity, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
-    ALTITUDE = (2, "Altitude", TrackableDataUpdate.update_altitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
-    YAW = (3, "Yaw", TrackableDataUpdate.update_yaw, TrackableDataPacketTimer.ATTITUDE, True, True)
-    PITCH = (4, "Pitch", TrackableDataUpdate.update_pitch, TrackableDataPacketTimer.ATTITUDE, True, True)
-    ROLL = (5, "Roll", TrackableDataUpdate.update_roll, TrackableDataPacketTimer.ATTITUDE, True, True)
-    AIR_SPEED = (6, "Air Speed", TrackableDataUpdate.update_air_speed, TrackableDataPacketTimer.VFR_HUD, True, True)
-    GPS_TIME = (7, "GPS Time", TrackableDataUpdate.update_gps_time, TrackableDataPacketTimer.GPS_RAW_INT, True, True)
-    LONGITUDE = (8, "Longitude", TrackableDataUpdate.update_longitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
-    LATITUDE = (9, "Latitude", TrackableDataUpdate.update_latitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
-    BATTERY_PERCENTAGE = (10, "Battery Percentage", TrackableDataUpdate.update_battery_percentage, TrackableDataPacketTimer.BATTERY_STATUS, True, True)
-    ARM_STATUS = (11, "Arm Status", TrackableDataUpdate.update_arm_status, TrackableDataPacketTimer.HEARTBEAT, False, False)
+    GROUND_SPEED = (0, lambda: QCoreApplication.translate("TrackableDataEnum", "Ground Speed", None), TrackableDataUpdate.update_ground_speed, TrackableDataPacketTimer.VFR_HUD, False, True)
+    VELOCITY = (1, lambda: QCoreApplication.translate("TrackableDataEnum", "Velocity", None), TrackableDataUpdate.update_velocity, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
+    ALTITUDE = (2, lambda: QCoreApplication.translate("TrackableDataEnum", "Altitude", None), TrackableDataUpdate.update_altitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
+    YAW = (3, lambda: QCoreApplication.translate("TrackableDataEnum", "Yaw", None), TrackableDataUpdate.update_yaw, TrackableDataPacketTimer.ATTITUDE, True, True)
+    PITCH = (4, lambda: QCoreApplication.translate("TrackableDataEnum", "Pitch", None), TrackableDataUpdate.update_pitch, TrackableDataPacketTimer.ATTITUDE, True, True)
+    ROLL = (5, lambda: QCoreApplication.translate("TrackableDataEnum", "Roll", None), TrackableDataUpdate.update_roll, TrackableDataPacketTimer.ATTITUDE, True, True)
+    AIR_SPEED = (6, lambda: QCoreApplication.translate("TrackableDataEnum", "Air Speed", None), TrackableDataUpdate.update_air_speed, TrackableDataPacketTimer.VFR_HUD, True, True)
+    GPS_TIME = (7, lambda: QCoreApplication.translate("TrackableDataEnum", "GPS Time", None), TrackableDataUpdate.update_gps_time, TrackableDataPacketTimer.GPS_RAW_INT, True, True)
+    LONGITUDE = (8, lambda: QCoreApplication.translate("TrackableDataEnum", "Longitude", None), TrackableDataUpdate.update_longitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
+    LATITUDE = (9, lambda: QCoreApplication.translate("TrackableDataEnum", "Latitude", None), TrackableDataUpdate.update_latitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
+    BATTERY_PERCENTAGE = (10, lambda: QCoreApplication.translate("TrackableDataEnum", "Battery Percentage", None), TrackableDataUpdate.update_battery_percentage, TrackableDataPacketTimer.BATTERY_STATUS, True, True)
+    ARM_STATUS = (11, lambda: QCoreApplication.translate("TrackableDataEnum", "Arm Status", None), TrackableDataUpdate.update_arm_status, TrackableDataPacketTimer.HEARTBEAT, False, False)
 
     @staticmethod
     def list() -> list[TrackableDataEnum]:
@@ -212,6 +219,8 @@ class MavlinkWorker(QObject):
                     for i in data_enum_values:
                         self.trigger_update_value(TrackableDataEnum.from_id(i), packet)
 
+SERVER_IS_UNREACHABLE_COUNTER = 0
+
 class MainWindow(QMainWindow):
     ui: Ui_MainWindow
     uav_connection: UavConnection = UavConnection()
@@ -230,9 +239,11 @@ class MainWindow(QMainWindow):
     last_arm_change_was_from_uav: bool = False
     last_mode_change_was_from_uav: bool = False
     plane_on_map_update_timer: QTimer = QTimer(interval=500)
+    current_lang: int = 0
 
     def __init__(self):
         QMainWindow.__init__(self)
+        self.translator = QTranslator()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
@@ -248,7 +259,8 @@ class MainWindow(QMainWindow):
         add_to_watch_menu: QMenu = QMenu(parent=self)
 
         for e in TrackableDataEnum.list():
-            action: QAction = QAction(text=e.value[1], parent=self)
+            action: QAction = QAction(text=e.value[1](), parent=self)
+            action.setObjectName(str(e.value[0]))
             action.triggered.connect(partial(self.add_to_watch_list, e))
             TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]] = action
             add_to_watch_menu.addAction(action)
@@ -275,17 +287,92 @@ class MainWindow(QMainWindow):
         self.ui.refresh_ads.clicked.connect(self.__refresh_ads)
         self.ui.add_ads.clicked.connect(self.__add_ads_button_clicked)
         self.plane_on_map_update_timer.timeout.connect(self.__update_plane_on_map_without_server)
+        self.ui.actionSet_Language.triggered.connect(self.change_lang_clicked)
+
+    def retranslateWatcher(self):
+        length: int = self.ui.watch_list.rowCount()
+        for i in range(length):
+            tde = TrackableDataEnum.from_id(int(self.ui.watch_list.item(i, 0).text()))
+
+            self.ui.watch_list.setItem(i, 1, QTableWidgetItem(tde.value[1]()))
+            if self.uav_connection.connection_type is None:
+                self.ui.watch_list.setItem(i, 3, QTableWidgetItem(QCoreApplication.translate("TrackableDataEnum", "Unknown", None)))
+        for e in TRACKABLE_DATA_ENUM_ACTIONS.values():
+            tde = TrackableDataEnum.from_id(int(e.objectName()))
+
+            e.setText(tde.value[1]())
+
+    def retranslateOpenDialogs(self):
+        dialogs = [self.uav_connection_dialog,
+                   self.server_connection_dialog,
+                   self.color_selector_dialog,
+                   self.geofence_dialog,
+                   self.add_ads_dialog]
+
+        for dialog in dialogs:
+            if dialog is not None:
+                dialog.ui.retranslateUi(dialog)
+
+    change_lang_dialog: QDialog = None
+
+    def change_lang_clicked(self):
+        if self.change_lang_dialog is not None:
+            return
+        self.change_lang_dialog = QDialog(self)
+        self.change_lang_dialog.setWindowTitle("Change Language")
+        combobox = QComboBox(self.change_lang_dialog)
+        combobox.insertItem(0, "English")
+        combobox.insertItem(1, "Turkish")
+        combobox.setCurrentIndex(self.current_lang)
+        combobox.currentIndexChanged.connect(self.change_lang_to)
+        self.change_lang_dialog.show()
+        self.change_lang_dialog.finished.connect(self.close_change_lang_dialog)
+
+    translator: QTranslator
+    def change_lang_to(self, index: int):
+        self.current_lang = index
+        lang: QLocale.Language
+        territory: QLocale.Country
+        if index == 0:
+            lang = QLocale.Language.English
+            territory = QLocale.Country.UnitedStates
+        elif index == 1:
+            lang = QLocale.Language.Turkish
+            territory = QLocale.Country.Turkey
+        locale: QLocale = QLocale(lang, territory)
+        QLocale.setDefault(locale)
+        QApplication.removeTranslator(self.translator)
+        qDebug("Changing Language to %s" % locale.name())
+        if self.translator.load(locale, "ui", "_", "ui_files/translations"):
+            if QApplication.installTranslator(self.translator):
+                self.ui.retranslateUi(self)
+                self.retranslateWatcher()
+                self.retranslateOpenDialogs()
+            else:
+                qWarning("Could not install translator")
+        else:
+            qWarning("Could not load translation to %s!" % self.translator.language())
+        if self.change_lang_dialog is not None:
+            self.change_lang_dialog.close()
+            self.change_lang_dialog = None
+
+    def close_change_lang_dialog(self):
+        self.change_lang_dialog = None
 
     def __add_ads_button_clicked(self):
-        if not (self.add_ads_dialog is None):
+        if self.add_ads_dialog is not None:
             return
         self.add_ads_dialog = AddADSInterface(self)
         self.add_ads_dialog.show()
         self.add_ads_dialog.ui.add_new.clicked.connect(self.__add_ads_add_new_button_clicked)
         self.add_ads_dialog.ui.buttons.clicked.connect(self.__close_add_ads_dialog)
+        self.add_ads_dialog.finished.connect(self.set_ads_dialog_to_none)
 
     def __close_add_ads_dialog(self):
         self.add_ads_dialog.close()
+        self.add_ads_dialog = None
+
+    def set_ads_dialog_to_none(self):
         self.add_ads_dialog = None
 
     def __add_ads_add_new_button_clicked(self):
@@ -393,7 +480,7 @@ class MainWindow(QMainWindow):
             index = index + 1
         qDebug("Sending mode with index: %s" % index)
         self.mavlink_connection.set_mode_apm(index)
-        self.next_telemetry.iha_otonom = index == 10
+        self.next_telemetry.iha_otonom = index == 10 if 1 else 0
 
     def add_to_watch_list(self, e: TrackableDataEnum):
         if not TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].isEnabled():
@@ -402,9 +489,9 @@ class MainWindow(QMainWindow):
         self.ui.watch_list.setRowCount(rowCount + 1)
 
         self.ui.watch_list.setItem(rowCount, 0, QTableWidgetItem(str(e.value[0])))
-        self.ui.watch_list.setItem(rowCount, 1, QTableWidgetItem(e.value[1]))
+        self.ui.watch_list.setItem(rowCount, 1, QTableWidgetItem(e.value[1]()))
         self.ui.watch_list.setItem(rowCount, 2, QTableWidgetItem(""))
-        self.ui.watch_list.setItem(rowCount, 3, QTableWidgetItem("Unknown"))
+        self.ui.watch_list.setItem(rowCount, 3, QTableWidgetItem(QCoreApplication.translate("TrackableDataEnum", "Unknown", None)))
 
         TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].setDisabled(True)
 
@@ -521,17 +608,7 @@ class MainWindow(QMainWindow):
         try:
             msg: MAVLink_heartbeat_message = self.mavlink_connection.wait_heartbeat(timeout=10)
             if msg is None:
-                self.uav_connection_dialog.ui.device_connection_text.setText("Device Connection Failed :(")
-                self.uav_connection_dialog.ui.invalid_input_error_label.show()
-                self.uav_connection.serial_band = None
-                self.uav_connection.serial_port = None
-                self.uav_connection.ip = None
-                self.uav_connection.connection_type = None
-                self.ui.device_connection_warning.show()
-                self.mavlink_connection.close()
-                self.ui.map_view.mavlink_connection = None
-                qWarning("Can not receive heartbeat")
-                return
+                raise Exception("Connection failed")
 
             qInfo("Successfully Received first heartbeat")
         except:
@@ -568,7 +645,6 @@ class MainWindow(QMainWindow):
                                                             e.value[3],
                                                             0, 0, 0, 0, 0))
 
-        self.ui.device_connection_warning.hide()
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)
         self.mavlink_thread.setObjectName("Mavlink Connection Thread")
@@ -577,9 +653,22 @@ class MainWindow(QMainWindow):
         self.mavlink_thread.started.connect(self.mavlink_worker.run)
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
+        self.enableFeaturesAfterUAVConnected()
+
+    def enableFeaturesAfterUAVConnected(self):
         self.ui.arm_mode.setEnabled(True)
+        self.ui.fly_mode_combobox.setEnabled(True)
+        self.ui.device_connection_warning.hide()
         if self.server_connection.ip is None:
             self.plane_on_map_update_timer.start()
+
+    def disableFeaturesAfterUAVDisconnected(self):
+        self.ui.arm_mode.setEnabled(False)
+        self.ui.fly_mode_combobox.setEnabled(False)
+        self.ui.device_connection_warning.show()
+        if self.plane_on_map_update_timer.isActive():
+            self.plane_on_map_update_timer.stop()
+
 
     def _uav_disconnect(self, button: QPushButton, dialog: FightingUAVConnectionInterface):
         if self.uav_connection.connection_type is None:
@@ -589,7 +678,7 @@ class MainWindow(QMainWindow):
         self.mavlink_thread.wait()
         self.mavlink_connection.close()
         self.uav_connection.connection_type = None
-        self.ui.arm_mode.setEnabled(False)
+        self.disableFeaturesAfterUAVDisconnected()
 
     def _server_connect(self, button: QPushButton, dialog: ServerConnectionInterface):
         # TODO: Test connection
@@ -635,8 +724,9 @@ class MainWindow(QMainWindow):
         if self.uav_connection.connection_type is None and not self.force_sending_telemetry:
             qDebug("UAV not connected")
             return
-        if ServerConnection.SERVER_IS_UNREACHABLE_COUNTER > 100:
-            ServerConnection.SERVER_IS_UNREACHABLE_COUNTER = 0
+        global SERVER_IS_UNREACHABLE_COUNTER
+        if SERVER_IS_UNREACHABLE_COUNTER > 100:
+            SERVER_IS_UNREACHABLE_COUNTER = 0
             self._server_disconnect()
             qWarning("Server connection is not possible for 100 time, disconnecting")
             return
@@ -660,7 +750,7 @@ class MainWindow(QMainWindow):
                 if port < 0 or port > 65535:
                     return False
             elif must_have_port:
-                return False # Must have port
+                return False # Must have port, yes that's the comment :3
             ip_array: list[str] = ip.split('.')
             if len(ip_array) != 4:
                 return False
