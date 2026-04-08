@@ -10,7 +10,8 @@ from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidge
     QComboBox, QApplication
 from pymavlink import mavutil
 from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
-    MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message
+    MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message, \
+    MAVLink_global_position_int_message
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -41,8 +42,11 @@ class TrackableDataUpdate:
     def update_velocity(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
         return str(packet.vel)
     @staticmethod
-    def update_altitude(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
-        mainwindow.next_telemetry.iha_irtifa = packet.alt / 1000
+    def update_relative_altitude(mainwindow:MainWindow, packet: MAVLink_global_position_int_message) -> str:
+        mainwindow.next_telemetry.iha_irtifa = packet.relative_alt / 1000
+        return str(packet.relative_alt / 1000)
+    @staticmethod
+    def update_altitude(mainwindow:MainWindow, packet: MAVLink_global_position_int_message) -> str:
         return str(packet.alt / 1000)
     @staticmethod
     def update_longitude(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
@@ -88,6 +92,7 @@ class TrackableDataUpdate:
         if mainwindow.ui.fly_mode_combobox.currentIndex() != index:
             mainwindow.last_mode_change_was_from_uav = True
             mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
+        return str(arm)
 
 TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
 
@@ -95,15 +100,16 @@ class TrackableDataPacketTimer(Enum):
     # (msg id, msg name, type, update interval (ms), watch value ids that uses this packet)
     BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 1000000, [10])
     ATTITUDE = (30, "ATTITUDE", MAVLink_attitude_message, 100000, [3, 4, 5])
-    GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 100000, [1, 2, 7, 8, 9])
+    GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 100000, [1, 7, 8, 9])
     VFR_HUD = (74, "VFR_HUD", MAVLink_vfr_hud_message, 100000, [0, 6])
     HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 100000, [11])
+    GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 100000, [2, 12])
 
 class TrackableDataEnum(Enum):
-    # (id, name, update function, updater packet, is it telemetry data, is it in watch_list widget)
+    # (id, name, update function, updater packet, should be updated on background (telemetry etc), is it in watch_list widget)
     GROUND_SPEED = (0, lambda: QCoreApplication.translate("TrackableDataEnum", "Ground Speed", None), TrackableDataUpdate.update_ground_speed, TrackableDataPacketTimer.VFR_HUD, False, True)
     VELOCITY = (1, lambda: QCoreApplication.translate("TrackableDataEnum", "Velocity", None), TrackableDataUpdate.update_velocity, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
-    ALTITUDE = (2, lambda: QCoreApplication.translate("TrackableDataEnum", "Altitude", None), TrackableDataUpdate.update_altitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
+    ALTITUDE = (2, lambda: QCoreApplication.translate("TrackableDataEnum", "Altitude", None), TrackableDataUpdate.update_altitude, TrackableDataPacketTimer.GLOBAL_POSITION_INT, False, False)
     YAW = (3, lambda: QCoreApplication.translate("TrackableDataEnum", "Yaw", None), TrackableDataUpdate.update_yaw, TrackableDataPacketTimer.ATTITUDE, True, True)
     PITCH = (4, lambda: QCoreApplication.translate("TrackableDataEnum", "Pitch", None), TrackableDataUpdate.update_pitch, TrackableDataPacketTimer.ATTITUDE, True, True)
     ROLL = (5, lambda: QCoreApplication.translate("TrackableDataEnum", "Roll", None), TrackableDataUpdate.update_roll, TrackableDataPacketTimer.ATTITUDE, True, True)
@@ -112,7 +118,8 @@ class TrackableDataEnum(Enum):
     LONGITUDE = (8, lambda: QCoreApplication.translate("TrackableDataEnum", "Longitude", None), TrackableDataUpdate.update_longitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
     LATITUDE = (9, lambda: QCoreApplication.translate("TrackableDataEnum", "Latitude", None), TrackableDataUpdate.update_latitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
     BATTERY_PERCENTAGE = (10, lambda: QCoreApplication.translate("TrackableDataEnum", "Battery Percentage", None), TrackableDataUpdate.update_battery_percentage, TrackableDataPacketTimer.BATTERY_STATUS, True, True)
-    ARM_STATUS = (11, lambda: QCoreApplication.translate("TrackableDataEnum", "Arm Status", None), TrackableDataUpdate.update_arm_status, TrackableDataPacketTimer.HEARTBEAT, False, False)
+    ARM_STATUS = (11, lambda: QCoreApplication.translate("TrackableDataEnum", "Arm Status", None), TrackableDataUpdate.update_arm_status, TrackableDataPacketTimer.HEARTBEAT, True, False)
+    RELATIVE_ALTITUDE = (12, lambda: QCoreApplication.translate("TrackableDataEnum", "Relative Altitude", None), TrackableDataUpdate.update_relative_altitude, TrackableDataPacketTimer.GLOBAL_POSITION_INT, False, True)
 
     @staticmethod
     def list() -> list[TrackableDataEnum]:
@@ -200,19 +207,16 @@ class MavlinkWorker(QObject):
         self.watch_list.setItem(row, 3, QTableWidgetItem(value))
 
     def trigger_update_value(self, e: TrackableDataEnum, packet: MAVLink_message):
-        if e.value[5]:
-            length: int = self.watch_list.rowCount()
-            new_val: str | None = None
-            if e.value[4]:
-                new_val = e.value[2](self.parent, packet)  # Update if it is telemetry without caring it is in watch list or not
-            for i in range(length):
-                if self.watch_list.item(i, 0).text() == str(e.value[0]):
-                    if new_val is None:
-                        new_val = e.value[2](self.parent, packet)
-                    self.update_watch_list.emit(i, new_val)
-                    break
-        else:
-            e.value[2](self.parent, packet)
+        length: int = self.watch_list.rowCount()
+        new_val: str | None = None
+        if e.value[4]:
+            new_val = e.value[2](self.parent, packet)  # Update if it is telemetry without caring it is in watch list or not
+        for i in range(length):
+            if self.watch_list.item(i, 0).text() == str(e.value[0]):
+                if new_val is None:
+                    new_val = e.value[2](self.parent, packet)
+                self.update_watch_list.emit(i, new_val)
+                break
 
     def run(self):
         while self.running:
@@ -764,7 +768,7 @@ class MainWindow(QMainWindow):
         if self.uav_connection.connection_type is None or self.server_connection.ip is not None:
             self.plane_on_map_update_timer.stop()
             return
-        self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam), self.next_telemetry.iha_yatis)
+        self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam), (self.next_telemetry.iha_yatis * 4) + 180)
 
     def __send_telemetry(self):
         if self.uav_connection.connection_type is None and not self.force_sending_telemetry:
