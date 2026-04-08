@@ -3,8 +3,8 @@ from enum import Enum
 from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, Slot, \
-    QLocale, QTranslator, QCoreApplication
-from PySide6.QtGui import QAction
+    QLocale, QTranslator, QCoreApplication, QSize
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu, QTableWidget, QDialog, \
     QComboBox, QApplication
@@ -14,6 +14,7 @@ from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_atti
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
+from src.CameraServerConnectionInterface import CameraServerConnectionInterface
 from src.ColorSelectorInterface import ColorSelectorInterface
 from src.MapWidget import ZERO_GEO_COORDS, AdsData
 from src.SetGeofenceInterface import SetGeofenceInterface
@@ -239,6 +240,7 @@ class MainWindow(QMainWindow):
     uav_connection: UavConnection = UavConnection()
     uav_connection_dialog: FightingUAVConnectionInterface | None = None
     server_connection_dialog: ServerConnectionInterface | None = None
+    camera_server_connection_dialog: CameraServerConnectionInterface | None = None
     color_selector_dialog: ColorSelectorInterface | None = None
     geofence_dialog: SetGeofenceInterface | None = None
     add_ads_dialog: AddADSInterface | None = None
@@ -310,6 +312,49 @@ class MainWindow(QMainWindow):
         self.ui.refresh_ads.clicked.connect(self.__refresh_ads)
         self.ui.add_ads.clicked.connect(self.__add_ads_button_clicked)
         self.plane_on_map_update_timer.timeout.connect(self.__update_plane_on_map_without_server)
+        self.ui.start_stop_camera_view.toggled.connect(self.__start_stop_camera_view)
+        self.ui.actionConfigurate_Camera_Stream.triggered.connect(self._actionConfigurateCameraServer)
+
+    def _actionConfigurateCameraServer(self):
+        if self.camera_server_connection_dialog is not None:
+            return
+        self.camera_server_connection_dialog = CameraServerConnectionInterface(self)
+        self.camera_server_connection_dialog.show()
+        if self.ui.camera_view.camera_server_info.ip is not None:
+            self.camera_server_connection_dialog.ui.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", "Camera Connected :)", None))
+            self.camera_server_connection_dialog.ui.server_ip_input.setText(self.ui.camera_view.camera_server_info.ip)
+            self.camera_server_connection_dialog.ui.server_port_input.setText(str(self.ui.camera_view.camera_server_info.port))
+            self.camera_server_connection_dialog.ui.server_protocol_type.setCurrentIndex(self.ui.camera_view.camera_server_info.protocol.value[0])
+        self.camera_server_connection_dialog.ui.connect.clicked.connect(self.connect_to_cam_server)
+        self.camera_server_connection_dialog.ui.disconnect.clicked.connect(self.disconnect_from_cam_server)
+        self.camera_server_connection_dialog.finished.connect(self.reset_camera_server_dialog)
+
+    def connect_to_cam_server(self):
+        if self.ui.camera_view.camera_server_info.ip is not None:
+            self.ui.camera_view.disconnect_from_server()
+        self.ui.camera_view.camera_server_info.ip = self.camera_server_connection_dialog.ui.server_ip_input.text()
+        self.ui.camera_view.camera_server_info.port = int(self.camera_server_connection_dialog.ui.server_port_input.text())
+        self.ui.camera_view.set_protocol(self.camera_server_connection_dialog.ui.server_protocol_type.currentIndex())
+        if self.ui.camera_view.connect_to_server():
+            self.camera_server_connection_dialog.ui.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", "Camera Connected :)", None))
+            self.camera_server_connection_dialog.ui.invalid_input_error_label.setEnabled(False)
+        else:
+            self.camera_server_connection_dialog.ui.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", "Camera Not Connected :(", None))
+            self.camera_server_connection_dialog.ui.invalid_input_error_label.setEnabled(True)
+
+    def disconnect_from_cam_server(self):
+        self.ui.camera_view.disconnect_from_server()
+        self.ui.camera_view.set_no_connection_image()
+        self.ui.camera_view.camera_server_info.ip = None
+
+    def reset_camera_server_dialog(self):
+        self.camera_server_connection_dialog = None
+
+    def __start_stop_camera_view(self, b: bool) -> None:
+        if b:
+            self.ui.camera_view.on_play()
+        else:
+            self.ui.camera_view.on_pause()
 
     def retranslateWatcher(self):
         length: int = self.ui.watch_list.rowCount()
@@ -329,7 +374,8 @@ class MainWindow(QMainWindow):
                    self.server_connection_dialog,
                    self.color_selector_dialog,
                    self.geofence_dialog,
-                   self.add_ads_dialog]
+                   self.add_ads_dialog,
+                   self.camera_server_connection_dialog]
 
         for dialog in dialogs:
             if dialog is not None:
@@ -625,7 +671,7 @@ class MainWindow(QMainWindow):
             self.mavlink_connection.close()
             self.ui.map_view.mavlink_connection = None
             return
-        self.uav_connection_dialog.ui.device_connection_text.setText("Device Connected :)")
+        self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
         self.uav_connection.connection_type = self.uav_connection_dialog.connection_type # Only set connection_type after successfully connecting
         self.mavlink_connection.mav.request_data_stream_send(
             self.mavlink_connection.target_system,
@@ -699,7 +745,7 @@ class MainWindow(QMainWindow):
             dialog.ui.server_connection_text.setText("Trying to connect to server :O")
             self.server_connection.team_no = login_to_server(self.server_connection.ip + ":" + str(self.server_connection.port), self.server_connection.username, self.server_connection.password)
             self.next_telemetry.takim_numarasi = self.server_connection.team_no
-            dialog.ui.server_connection_text.setText("Server Connected :)")
+            dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Server Connected :)", None))
             self.ui.server_connection_warning.hide()
         except Exception as e:
             dialog.ui.server_connection_text.setText("Can't Connect To Server :(")

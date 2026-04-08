@@ -1,10 +1,12 @@
 import struct
+from enum import Enum
 
 import lz4.block
-from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal
+from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal, QSize
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
-from PySide6.QtWidgets import QWidget, QLabel
+from PySide6.QtWidgets import QWidget, QLabel, QGridLayout
+
 
 class SocketWrapper(QObject):
     socket: QUdpSocket | None = None
@@ -14,7 +16,7 @@ class SocketWrapper(QObject):
     def __init__(self, parentWidget: CameraWidget):
         super().__init__()
         self.parentWidget = parentWidget
-        self.update_camera_in_ui.connect(lambda img: self.parentWidget.setPixmap(img.scaled(self.parentWidget.size(), Qt.AspectRatioMode.KeepAspectRatio)))
+        self.update_camera_in_ui.connect(lambda img: self.parentWidget.label.setPixmap(img.scaled(self.parentWidget.size(), Qt.AspectRatioMode.KeepAspectRatio)))
 
     # My Internal Server Code
     #def split_bylen(item, maxlen):  # I don't remember where i copied this from, but thanks for answer in stackoverflow :D
@@ -114,33 +116,61 @@ class SocketWrapper(QObject):
     def close(self):
         self.socket.close()
 
+class CameraServerProtocol(Enum):
+    Osman = (0,)
+    Kadir = (1,)
+    @staticmethod
+    def from_id(i: int) -> CameraServerProtocol:
+        e: CameraServerProtocol
+        for e in CameraServerProtocol:
+            if e.value[0] == i:
+                return e
+        return None
 
-class CameraWidget(QLabel):
+class CameraServerInfo:
+    ip: str | None = None
+    port: int
+    protocol: CameraServerProtocol
+
+class CameraWidget(QWidget):
     reconnect_timer: QTimer
     connection_thread: QThread | None = None
     socketWorker: SocketWrapper | None = None
+    camera_server_info: CameraServerInfo = CameraServerInfo()
+    label: QLabel
 
     def __init__(self, parent: QWidget | None = None):
-        QLabel.__init__(self, parent=parent)
+        QWidget.__init__(self, parent=parent)
+        self.gridLayout = QGridLayout(self)
+        self.gridLayout.setSpacing(0)
+        self.gridLayout.setContentsMargins(0, 0, 0, 0)
+        self.label = QLabel(self)
+        self.label.setScaledContents(True)
+        self.set_no_connection_image()
+        self.label.show()
+        self.gridLayout.addWidget(self.label)
 
         self.reconnect_timer = QTimer(self)
+
+    def set_no_connection_image(self):
+        self.label.setPixmap(QPixmap.fromImageInPlace(QImage("ui_files/no_video_stream_found.png")).scaled(QSize(500, 200)))
 
     def resizeEvent(self, event, /):
         if event.size().height() == 0 or event.size().width() == 0: # Widget should be hidden, for some reason hide and show does not get called on qsplitter
             if self.connection_thread:
-                self.closeSocket()
+                self.disconnect_from_server()
         else:
             if not self.connection_thread:
-                self.bindSocket()
+                self.connect_to_server()
         super().resizeEvent(event)
 
     def hideEvent(self, event, /):
         super().hideEvent(event)
-        self.closeSocket()
+        self.disconnect_from_server()
 
     def showEvent(self, event, /):
         super().showEvent(event)
-        self.bindSocket()
+        self.connect_to_server()
 
     def bindSocket(self):
         if self.connection_thread:
@@ -175,3 +205,49 @@ class CameraWidget(QLabel):
 
     def stop_reconnect_timer(self):
         self.reconnect_timer.stop()
+
+    is_paused: bool = False
+
+    def on_pause(self):
+        self.is_paused = True
+        if not self.camera_server_info.ip:
+            return False
+        match self.camera_server_info.protocol:
+            case CameraServerProtocol.Osman:
+                pass # TODO:
+            case CameraServerProtocol.Kadir:
+                self.closeSocket()
+
+    def on_play(self):
+        self.is_paused = False
+        if not self.camera_server_info.ip:
+            return False
+        match self.camera_server_info.protocol:
+            case CameraServerProtocol.Osman:
+                pass # TODO:
+            case CameraServerProtocol.Kadir:
+                self.bindSocket()
+        return True
+
+    def connect_to_server(self) -> bool:
+        if not self.camera_server_info.ip:
+            return False
+        match self.camera_server_info.protocol:
+            case CameraServerProtocol.Osman:
+                pass # TODO:
+            case CameraServerProtocol.Kadir:
+                self.bindSocket()
+        return True
+
+    def disconnect_from_server(self) -> bool:
+        if not self.camera_server_info.ip:
+            return False
+        match self.camera_server_info.protocol:
+            case CameraServerProtocol.Osman:
+                pass # TODO:
+            case CameraServerProtocol.Kadir:
+                self.closeSocket()
+        return True
+
+    def set_protocol(self, i: int) -> None:
+        self.camera_server_info.protocol = CameraServerProtocol.from_id(i)
