@@ -524,7 +524,7 @@ class MainWindow(QMainWindow):
             index = index + 1
         qDebug("Sending mode with index: %s" % index)
         self.mavlink_connection.set_mode_apm(index)
-        self.next_telemetry.iha_otonom = index == 10 if 1 else 0
+        self.next_telemetry.iha_otonom = 1 if index == 10 else 0
 
     def add_to_watch_list(self, e: TrackableDataEnum):
         if not TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].isEnabled():
@@ -568,6 +568,7 @@ class MainWindow(QMainWindow):
         self.server_connection_dialog = ServerConnectionInterface(self)
         self.server_connection_dialog.show()
         if self.server_connection.ip is not None:
+            self.server_connection_dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Server Connected :)", None))
             self.server_connection_dialog.ui.server_ip_input.setText(self.server_connection.ip)
             self.server_connection_dialog.ui.server_port_input.setText(str(self.server_connection.port))
             self.server_connection_dialog.ui.server_login_username_input.setText(str(self.server_connection.username))
@@ -588,6 +589,7 @@ class MainWindow(QMainWindow):
         self.uav_connection_dialog = FightingUAVConnectionInterface(self)
         self.uav_connection_dialog.show()
         if self.uav_connection.connection_type is not None:
+            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
             if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
                 self.uav_connection_dialog.ui.serial_band.setText(str(self.uav_connection.serial_band))
                 self.uav_connection_dialog.ui.connection_type.setCurrentIndex(2 + self.uav_connection.serial_port)
