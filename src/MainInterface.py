@@ -159,6 +159,7 @@ class UAV_Modes(Enum):
     QACRO = ('QACRO', 23)
     THERMAL = ('THERMAL', 24)
     LOITERALTQLAND = ('LOITERALTQLAND', 25)
+    AUTOLAND = ('AUTOLAND', 26)
 
     @staticmethod
     def list() -> list[UAV_Modes]:
