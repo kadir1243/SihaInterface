@@ -1,4 +1,5 @@
 import math
+import re
 from enum import Enum
 from functools import partial
 
@@ -6,6 +7,7 @@ from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning, QDateTime, 
     QLocale, QTranslator, QCoreApplication, QSize
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtPositioning import QGeoCoordinate
+from PySide6.QtSerialPort import QSerialPortInfo
 from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu, QTableWidget, QDialog, \
     QComboBox, QApplication
 from pymavlink import mavutil
@@ -319,6 +321,13 @@ class MainWindow(QMainWindow):
         self.plane_on_map_update_timer.timeout.connect(self.__update_plane_on_map_without_server)
         self.ui.start_stop_camera_view.toggled.connect(self.__start_stop_camera_view)
         self.ui.actionConfigurate_Camera_Stream.triggered.connect(self._actionConfigurateCameraServer)
+        self.ui.remove_ads.clicked.connect(self._remove_ads)
+
+    def _remove_ads(self):
+        for m_data in self.ui.map_view.user_ads_data_model.m_datas:
+            if m_data.is_selected:
+                self.ui.map_view.user_ads_data_model.m_datas.remove(m_data)
+                self.ui.map_view.user_ads_data_model.layoutChanged.emit()
 
     def _actionConfigurateCameraServer(self):
         if self.camera_server_connection_dialog is not None:
@@ -343,14 +352,20 @@ class MainWindow(QMainWindow):
         if self.ui.camera_view.connect_to_server():
             self.camera_server_connection_dialog.ui.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", "Camera Connected :)", None))
             self.camera_server_connection_dialog.ui.invalid_input_error_label.setEnabled(False)
+            self.ui.start_stop_camera_view.setCheckable(True)
+            self.ui.record_button.setCheckable(True)
         else:
             self.camera_server_connection_dialog.ui.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", "Camera Not Connected :(", None))
             self.camera_server_connection_dialog.ui.invalid_input_error_label.setEnabled(True)
+            self.ui.start_stop_camera_view.setCheckable(False)
+            self.ui.record_button.setCheckable(False)
 
     def disconnect_from_cam_server(self):
         self.ui.camera_view.disconnect_from_server()
         self.ui.camera_view.set_no_connection_image()
         self.ui.camera_view.camera_server_info.ip = None
+        self.ui.start_stop_camera_view.setCheckable(False)
+        self.ui.record_button.setCheckable(False)
 
     def reset_camera_server_dialog(self):
         self.camera_server_connection_dialog = None
@@ -431,6 +446,7 @@ class MainWindow(QMainWindow):
         data = AdsData()
         data.position = QGeoCoordinate(latitude, longitude)
         data.size = radius
+        data.is_selected = False
         self.ui.map_view.update_ads_data(data)
 
     def __refresh_ads(self):
@@ -593,10 +609,14 @@ class MainWindow(QMainWindow):
             return
         self.uav_connection_dialog = FightingUAVConnectionInterface(self)
         self.uav_connection_dialog.show()
+        availablePorts = list(QSerialPortInfo.availablePorts())
+        availablePorts.sort(key=lambda a: int(re.sub("\\D", "", a.portName())))
+        for availablePort in availablePorts:
+            self.uav_connection_dialog.ui.connection_type.addItem(availablePort.systemLocation())
         if self.uav_connection.connection_type is not None:
             self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
             if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
-                self.uav_connection_dialog.ui.serial_band.setText(str(self.uav_connection.serial_band))
+                self.uav_connection_dialog.ui.serial_baud.setText(str(self.uav_connection.serial_band))
                 self.uav_connection_dialog.ui.connection_type.setCurrentIndex(2 + self.uav_connection.serial_port)
             else:
                 isTCP: bool = self.uav_connection_dialog.connection_type == ConnectionType.TCP
@@ -625,28 +645,32 @@ class MainWindow(QMainWindow):
                 self.uav_connection_dialog.ui.invalid_input_error_label.show()
                 return
         else:
-            pass # TODO: Serial connection validation
+            if not self.uav_connection_dialog.ui.serial_baud.text():
+                self.uav_connection_dialog.ui.serial_baud.setText(self.uav_connection_dialog.ui.serial_baud.placeholderText())
+            # TODO: Serial connection validation
 
         if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
-            self.uav_connection.serial_band = self.uav_connection_dialog.ui.serial_band.text()
+            self.uav_connection.serial_band = self.uav_connection_dialog.ui.serial_baud.text()
+            self.uav_connection.serial_port = self.uav_connection_dialog.ui.connection_type.currentIndex() - 2
         else:
             self.uav_connection.ip = self.uav_connection_dialog.ui.ip_address.text()
 
         try:
-            self.uav_connection_dialog.ui.device_connection_text.setText("Trying to connect device :O")
+            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Trying to connect device :O", None))
             match self.uav_connection_dialog.connection_type:
               case ConnectionType.TCP:
                   self.mavlink_connection = mavtcp(self.uav_connection.ip, retries=1)
               case ConnectionType.UDP:
                   self.mavlink_connection = mavudp(self.uav_connection.ip, timeout=10)
               case ConnectionType.SERIAL:
-                  self.mavlink_connection = mavserial(self.uav_connection.serial_port, baud=self.uav_connection.serial_band)
+                  system_identifier = re.sub("\\d", "", QSerialPortInfo.availablePorts()[0].systemLocation())
+                  self.mavlink_connection = mavserial(system_identifier + str(self.uav_connection.serial_port), baud=self.uav_connection.serial_band)
               case None:
                   qWarning("Connection type is null ???")
                   return
             qInfo("Successfully Connected with mavlink, Target System: %s, Target component: %s" % (self.mavlink_connection.target_system, self.mavlink_connection.target_component))
         except OSError as e:
-            self.uav_connection_dialog.ui.device_connection_text.setText("Device Connection Failed :(")
+            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
             qWarning("Tried a invalid connection: %s" % str(e))
             return
 
@@ -663,7 +687,7 @@ class MainWindow(QMainWindow):
 
             qInfo("Successfully Received first heartbeat")
         except:
-            self.uav_connection_dialog.ui.device_connection_text.setText("Device Connection Failed :(")
+            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
 
             self.uav_connection_dialog.ui.invalid_input_error_label.show()
             if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
@@ -749,13 +773,13 @@ class MainWindow(QMainWindow):
         self.server_connection.password = dialog.ui.server_login_password_input.text()
 
         try:
-            dialog.ui.server_connection_text.setText("Trying to connect to server :O")
+            dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Trying to connect to server :O", None))
             self.server_connection.team_no = login_to_server(self.server_connection.ip + ":" + str(self.server_connection.port), self.server_connection.username, self.server_connection.password)
             self.next_telemetry.takim_numarasi = self.server_connection.team_no
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Server Connected :)", None))
             self.ui.server_connection_warning.hide()
         except Exception as e:
-            dialog.ui.server_connection_text.setText("Can't Connect To Server :(")
+            dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Can't Connect To Server :(", None))
             qWarning("Can not connect to server: %s" % e)
             dialog.ui.invalid_input_error_label.show()
             self.ui.server_connection_warning.show()

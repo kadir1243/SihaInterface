@@ -38,7 +38,7 @@ class FightingUAVConnectionInterface(QDialog):
         isUDP: bool = index == 1
         if isTCP or isUDP:
             self.ui.ip_address.setEnabled(True)
-            self.ui.serial_band.setEnabled(False)
+            self.ui.serial_baud.setEnabled(False)
             if isTCP:
                 self.connection_type = ConnectionType.TCP
             else:
@@ -46,5 +46,5 @@ class FightingUAVConnectionInterface(QDialog):
         else:
             self.connection_type = ConnectionType.SERIAL
             self.ui.ip_address.setEnabled(False)
-            self.ui.serial_band.setEnabled(True)
+            self.ui.serial_baud.setEnabled(True)
 

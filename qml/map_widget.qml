@@ -17,6 +17,7 @@ Item {
     }
     Map {
         id: map
+        objectName: "map"
         anchors.fill: parent
         plugin: mapPlugin
         WheelHandler {
@@ -50,7 +51,7 @@ Item {
             anchors.fill: parent
             acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
             onClicked: (mouse)=> {
-                mouseInputHandler.handle_mouse_input_to_map(mouse.button, map.toCoordinate(mapToItem(parent, mouse.x, mouse.y)))
+                mouseInputHandler.handle_mouse_input_to_map(mouse.button, map.toCoordinate(mapToItem(parent, mouse.x, mouse.y)), mouse.x, mouse.y)
             }
         }
         MapItemView {
@@ -69,11 +70,11 @@ Item {
                 sourceItem: Image {
                     id: plane_image
                     function getImage() {
-                        if (plane_type === 0) {
+                        if (plane_type === 2) {
                             return "../ui_files/blue_plane.svg"
                         } else if (plane_type === 1) {
                             return "../ui_files/red_plane.svg"
-                        } else if (plane_type === 2) {
+                        } else if (plane_type === 0) {
                             return "../ui_files/green_plane.svg"
                         } else if (plane_type === 3) {
                             return "../ui_files/yellow_plane.svg"
@@ -149,10 +150,17 @@ Item {
                 id: item4
                 property var position: model.position
                 property var size: model.size
+                property var is_selected: model.is_selected
+                function getColor() {
+                    if (is_selected) {
+                        return "blue"
+                    }
+                    return "yellow"
+                }
                 center: position
                 opacity: 0.5
                 radius: size
-                color: 'yellow'
+                color: getColor()
             }
         }
     }

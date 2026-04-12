@@ -1,8 +1,9 @@
 import math
 
-from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, QAbstractItemModel, \
-    Property, Signal
+from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, Property, Signal, \
+    QPointF
 from PySide6.QtPositioning import QGeoCoordinate
+from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget
 from pymavlink.mavutil import mavfile
@@ -12,9 +13,11 @@ from src.ServerConnection import TelemetryResponseData, ServerAdsData
 
 class PlaneData:
     position: QGeoCoordinate
-    plane_type: int # 0 for blue, 1 for red, 2 for green, 3 for yellow
+    plane_type: int # 0 for green, 1 for red, 2 for blue, 3 for yellow
     rotation: float
-    def __init__(self, position: QGeoCoordinate, plane_type: int, rotation: float):
+    team_no: int
+    def __init__(self, team_no: int, position: QGeoCoordinate, plane_type: int, rotation: float):
+        self.team_no = team_no
         self.position = position
         self.plane_type = plane_type
         self.rotation = rotation
@@ -32,6 +35,8 @@ class PlaneDataModel(QAbstractListModel):
             return data.plane_type
         if role == Qt.ItemDataRole.UserRole + 3: # rotation
             return data.rotation
+        if role == Qt.ItemDataRole.UserRole + 4: # team_no
+            return data.team_no
         return None
 
     def rowCount(self, /, parent=...):
@@ -43,7 +48,8 @@ class PlaneDataModel(QAbstractListModel):
         position: int = Qt.ItemDataRole.UserRole + 1
         plane_type: int = Qt.ItemDataRole.UserRole + 2
         rotation: int = Qt.ItemDataRole.UserRole + 3
-        return {position: QByteArray(b"position"), plane_type: QByteArray(b"plane_type"), rotation: QByteArray(b"rotation")}
+        team_no: int = Qt.ItemDataRole.UserRole + 4
+        return {position: QByteArray(b"position"), plane_type: QByteArray(b"plane_type"), rotation: QByteArray(b"rotation"), team_no: QByteArray(b"team_no")}
 
 class SpecialCoordsData:
     position: QGeoCoordinate
@@ -75,6 +81,7 @@ class SpecialCoordsDataModel(QAbstractListModel):
 class AdsData:
     position: QGeoCoordinate
     size: float
+    is_selected: bool
 
 class AdsDataModel(QAbstractListModel):
     m_datas: list[AdsData] = []
@@ -87,6 +94,8 @@ class AdsDataModel(QAbstractListModel):
             return data.position
         if role == Qt.ItemDataRole.UserRole + 2:
             return data.size
+        if role == Qt.ItemDataRole.UserRole + 3:
+            return data.is_selected
         return None
 
     def rowCount(self, /, parent=...):
@@ -97,7 +106,8 @@ class AdsDataModel(QAbstractListModel):
     def roleNames(self, /) -> dict[int, QByteArray]:
         position: int = Qt.ItemDataRole.UserRole + 1
         size: int = Qt.ItemDataRole.UserRole + 2
-        return {position: QByteArray(b"position"), size: QByteArray(b"size")}
+        is_selected: int = Qt.ItemDataRole.UserRole + 3
+        return {position: QByteArray(b"position"), size: QByteArray(b"size"), is_selected: QByteArray(b"is_selected")}
 
 def distance(coord1: QGeoCoordinate, coord2: QGeoCoordinate) -> float:
     x1 = coord1.latitude()
@@ -106,6 +116,30 @@ def distance(coord1: QGeoCoordinate, coord2: QGeoCoordinate) -> float:
     y2 = coord2.longitude()
     return math.sqrt(math.pow(x1 - x2, 2) + math.pow(y1 - y2, 2))
 
+def point_distance(coord1: QPointF, coord2: QPointF) -> float:
+    if not hasattr(coord1, "x") or not hasattr(coord2, "y"):
+        return 999999
+    x1 = coord1.x()
+    x2 = coord2.x()
+    y1 = coord1.y()
+    y2 = coord2.y()
+    return math.sqrt(math.pow(x1 - x2, 2) + math.pow(y1 - y2, 2))
+
+def geo_to_screen(center: QGeoCoordinate, zoom: float, width: float, height: float, lat: float, lon: float) -> QPointF | None: # It works now, I hope it will work forever
+    if None in (center, zoom, width, height):
+        return None
+
+    def mercator_y(lat_deg: float) -> float:
+        lat_rad = math.radians(lat_deg)
+        return math.log(math.tan(math.pi / 4 + lat_rad / 2))
+
+    total_pixels = 256 * (2 ** zoom)
+
+    dx = (lon - center.longitude()) / 360.0 * total_pixels
+    dy = (mercator_y(center.latitude()) - mercator_y(lat)) / (2 * math.pi) * total_pixels
+
+    return QPointF(width / 2 + dx, height / 2 + dy)
+
 class MouseInputHandler(QObject):
     parent: MapWidget
     gc_cycle: int = 0
@@ -113,8 +147,8 @@ class MouseInputHandler(QObject):
         super().__init__(parent)
         self.parent = parent
 
-    @Slot(int, QGeoCoordinate)
-    def handle_mouse_input_to_map(self, button: int, coordinate: QGeoCoordinate):
+    @Slot(int, QGeoCoordinate, float, float)
+    def handle_mouse_input_to_map(self, button: int, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
         if not coordinate.isValid():
             qWarning("Invalid mouse input coordinate.")
             return
@@ -124,16 +158,37 @@ class MouseInputHandler(QObject):
         data.position = coordinate
         match button:
             case Qt.MouseButton.LeftButton.value:
-                data.coord_type = 1
-            case Qt.MouseButton.RightButton.value:
-                data.coord_type = 2
+                self.parent.selected_plane_team_no = -2
+                for m_data in self.parent.user_ads_data_model.m_datas:
+                    m_data.is_selected = False
                 for m_data in self.parent.user_ads_data_model.m_datas:
                     d = distance(coordinate, m_data.position) * 100000
-                    qDebug("Distance: %s, radius: %s" % (d, m_data.size))
+                    qDebug("Distance to ads: %s, radius: %s" % (d, m_data.size))
                     if d <= m_data.size:
-                        self.parent.user_ads_data_model.m_datas.remove(m_data)
+                        m_data.is_selected = True
                         self.parent.user_ads_data_model.layoutChanged.emit()
-                        return # Remove ads functionality
+                        return
+                mapObject: QQuickItem = self.parent.rootObject().findChild(QQuickItem, "map")
+                center: QGeoCoordinate = mapObject.property("center")
+                zoom: float = mapObject.property("zoomLevel")
+                width: float = mapObject.property("width")
+                height: float = mapObject.property("height")
+                for m_data in self.parent.plane_data_model.m_datas:
+                    coordinate_point: QPointF = QPointF(mouseX, mouseY)
+                    plane_point: QPointF | None = geo_to_screen(center, zoom, width, height, m_data.position.latitude(), m_data.position.longitude())
+                    if plane_point is None:
+                        continue
+                    d = point_distance(coordinate_point, plane_point)
+                    qDebug("Distance to plane: %s" % d)
+                    if d <= 30: # Yeah, I selected this number randomly, I think this will be good number
+                        m_data.plane_type = 2
+                        self.parent.selected_plane_team_no = m_data.team_no
+                        # TODO: Following the plane
+                        self.parent.plane_data_model.layoutChanged.emit()
+                        return
+                return
+            case Qt.MouseButton.RightButton.value:
+                data.coord_type = 1
             case Qt.MouseButton.MiddleButton.value:
                 data.coord_type = self.gc_cycle + 5
             case _:
@@ -200,6 +255,7 @@ class MapWidget(QQuickWidget):
     mavlink_connection: mavfile | None = None
     server_ads_data_model: AdsDataModel
     user_ads_data_model: AdsDataModel
+    selected_plane_team_no: int = -2
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
@@ -226,14 +282,16 @@ class MapWidget(QQuickWidget):
             plane_type: int
             if our_team_number == uav.takim_numarasi:
                 plane_type = 0
+            elif self.selected_plane_team_no == uav.takim_numarasi:
+                plane_type = 2
             else:
                 plane_type = 1
-            self.plane_data_model.m_datas.append(PlaneData(QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, (uav.iha_yatis * 4) + 180))
+            self.plane_data_model.m_datas.append(PlaneData(uav.takim_numarasi, QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, (uav.iha_yatis * 4) + 180))
         self.plane_data_model.layoutChanged.emit()
 
     def update_plane_data_without_server(self, pos: QGeoCoordinate, rotation: float):
         self.plane_data_model.m_datas.clear()
-        self.plane_data_model.m_datas.append(PlaneData(pos, 0, rotation))
+        self.plane_data_model.m_datas.append(PlaneData(-1, pos, 2 if self.selected_plane_team_no == -1 else 0, rotation)) # TODO: Only for test
         self.plane_data_model.layoutChanged.emit()
 
     def update_server_ads_data(self, ads_list: list[ServerAdsData]):
@@ -242,6 +300,7 @@ class MapWidget(QQuickWidget):
             data: AdsData = AdsData()
             data.position = QGeoCoordinate(ads.hssEnlem, ads.hssBoylam)
             data.size = ads.hssYariCap
+            data.is_selected = False
             self.server_ads_data_model.m_datas.append(data)
         self.server_ads_data_model.layoutChanged.emit()
 
