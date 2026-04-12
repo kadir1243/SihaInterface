@@ -15,6 +15,7 @@ class ConnectionType(Enum):
 
 class FightingUAVConnectionInterface(QDialog):
     _ip_with_port_regex: QRegularExpression = QRegularExpression("[\\d.:]+")
+    _serial_baud_regex: QRegularExpression = QRegularExpression("[\\d]+")
     ui = Ui_UAVConnection = Ui_UAVConnection()
     connection_type: ConnectionType
 
@@ -24,6 +25,7 @@ class FightingUAVConnectionInterface(QDialog):
         self.ui.invalid_input_error_label.hide()
 
         self.ui.ip_address.setValidator(QRegularExpressionValidator(self._ip_with_port_regex))
+        self.ui.serial_baud.setValidator(QRegularExpressionValidator(self._serial_baud_regex))
         self.ui.connection_type.currentIndexChanged.connect(self.connection_type_changed)
         self.connection_type_changed(self.ui.connection_type.currentIndex()) # Trigger once to make it correctly set in start
 

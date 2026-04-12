@@ -18,7 +18,7 @@ from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
 from src.CameraServerConnectionInterface import CameraServerConnectionInterface
-from src.ColorSelectorInterface import ColorSelectorInterface
+from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions, DEFAULT_COLORS
 from src.MapWidget import ZERO_GEO_COORDS, AdsData
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
@@ -183,7 +183,7 @@ LANGUAGE_ACTIONS: dict[int, QAction] = {}
 class UavConnection:
     connection_type: ConnectionType | None = None
     serial_port: int | None = None
-    serial_band: int | None = None
+    serial_baud_rate: int | None = None
     ip: str | None = None
 
 class ServerConnection:
@@ -389,13 +389,21 @@ class MainWindow(QMainWindow):
 
             e.setText(tde.value[1]())
 
-    def retranslateOpenDialogs(self):
-        dialogs = [self.uav_connection_dialog,
+    def resetWatcherWidgetValues(self):
+        length: int = self.ui.watch_list.rowCount()
+        for i in range(length):
+            self.ui.watch_list.setItem(i, 3, QTableWidgetItem(QCoreApplication.translate("TrackableDataEnum", "Unknown", None)))
+
+    def get_all_dialogs(self):
+        return [self.uav_connection_dialog,
                    self.server_connection_dialog,
                    self.color_selector_dialog,
                    self.geofence_dialog,
                    self.add_ads_dialog,
                    self.camera_server_connection_dialog]
+
+    def retranslateOpenDialogs(self):
+        dialogs = self.get_all_dialogs()
 
         for dialog in dialogs:
             if dialog is not None:
@@ -598,11 +606,17 @@ class MainWindow(QMainWindow):
         self.server_connection_dialog.ui.disconnect.clicked.connect(lambda button: self._server_disconnect())
         self.server_connection_dialog.finished.connect(lambda e: self._reset_dialog(False))
 
+    color_options: ColorOptions = ColorOptions.create_copy(DEFAULT_COLORS)
     def _actionConfigurateSetColors(self):
         if self.color_selector_dialog is not None:
             return
-        self.color_selector_dialog = ColorSelectorInterface(self)
+        self.color_selector_dialog = ColorSelectorInterface(self, self.color_options)
+        self.color_selector_dialog.finished.connect(self._reset_color_configurate_screen)
         self.color_selector_dialog.show()
+
+    def _reset_color_configurate_screen(self):
+        self.color_options = self.color_selector_dialog.savedOptions
+        self.color_selector_dialog = None
 
     def _actionConfigurate_UAV(self):
         if self.uav_connection_dialog is not None:
@@ -616,7 +630,7 @@ class MainWindow(QMainWindow):
         if self.uav_connection.connection_type is not None:
             self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
             if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
-                self.uav_connection_dialog.ui.serial_baud.setText(str(self.uav_connection.serial_band))
+                self.uav_connection_dialog.ui.serial_baud.setText(str(self.uav_connection.serial_baud_rate))
                 self.uav_connection_dialog.ui.connection_type.setCurrentIndex(2 + self.uav_connection.serial_port)
             else:
                 isTCP: bool = self.uav_connection_dialog.connection_type == ConnectionType.TCP
@@ -650,7 +664,7 @@ class MainWindow(QMainWindow):
             # TODO: Serial connection validation
 
         if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
-            self.uav_connection.serial_band = self.uav_connection_dialog.ui.serial_baud.text()
+            self.uav_connection.serial_baud_rate = int(self.uav_connection_dialog.ui.serial_baud.text())
             self.uav_connection.serial_port = self.uav_connection_dialog.ui.connection_type.currentIndex() - 2
         else:
             self.uav_connection.ip = self.uav_connection_dialog.ui.ip_address.text()
@@ -664,7 +678,7 @@ class MainWindow(QMainWindow):
                   self.mavlink_connection = mavudp(self.uav_connection.ip, timeout=10)
               case ConnectionType.SERIAL:
                   system_identifier = re.sub("\\d", "", QSerialPortInfo.availablePorts()[0].systemLocation())
-                  self.mavlink_connection = mavserial(system_identifier + str(self.uav_connection.serial_port), baud=self.uav_connection.serial_band)
+                  self.mavlink_connection = mavserial(system_identifier + str(self.uav_connection.serial_port), baud=self.uav_connection.serial_baud_rate)
               case None:
                   qWarning("Connection type is null ???")
                   return
@@ -691,10 +705,10 @@ class MainWindow(QMainWindow):
 
             self.uav_connection_dialog.ui.invalid_input_error_label.show()
             if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
-                qInfo("Can not connect to UAV from %s" % (str(self.uav_connection.serial_port) + "," + str(self.uav_connection.serial_band)))
+                qInfo("Can not connect to UAV from %s" % (str(self.uav_connection.serial_port) + "," + str(self.uav_connection.serial_baud_rate)))
             else:
                 qInfo("Can not connect to UAV from %s" % self.uav_connection.ip)
-            self.uav_connection.serial_band = None
+            self.uav_connection.serial_baud_rate = None
             self.uav_connection.serial_port = None
             self.uav_connection.ip = None
             self.uav_connection.connection_type = None
@@ -754,6 +768,8 @@ class MainWindow(QMainWindow):
         self.mavlink_connection.close()
         self.uav_connection.connection_type = None
         self.disableFeaturesAfterUAVDisconnected()
+        self.next_telemetry = TelemetryData()
+        self.resetWatcherWidgetValues()
 
     def _server_connect(self, button: QPushButton, dialog: ServerConnectionInterface):
         # TODO: Test connection
