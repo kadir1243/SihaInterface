@@ -287,8 +287,6 @@ class MainWindow(QMainWindow):
             TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]] = action
             add_to_watch_menu.addAction(action)
 
-        self.ui.add_to_watch.setPopupMode(QToolButton.ToolButtonPopupMode.MenuButtonPopup)
-        self.ui.add_to_watch.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.ui.add_to_watch.setMenu(add_to_watch_menu)
 
         for e in TrackableDataEnum.list():
