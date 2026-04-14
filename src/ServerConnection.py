@@ -6,8 +6,6 @@ from requests import Response
 INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST = True
 
 def login_to_server(target_address: str, username: str, password: str) -> int:
-    if not target_address.startswith("http"):
-        target_address = "http://" + target_address
     if INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST:
         requests.post(target_address + "/internal/add_new_user", json={"team": 1, "username": username, "password": password}, headers={"Content-Type": "application/json"})
     login = requests.post(target_address + "/api/giris", data=f'{{\"kadi\": \"{username}\",\"sifre\":\"{password}\"}}', headers={'Content-Type': 'application/json'})
@@ -62,8 +60,6 @@ class TelemetryResponseData:
 SERVER_IS_UNREACHABLE_COUNTER: int = 0 # When this hits 100, disconnect from server
 
 def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> TelemetryResponseData:
-    if not target_address.startswith("http"):
-        target_address = "http://" + target_address
     try:
         r: Response = requests.post(target_address + "/api/telemetri_gonder", json={
             "takim_numarasi": telemetry_data.takim_numarasi,
@@ -114,8 +110,6 @@ class QrCoords:
     qrBoylam: float
 
 def get_kamikaze_coords(target_address: str) -> QrCoords:
-    if not target_address.startswith("http"):
-        target_address = "http://" + target_address
     r: Response = requests.get(target_address + "/api/qr_koordinati")
     r.raise_for_status()
     data = r.json()
@@ -131,8 +125,6 @@ class ServerAdsData:
     hssYariCap: float
 
 def get_ads(target_address: str) -> list[ServerAdsData]:
-    if not target_address.startswith("http"):
-        target_address = "http://" + target_address
     r: Response = requests.get(target_address + "/api/hss_koordinatlari")
     r.raise_for_status()
     data = r.json()
@@ -146,3 +138,21 @@ def get_ads(target_address: str) -> list[ServerAdsData]:
         data.hssYariCap = d["hssYaricap"]
         ads_list.append(data)
     return ads_list
+
+def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: str) -> None:
+    r: Response = requests.post(target_address + "/api/kamikaze_bilgisi", json={
+        "kamikazeBaslangicZamani": {
+                "saat": start.saat,
+                "dakika": start.dakika,
+                "saniye": start.saniye,
+                "milisaniye": start.milisaniye
+        },
+        "kamikazeBitisZamani": {
+            "saat": end.saat,
+            "dakika": end.dakika,
+            "saniye": end.saniye,
+            "milisaniye": end.milisaniye
+        },
+        "qrMetni": qr_text
+    })
+    r.raise_for_status()

@@ -4,7 +4,7 @@ from enum import Enum
 from functools import partial
 
 from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, Slot, \
-    QLocale, QTranslator, QCoreApplication, QSize
+    QLocale, QTranslator, QCoreApplication, QSize, QTime
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidge
 from pymavlink import mavutil
 from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
     MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message, \
-    MAVLink_global_position_int_message
+    MAVLink_global_position_int_message, MAVLink_system_time_message
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -23,7 +23,7 @@ from src.MapWidget import ZERO_GEO_COORDS, AdsData
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
-    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads
+    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze
 from src.ServerConnectionInterface import ServerConnectionInterface
 from ui_files_python.uav_interface import Ui_MainWindow
 
@@ -74,8 +74,8 @@ class TrackableDataUpdate:
         mainwindow.next_telemetry.iha_dikilme = (roll - 180) / 4
         return str(roll)
     @staticmethod
-    def update_gps_time(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
-        datetime = QDateTime.fromMSecsSinceEpoch(packet.time_usec)
+    def update_gps_time(mainwindow:MainWindow, packet: MAVLink_system_time_message) -> str:
+        datetime = QDateTime.fromMSecsSinceEpoch(int(packet.time_unix_usec / 1000))
         mainwindow.next_telemetry.gps_saati = GpsSaati(datetime.time())
         return datetime.toString()
     @staticmethod
@@ -102,10 +102,11 @@ class TrackableDataPacketTimer(Enum):
     # (msg id, msg name, type, update interval (ms), watch value ids that uses this packet)
     BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 1000000, [10])
     ATTITUDE = (30, "ATTITUDE", MAVLink_attitude_message, 100000, [3, 4, 5])
-    GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 100000, [1, 7, 8, 9])
+    GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 100000, [1, 8, 9])
     VFR_HUD = (74, "VFR_HUD", MAVLink_vfr_hud_message, 100000, [0, 6])
     HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 100000, [11])
     GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 100000, [2, 12])
+    SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 100000, [7])
 
 class TrackableDataEnum(Enum):
     # (id, name, update function, updater packet, should be updated on background (telemetry etc), is it in watch_list widget)
@@ -116,7 +117,7 @@ class TrackableDataEnum(Enum):
     PITCH = (4, lambda: QCoreApplication.translate("TrackableDataEnum", "Pitch", None), TrackableDataUpdate.update_pitch, TrackableDataPacketTimer.ATTITUDE, True, True)
     ROLL = (5, lambda: QCoreApplication.translate("TrackableDataEnum", "Roll", None), TrackableDataUpdate.update_roll, TrackableDataPacketTimer.ATTITUDE, True, True)
     AIR_SPEED = (6, lambda: QCoreApplication.translate("TrackableDataEnum", "Air Speed", None), TrackableDataUpdate.update_air_speed, TrackableDataPacketTimer.VFR_HUD, True, True)
-    GPS_TIME = (7, lambda: QCoreApplication.translate("TrackableDataEnum", "GPS Time", None), TrackableDataUpdate.update_gps_time, TrackableDataPacketTimer.GPS_RAW_INT, True, True)
+    GPS_TIME = (7, lambda: QCoreApplication.translate("TrackableDataEnum", "GPS Time", None), TrackableDataUpdate.update_gps_time, TrackableDataPacketTimer.SYSTEM_TIME, True, True)
     LONGITUDE = (8, lambda: QCoreApplication.translate("TrackableDataEnum", "Longitude", None), TrackableDataUpdate.update_longitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
     LATITUDE = (9, lambda: QCoreApplication.translate("TrackableDataEnum", "Latitude", None), TrackableDataUpdate.update_latitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
     BATTERY_PERCENTAGE = (10, lambda: QCoreApplication.translate("TrackableDataEnum", "Battery Percentage", None), TrackableDataUpdate.update_battery_percentage, TrackableDataPacketTimer.BATTERY_STATUS, True, True)
@@ -124,13 +125,9 @@ class TrackableDataEnum(Enum):
     RELATIVE_ALTITUDE = (12, lambda: QCoreApplication.translate("TrackableDataEnum", "Relative Altitude", None), TrackableDataUpdate.update_relative_altitude, TrackableDataPacketTimer.GLOBAL_POSITION_INT, False, True)
 
     @staticmethod
-    def list() -> list[TrackableDataEnum]:
-        return list(map(lambda c: c, TrackableDataEnum))
-
-    @staticmethod
     def from_id(i: int) -> TrackableDataEnum:
         e: TrackableDataEnum
-        for e in TrackableDataEnum.list():
+        for e in TrackableDataEnum:
             if e.value[0] == i:
                 return e
         return None
@@ -163,10 +160,6 @@ class UAV_Modes(Enum):
     LOITERALTQLAND = ('LOITERALTQLAND', 25)
     AUTOLAND = ('AUTOLAND', 26)
 
-    @staticmethod
-    def list() -> list[UAV_Modes]:
-        return list(map(lambda c: c, UAV_Modes))
-
 class SupportedLanguages(Enum):
     English = (0, lambda: QCoreApplication.translate("SupportedLanguages", "English", None), QLocale.Language.English, QLocale.Country.UnitedStates)
     Turkish = (1, lambda: QCoreApplication.translate("SupportedLanguages", "Turkish", None), QLocale.Language.Turkish, QLocale.Country.Turkey)
@@ -193,6 +186,9 @@ class ServerConnection:
     password: str
     team_no: int
     telemetry_timer: QTimer
+
+    def get_address(self) -> str:
+        return f"{self.ip}:{self.port}"
 
 class MavlinkWorker(QObject):
     parent: MainWindow
@@ -235,7 +231,7 @@ class MavlinkWorker(QObject):
                     qWarning("Invalid data received")
                 continue
             for e in TrackableDataPacketTimer:
-                if e.value[1] == packet.get_type():
+                if e.value[0] == packet.get_header().msgId:
                     data_enum_values = e.value[4]
                     for i in data_enum_values:
                         self.trigger_update_value(TrackableDataEnum.from_id(i), packet)
@@ -270,7 +266,7 @@ class MainWindow(QMainWindow):
         self.ui.setupUi(self)
 
         mode: UAV_Modes
-        for mode in UAV_Modes.list():
+        for mode in UAV_Modes:
             self.ui.fly_mode_combobox.insertItem(mode.value[1], mode.value[0])
         self.ui.fly_mode_combobox.setCurrentIndex(-1)
 
@@ -280,7 +276,7 @@ class MainWindow(QMainWindow):
 
         add_to_watch_menu: QMenu = QMenu(parent=self)
 
-        for e in TrackableDataEnum.list():
+        for e in TrackableDataEnum:
             action: QAction = QAction(text=e.value[1](), parent=self)
             action.setObjectName(str(e.value[0]))
             action.triggered.connect(partial(self.add_to_watch_list, e))
@@ -289,7 +285,7 @@ class MainWindow(QMainWindow):
 
         self.ui.add_to_watch.setMenu(add_to_watch_menu)
 
-        for e in TrackableDataEnum.list():
+        for e in TrackableDataEnum:
             if e.value[5]:
                 self.add_to_watch_list(e)
 
@@ -459,7 +455,7 @@ class MainWindow(QMainWindow):
         if not self.server_connection.ip:
             return
 
-        self.ui.map_view.update_server_ads_data(get_ads(self.server_connection.ip + ":" + str(self.server_connection.port)))
+        self.ui.map_view.update_server_ads_data(get_ads(self.server_connection.get_address()))
 
     last_mode_set_by_user: int = -1
 
@@ -526,17 +522,24 @@ class MainWindow(QMainWindow):
     def __reset_geofence_dialog(self):
         self.geofence_dialog = None
 
+    kamikaze_start: GpsSaati
+
     def __start_kamikaze(self):
         if self.uav_connection.connection_type is None:
             return
         longitude = float(self.ui.kamikaze_longitude.text())
         latitude = float(self.ui.kamikaze_latitude.text())
+        kamikaze_start = self.next_telemetry.gps_saati
         qWarning("Kamikaze not implemented yet") # TODO
+
+    def on_kamikaze_end(self, qr_text: str) -> None:
+        kamikaze_end = self.next_telemetry.gps_saati
+        send_kamikaze(self.server_connection.get_address(), self.kamikaze_start, kamikaze_end, qr_text)
 
     def __get_kamikaze_coords(self):
         if self.server_connection.ip is None:
             return
-        qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.ip + ":" + str(self.server_connection.port))
+        qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.get_address())
         self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
         self.ui.kamikaze_latitude.setText(str(qr_coords.qrEnlem))
 
@@ -600,7 +603,7 @@ class MainWindow(QMainWindow):
             self.server_connection_dialog.ui.server_port_input.setText(str(self.server_connection.port))
             self.server_connection_dialog.ui.server_login_username_input.setText(str(self.server_connection.username))
             self.server_connection_dialog.ui.server_login_password_input.setText(str(self.server_connection.password))
-        self.server_connection_dialog.ui.connect.clicked.connect(lambda button: self._server_connect(button, self.server_connection_dialog))
+        self.server_connection_dialog.ui.connect.clicked.connect(lambda: self._server_connect(self.server_connection_dialog))
         self.server_connection_dialog.ui.disconnect.clicked.connect(lambda button: self._server_disconnect())
         self.server_connection_dialog.finished.connect(lambda e: self._reset_dialog(False))
 
@@ -638,7 +641,7 @@ class MainWindow(QMainWindow):
                 else:
                     self.uav_connection_dialog.ui.connection_type.setCurrentIndex(1)
         self.uav_connection_dialog.ui.connect.clicked.connect(self._uav_connect)
-        self.uav_connection_dialog.ui.disconnect.clicked.connect(lambda button: self._uav_disconnect(button, self.uav_connection_dialog))
+        self.uav_connection_dialog.ui.disconnect.clicked.connect(lambda: self._uav_disconnect(self.uav_connection_dialog))
         self.uav_connection_dialog.finished.connect(lambda e: self._reset_dialog(True))
 
     def _reset_dialog(self, is_uav: bool):
@@ -757,7 +760,7 @@ class MainWindow(QMainWindow):
             self.plane_on_map_update_timer.stop()
 
 
-    def _uav_disconnect(self, button: QPushButton, dialog: FightingUAVConnectionInterface):
+    def _uav_disconnect(self, dialog: FightingUAVConnectionInterface):
         if self.uav_connection.connection_type is None:
             return
         self.mavlink_worker.running = False
@@ -769,7 +772,7 @@ class MainWindow(QMainWindow):
         self.next_telemetry = TelemetryData()
         self.resetWatcherWidgetValues()
 
-    def _server_connect(self, button: QPushButton, dialog: ServerConnectionInterface):
+    def _server_connect(self, dialog: ServerConnectionInterface):
         # TODO: Test connection
         if not dialog.ui.server_ip_input.text():
             dialog.ui.server_ip_input.setText(dialog.ui.server_ip_input.placeholderText())
@@ -782,13 +785,15 @@ class MainWindow(QMainWindow):
             return
         dialog.ui.invalid_input_error_label.hide()
         self.server_connection.ip = dialog.ui.server_ip_input.text()
+        if not ("://" in self.server_connection.ip):
+            self.server_connection.ip = "http://"+self.server_connection.ip
         self.server_connection.port = int(dialog.ui.server_port_input.text())
         self.server_connection.username = dialog.ui.server_login_username_input.text()
         self.server_connection.password = dialog.ui.server_login_password_input.text()
 
         try:
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Trying to connect to server :O", None))
-            self.server_connection.team_no = login_to_server(self.server_connection.ip + ":" + str(self.server_connection.port), self.server_connection.username, self.server_connection.password)
+            self.server_connection.team_no = login_to_server(self.server_connection.get_address(), self.server_connection.username, self.server_connection.password)
             self.next_telemetry.takim_numarasi = self.server_connection.team_no
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Server Connected :)", None))
             self.ui.server_connection_warning.hide()
@@ -819,8 +824,7 @@ class MainWindow(QMainWindow):
             self._server_disconnect()
             qWarning("Server connection is not possible for 100 time, disconnecting")
             return
-        self.last_server_telemetry_response = send_telemetry(self.server_connection.ip + ":" + str(self.server_connection.port),
-                                                                    self.next_telemetry)
+        self.last_server_telemetry_response = send_telemetry(self.server_connection.get_address(), self.next_telemetry)
         self.ui.map_view.update_plane_data(self.next_telemetry.takim_numarasi, self.last_server_telemetry_response)
 
     def _server_disconnect(self):
