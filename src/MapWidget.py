@@ -7,7 +7,7 @@ from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget, QDialogButtonBox
 from pymavlink.dialects.v10.all import MAV_CMD_DO_REPOSITION, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, MAV_FRAME_GLOBAL, \
-    MAV_FRAME_GLOBAL_TERRAIN_ALT
+    MAV_FRAME_GLOBAL_TERRAIN_ALT, MAV_FRAME_GLOBAL_TERRAIN_ALT_INT
 from pymavlink.mavutil import mavfile
 
 from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
@@ -165,8 +165,9 @@ class MouseInputHandler(QObject):
                 self.ard_dialog = AdvancedRepositionDialog(self.parent)
                 self.ard_dialog.ui.latitude.setText(str(coordinate.latitude()))
                 self.ard_dialog.ui.longitude.setText(str(coordinate.longitude()))
-                self.ard_dialog.ui.loiter_radius.setText(str(self.parent.reposition_loiter_radius))
                 self.ard_dialog.ui.altitude.setText(str(self.parent.reposition_altitude))
+                if self.parent.reposition_loiter_radius != DEFAULT_LOITER_RADIUS:
+                    self.ard_dialog.ui.loiter_radius.setText(str(self.parent.reposition_loiter_radius))
                 if self.parent.reposition_speed != DEFAULT_SPEED:
                     self.ard_dialog.ui.speed.setText(str(self.parent.reposition_speed))
                 if not math.isnan(self.parent.reposition_yaw):
@@ -179,7 +180,8 @@ class MouseInputHandler(QObject):
 
     def ard_save(self):
         self.parent.reposition_altitude = float(self.ard_dialog.ui.altitude.text())
-        self.parent.reposition_loiter_radius = float(self.ard_dialog.ui.loiter_radius.text())
+        if self.ard_dialog.ui.loiter_radius.text():
+            self.parent.reposition_loiter_radius = float(self.ard_dialog.ui.loiter_radius.text())
         if self.ard_dialog.ui.speed.text():
             self.parent.reposition_speed = float(self.ard_dialog.ui.speed.text())
         if self.ard_dialog.ui.yaw.text():
@@ -188,24 +190,25 @@ class MouseInputHandler(QObject):
     def ard_ok(self):
         self.parent.target_coord.position_v = QGeoCoordinate(float(self.ard_dialog.ui.latitude.text()), float(self.ard_dialog.ui.longitude.text()))
         self.parent.target_coord.updated.emit()
-        speed = self.return_non_null(self.ard_dialog.ui.speed.text(), self.parent.reposition_speed)
-        yaw = self.return_non_null(self.ard_dialog.ui.yaw.text(), self.parent.reposition_yaw)
+        speed: float = self.return_non_null(self.ard_dialog.ui.speed.text(), self.parent.reposition_speed)
+        yaw: float = self.return_non_null(self.ard_dialog.ui.yaw.text(), self.parent.reposition_yaw)
+        loiter_radius: float = self.return_non_null(self.ard_dialog.ui.loiter_radius.text(), self.parent.reposition_loiter_radius)
         self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                             self.parent.mavlink_connection.target_component,
-                                                            MAV_FRAME_GLOBAL_TERRAIN_ALT,
+                                                            MAV_FRAME_GLOBAL_TERRAIN_ALT_INT,
                                                             MAV_CMD_DO_REPOSITION,
                                                             0,
                                                             0,
                                                             speed,
                                                             MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
-                                                            float(self.ard_dialog.ui.loiter_radius.text()), # loiter radius,
+                                                            loiter_radius, # loiter radius,
                                                             yaw,
                                                             int(self.parent.target_coord.position_v.latitude() * 10 ** 7),
                                                             int(self.parent.target_coord.position_v.longitude() * 10 ** 7),
                                                             float(self.ard_dialog.ui.altitude.text()))
         qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s, with speed %s, and with yaw %s" % (
             self.parent.target_coord.position_v.latitude(), self.parent.target_coord.position_v.longitude(), float(self.ard_dialog.ui.altitude.text()),
-            float(self.ard_dialog.ui.loiter_radius.text()), speed, yaw))
+            loiter_radius, speed, yaw))
         self.ard_dialog.close()
         self.ard_reset()
 
@@ -267,13 +270,13 @@ class MouseInputHandler(QObject):
                 self.parent.target_coord.updated.emit()
                 self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                                     self.parent.mavlink_connection.target_component,
-                                                                    MAV_FRAME_GLOBAL_TERRAIN_ALT,
+                                                                    MAV_FRAME_GLOBAL_TERRAIN_ALT_INT,
                                                                     MAV_CMD_DO_REPOSITION,
                                                                     0,
                                                                     0,
                                                                     self.parent.reposition_speed,
                                                                     MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
-                                                                    self.parent.reposition_loiter_radius,  # loiter radious,
+                                                                    self.parent.reposition_loiter_radius,
                                                                     self.parent.reposition_yaw,
                                                                     int(coordinate.latitude() * 10**7),
                                                                     int(coordinate.longitude() * 10**7),

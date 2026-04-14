@@ -5,14 +5,13 @@ from PySide6.QtWidgets import QWidget
 
 from ui_files_python.advanced_reposition import Ui_AdvancedRepositionDialog
 
-DEFAULT_ALTITUDE: int = 100
-DEFAULT_LOITER_RADIUS: int = 10
+DEFAULT_ALTITUDE: float = 100
+DEFAULT_LOITER_RADIUS: float = 0
 DEFAULT_SPEED: float = -1
 DEFAULT_YAW: float = float('nan')
 
 class AdvancedRepositionDialog(QDialog):
     is_float_regex: QRegularExpression = QRegularExpression("[\\d.]+")
-    is_int_regex: QRegularExpression = QRegularExpression("[\\d.]+")
     ui: Ui_AdvancedRepositionDialog
 
     def __init__(self, parent: QWidget):
@@ -23,9 +22,9 @@ class AdvancedRepositionDialog(QDialog):
         self.ui.longitude.setValidator(QRegularExpressionValidator(self.is_float_regex))
         self.ui.latitude.setValidator(QRegularExpressionValidator(self.is_float_regex))
         self.ui.yaw.setValidator(QRegularExpressionValidator(self.is_float_regex))
-        self.ui.altitude.setValidator(QRegularExpressionValidator(self.is_int_regex))
-        self.ui.loiter_radius.setValidator(QRegularExpressionValidator(self.is_int_regex))
-        self.ui.speed.setValidator(QRegularExpressionValidator(self.is_int_regex))
+        self.ui.altitude.setValidator(QRegularExpressionValidator(self.is_float_regex))
+        self.ui.loiter_radius.setValidator(QRegularExpressionValidator(self.is_float_regex))
+        self.ui.speed.setValidator(QRegularExpressionValidator(self.is_float_regex))
 
         self.ui.buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self.restore_defaults)
 
