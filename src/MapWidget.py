@@ -190,11 +190,8 @@ class MouseInputHandler(QObject):
                         return
                 return
             case Qt.MouseButton.RightButton.value:
-                for mdata in self.parent.coord_data_model.m_datas:
-                    if mdata.coord_type == 1:
-                        self.parent.coord_data_model.m_datas.remove(mdata)
-                        break
-                data.coord_type = 1
+                self.parent.target_coord.position_v = coordinate
+                self.parent.target_coord.updated.emit()
                 self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                                      self.parent.mavlink_connection.target_component,
                                                                      MAV_FRAME_GLOBAL_TERRAIN_ALT,
@@ -210,6 +207,7 @@ class MouseInputHandler(QObject):
                                                                      100)
 
                 qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), 100, 10))
+                return
             case Qt.MouseButton.MiddleButton.value:
                 data.coord_type = self.gc_cycle + 5
             case _:
@@ -266,6 +264,16 @@ class GeofenceData(QObject):
     gc2 = Property(QGeoCoordinate, read_gc2, notify=gc_changed)
     gc3 = Property(QGeoCoordinate, read_gc3, notify=gc_changed)
     gc4 = Property(QGeoCoordinate, read_gc4, notify=gc_changed)
+class RepositionTargetHolder(QObject):
+    position_v: QGeoCoordinate = QGeoCoordinate()
+    updated = Signal()
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+
+    def read_position(self) -> QGeoCoordinate:
+        return self.position_v
+
+    position = Property(QGeoCoordinate, read_position, notify=updated)
 
 
 class MapWidget(QQuickWidget):
@@ -277,6 +285,7 @@ class MapWidget(QQuickWidget):
     server_ads_data_model: AdsDataModel
     user_ads_data_model: AdsDataModel
     selected_plane_team_no: int = -2
+    target_coord: RepositionTargetHolder
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
@@ -286,6 +295,7 @@ class MapWidget(QQuickWidget):
         self.coords_for_geofence = GeofenceData(self)
         self.server_ads_data_model = AdsDataModel()
         self.user_ads_data_model = AdsDataModel()
+        self.target_coord = RepositionTargetHolder(self)
 
         self.engine().rootContext().setContextProperty("plane_data_model", self.plane_data_model)
         self.engine().rootContext().setContextProperty("coord_data_model", self.coord_data_model)
@@ -293,6 +303,7 @@ class MapWidget(QQuickWidget):
         self.engine().rootContext().setContextProperty("server_ads_data_model", self.server_ads_data_model)
         self.engine().rootContext().setContextProperty("user_ads_data_model", self.user_ads_data_model)
         self.engine().rootContext().setContextProperty("mouseInputHandler", self.mouse_input_handler)
+        self.engine().rootContext().setContextProperty("reposition_target_coord", self.target_coord)
         self.setSource("qml/map_widget.qml")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 

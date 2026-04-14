@@ -132,6 +132,20 @@ Item {
             color: "#32cd32FF"
             path: [gc1, gc2, gc3, gc4]
         }
+        MapQuickItem {
+            id: reposition_target
+            property var reposition_target_coords: reposition_target_coord.position
+            coordinate: reposition_target_coords
+            anchorPoint.x: reposition_image.width / 2
+            anchorPoint.y: reposition_image.height
+            sourceItem: Image {
+                id: reposition_image
+
+                source: "../ui_files/target_location.svg"
+                width: 32
+                height: 32
+            }
+        }
         MapItemView {
             model: server_ads_data_model
             delegate: MapCircle {
