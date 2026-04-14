@@ -1,11 +1,13 @@
 import math
 
 from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, Property, Signal, \
-    QPointF
+    QPointF, qInfo
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget
+from pymavlink.dialects.v10.all import MAV_CMD_DO_REPOSITION, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, MAV_FRAME_GLOBAL, \
+    MAV_FRAME_GLOBAL_TERRAIN_ALT
 from pymavlink.mavutil import mavfile
 
 from src.ServerConnection import TelemetryResponseData, ServerAdsData
@@ -188,7 +190,26 @@ class MouseInputHandler(QObject):
                         return
                 return
             case Qt.MouseButton.RightButton.value:
+                for mdata in self.parent.coord_data_model.m_datas:
+                    if mdata.coord_type == 1:
+                        self.parent.coord_data_model.m_datas.remove(mdata)
+                        break
                 data.coord_type = 1
+                self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
+                                                                     self.parent.mavlink_connection.target_component,
+                                                                     MAV_FRAME_GLOBAL_TERRAIN_ALT,
+                                                                     MAV_CMD_DO_REPOSITION,
+                                                                     0,
+                                                                     0,
+                                                                     -1,
+                                                                     0,
+                                                                     10, # loiter radious,
+                                                                     float('nan'),
+                                                                     int(coordinate.latitude() * 10**7),
+                                                                     int(coordinate.longitude() * 10**7),
+                                                                     100)
+
+                qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), 100, 10))
             case Qt.MouseButton.MiddleButton.value:
                 data.coord_type = self.gc_cycle + 5
             case _:
