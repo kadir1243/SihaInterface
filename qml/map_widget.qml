@@ -47,11 +47,17 @@ Item {
             sequences: [StandardKey.ZoomOut]
             onActivated: map.zoomLevel = Math.round(map.zoomLevel - 1)
         }
-        MouseArea {
-            anchors.fill: parent
+        TapHandler {
             acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-            onClicked: (mouse)=> {
-                mouseInputHandler.handle_mouse_input_to_map(mouse.button, map.toCoordinate(mapToItem(parent, mouse.x, mouse.y)), mouse.x, mouse.y)
+            onTapped: (eventPoint, button) => {
+                            switch (point.modifiers) {
+                                case Qt.ControlModifier:
+                                    mouseInputHandler.handle_mouse_input_to_map_with_ctrl(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)));
+                                    break;
+                                default:
+                                    mouseInputHandler.handle_mouse_input_to_map(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)), eventPoint.position.x, eventPoint.position.y);
+                                    break;
+                            }
             }
         }
         MapItemView {

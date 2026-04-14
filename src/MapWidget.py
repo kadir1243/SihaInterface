@@ -5,11 +5,13 @@ from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qW
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QDialogButtonBox
 from pymavlink.dialects.v10.all import MAV_CMD_DO_REPOSITION, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, MAV_FRAME_GLOBAL, \
     MAV_FRAME_GLOBAL_TERRAIN_ALT
 from pymavlink.mavutil import mavfile
 
+from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
+    DEFAULT_SPEED, DEFAULT_YAW
 from src.ServerConnection import TelemetryResponseData, ServerAdsData
 
 
@@ -144,10 +146,79 @@ def geo_to_screen(center: QGeoCoordinate, zoom: float, width: float, height: flo
 
 class MouseInputHandler(QObject):
     parent: MapWidget
+    ard_dialog: AdvancedRepositionDialog = None
     gc_cycle: int = 0
     def __init__(self, parent: MapWidget):
         super().__init__(parent)
         self.parent = parent
+
+    @Slot(int, QGeoCoordinate)
+    def handle_mouse_input_to_map_with_ctrl(self, button: int, coordinate: QGeoCoordinate):
+        if not coordinate.isValid():
+            qWarning("Invalid mouse input with ctrl coordinate.")
+            return
+        qDebug("Pressed the mouse button %s with ctrl in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
+        match button:
+            case Qt.MouseButton.RightButton.value:
+                if not self.ard_dialog is None or self.parent.mavlink_connection is None:
+                    return
+                self.ard_dialog = AdvancedRepositionDialog(self.parent)
+                self.ard_dialog.ui.latitude.setText(str(coordinate.latitude()))
+                self.ard_dialog.ui.longitude.setText(str(coordinate.longitude()))
+                self.ard_dialog.ui.loiter_radius.setText(str(self.parent.reposition_loiter_radius))
+                self.ard_dialog.ui.altitude.setText(str(self.parent.reposition_altitude))
+                if self.parent.reposition_speed != DEFAULT_SPEED:
+                    self.ard_dialog.ui.speed.setText(str(self.parent.reposition_speed))
+                if not math.isnan(self.parent.reposition_yaw):
+                    self.ard_dialog.ui.yaw.setText(str(self.parent.reposition_yaw))
+                self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Save).clicked.connect(self.ard_save)
+                self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Ok).clicked.connect(self.ard_ok)
+                self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Cancel).clicked.connect(self.ard_cancel)
+                self.ard_dialog.finished.connect(self.ard_reset)
+                self.ard_dialog.show()
+
+    def ard_save(self):
+        self.parent.reposition_altitude = float(self.ard_dialog.ui.altitude.text())
+        self.parent.reposition_loiter_radius = float(self.ard_dialog.ui.loiter_radius.text())
+        if self.ard_dialog.ui.speed.text():
+            self.parent.reposition_speed = float(self.ard_dialog.ui.speed.text())
+        if self.ard_dialog.ui.yaw.text():
+            self.parent.reposition_yaw = float(self.ard_dialog.ui.yaw.text())
+
+    def ard_ok(self):
+        self.parent.target_coord.position_v = QGeoCoordinate(float(self.ard_dialog.ui.latitude.text()), float(self.ard_dialog.ui.longitude.text()))
+        self.parent.target_coord.updated.emit()
+        speed = self.return_non_null(self.ard_dialog.ui.speed.text(), self.parent.reposition_speed)
+        yaw = self.return_non_null(self.ard_dialog.ui.yaw.text(), self.parent.reposition_yaw)
+        self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
+                                                            self.parent.mavlink_connection.target_component,
+                                                            MAV_FRAME_GLOBAL_TERRAIN_ALT,
+                                                            MAV_CMD_DO_REPOSITION,
+                                                            0,
+                                                            0,
+                                                            speed,
+                                                            MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
+                                                            float(self.ard_dialog.ui.loiter_radius.text()), # loiter radius,
+                                                            yaw,
+                                                            int(self.parent.target_coord.position_v.latitude() * 10 ** 7),
+                                                            int(self.parent.target_coord.position_v.longitude() * 10 ** 7),
+                                                            float(self.ard_dialog.ui.altitude.text()))
+        qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s, with speed %s, and with yaw %s" % (
+            self.parent.target_coord.position_v.latitude(), self.parent.target_coord.position_v.longitude(), float(self.ard_dialog.ui.altitude.text()),
+            float(self.ard_dialog.ui.loiter_radius.text()), speed, yaw))
+        self.ard_dialog.close()
+        self.ard_reset()
+
+    @staticmethod
+    def return_non_null(a: str, b: float) -> float:
+        return b if a is None or len(a.strip()) == 0 else float(a.strip())
+
+    def ard_cancel(self):
+        self.ard_dialog.close()
+        self.ard_reset()
+
+    def ard_reset(self):
+        self.ard_dialog = None
 
     @Slot(int, QGeoCoordinate, float, float)
     def handle_mouse_input_to_map(self, button: int, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
@@ -190,23 +261,25 @@ class MouseInputHandler(QObject):
                         return
                 return
             case Qt.MouseButton.RightButton.value:
+                if self.parent.mavlink_connection is None:
+                    return
                 self.parent.target_coord.position_v = coordinate
                 self.parent.target_coord.updated.emit()
                 self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
-                                                                     self.parent.mavlink_connection.target_component,
-                                                                     MAV_FRAME_GLOBAL_TERRAIN_ALT,
-                                                                     MAV_CMD_DO_REPOSITION,
-                                                                     0,
-                                                                     0,
-                                                                     -1,
-                                                                     0,
-                                                                     10, # loiter radious,
-                                                                     float('nan'),
-                                                                     int(coordinate.latitude() * 10**7),
-                                                                     int(coordinate.longitude() * 10**7),
-                                                                     100)
+                                                                    self.parent.mavlink_connection.target_component,
+                                                                    MAV_FRAME_GLOBAL_TERRAIN_ALT,
+                                                                    MAV_CMD_DO_REPOSITION,
+                                                                    0,
+                                                                    0,
+                                                                    self.parent.reposition_speed,
+                                                                    MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
+                                                                    self.parent.reposition_loiter_radius,  # loiter radious,
+                                                                    self.parent.reposition_yaw,
+                                                                    int(coordinate.latitude() * 10**7),
+                                                                    int(coordinate.longitude() * 10**7),
+                                                                    self.parent.reposition_altitude)
 
-                qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), 100, 10))
+                qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), self.parent.reposition_altitude, self.parent.reposition_loiter_radius))
                 return
             case Qt.MouseButton.MiddleButton.value:
                 data.coord_type = self.gc_cycle + 5
@@ -286,6 +359,10 @@ class MapWidget(QQuickWidget):
     user_ads_data_model: AdsDataModel
     selected_plane_team_no: int = -2
     target_coord: RepositionTargetHolder
+    reposition_altitude: float = DEFAULT_ALTITUDE
+    reposition_loiter_radius: float = DEFAULT_LOITER_RADIUS
+    reposition_yaw: float = DEFAULT_YAW
+    reposition_speed: float = DEFAULT_SPEED
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
