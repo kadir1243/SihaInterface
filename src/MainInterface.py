@@ -1,19 +1,24 @@
 import math
+import os
 import re
 from enum import Enum
 from functools import partial
 
-from PySide6.QtCore import Qt, QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, Slot, \
-    QLocale, QTranslator, QCoreApplication, QSize, QTime
-from PySide6.QtGui import QAction, QIcon
+os.environ['MAVLINK20'] = '1'
+
+from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, QLocale, QTranslator, QCoreApplication
+from PySide6.QtGui import QAction
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
-from PySide6.QtWidgets import QMainWindow, QPushButton, QToolButton, QTableWidgetItem, QMenu, QTableWidget, QDialog, \
-    QComboBox, QApplication
+from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication
 from pymavlink import mavutil
-from pymavlink.dialects.v10.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
+from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
     MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message, \
-    MAVLink_global_position_int_message, MAVLink_system_time_message
+    MAVLink_global_position_int_message, MAVLink_system_time_message, MAV_CMD_DO_FENCE_ENABLE, \
+    MAVLink_fence_status_message, \
+    MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION, MAV_FRAME_GLOBAL_INT, \
+    MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, MAVLINK_MSG_ID_MISSION_REQUEST_INT, MAV_MISSION_TYPE_FENCE, \
+    MAVLINK_MSG_ID_MISSION_ACK, MAVLINK_MSG_ID_MISSION_REQUEST, MAV_FRAME_GLOBAL
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -95,6 +100,12 @@ class TrackableDataUpdate:
             mainwindow.last_mode_change_was_from_uav = True
             mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
         return str(arm)
+    @staticmethod
+    def update_breach_status(mainwindow:MainWindow, packet: MAVLink_fence_status_message) -> str:
+        text = "Breached"
+        if packet.breach_status == 0:
+            text = "Not " + text
+        return text
 
 TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
 
@@ -107,6 +118,7 @@ class TrackableDataPacketTimer(Enum):
     HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 100000, [11])
     GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 100000, [2, 12])
     SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 100000, [7])
+    FENCE_STATUS = (162, "FENCE_STATUS", MAVLink_fence_status_message, 100000, [13])
 
 class TrackableDataEnum(Enum):
     # (id, name, update function, updater packet, should be updated on background (telemetry etc), is it in watch_list widget)
@@ -123,6 +135,7 @@ class TrackableDataEnum(Enum):
     BATTERY_PERCENTAGE = (10, lambda: QCoreApplication.translate("TrackableDataEnum", "Battery Percentage", None), TrackableDataUpdate.update_battery_percentage, TrackableDataPacketTimer.BATTERY_STATUS, True, True)
     ARM_STATUS = (11, lambda: QCoreApplication.translate("TrackableDataEnum", "Arm Status", None), TrackableDataUpdate.update_arm_status, TrackableDataPacketTimer.HEARTBEAT, True, False)
     RELATIVE_ALTITUDE = (12, lambda: QCoreApplication.translate("TrackableDataEnum", "Relative Altitude", None), TrackableDataUpdate.update_relative_altitude, TrackableDataPacketTimer.GLOBAL_POSITION_INT, False, True)
+    BREACH_STATUS = (13, lambda: QCoreApplication.translate("TrackableDataEnum", "Fence Breach Status", None), TrackableDataUpdate.update_breach_status, TrackableDataPacketTimer.FENCE_STATUS, False, False)
 
     @staticmethod
     def from_id(i: int) -> TrackableDataEnum:
@@ -230,11 +243,19 @@ class MavlinkWorker(QObject):
                 else:
                     qWarning("Invalid data received")
                 continue
-            for e in TrackableDataPacketTimer:
-                if e.value[0] == packet.get_header().msgId:
-                    data_enum_values = e.value[4]
-                    for i in data_enum_values:
-                        self.trigger_update_value(TrackableDataEnum.from_id(i), packet)
+            elif packet.get_header().msgId == MAVLINK_MSG_ID_MISSION_REQUEST_INT:
+                self.parent.send_mission_data(packet.seq, True)
+            elif packet.get_header().msgId == MAVLINK_MSG_ID_MISSION_REQUEST:
+                self.parent.send_mission_data(packet.seq, False) # Time to handle weird Legacy code
+            elif packet.get_header().msgId == MAVLINK_MSG_ID_MISSION_ACK:
+                qDebug("MissionACK packet received with type %s and with mission_type %s" % (packet.type, packet.mission_type))
+            else:
+                for e in TrackableDataPacketTimer:
+                    if e.value[0] == packet.get_header().msgId:
+                        data_enum_values = e.value[4]
+                        for i in data_enum_values:
+                            self.trigger_update_value(TrackableDataEnum.from_id(i), packet)
+                        break
 
 SERVER_IS_UNREACHABLE_COUNTER = 0
 
@@ -316,6 +337,9 @@ class MainWindow(QMainWindow):
         self.ui.start_stop_camera_view.toggled.connect(self.__start_stop_camera_view)
         self.ui.actionConfigurate_Camera_Stream.triggered.connect(self._actionConfigurateCameraServer)
         self.ui.remove_ads.clicked.connect(self._remove_ads)
+        self.ui.map_view.user_ads_data_model.layoutChanged.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
+        self.ui.map_view.server_ads_data_model.layoutChanged.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
+        self.ui.map_view.coords_for_geofence.upload_geofence_data.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
 
     def _remove_ads(self):
         for m_data in self.ui.map_view.user_ads_data_model.m_datas:
@@ -394,7 +418,8 @@ class MainWindow(QMainWindow):
                    self.color_selector_dialog,
                    self.geofence_dialog,
                    self.add_ads_dialog,
-                   self.camera_server_connection_dialog]
+                   self.camera_server_connection_dialog,
+                   self.ui.map_view.mouse_input_handler.ard_dialog]
 
     def retranslateOpenDialogs(self):
         dialogs = self.get_all_dialogs()
@@ -516,8 +541,119 @@ class MainWindow(QMainWindow):
         self.ui.map_view.coords_for_geofence.gc3_v = QGeoCoordinate(float(gc3[0]), float(gc3[1]))
         self.ui.map_view.coords_for_geofence.gc4_v = QGeoCoordinate(float(gc4[0]), float(gc4[1]))
         self.ui.map_view.coords_for_geofence.gc_changed.emit()
+        self.ui.map_view.coords_for_geofence.upload_geofence_data.emit()
         qDebug("New geofence coords: %s, %s, %s, %s" % (self.ui.map_view.coords_for_geofence.gc1_v, self.ui.map_view.coords_for_geofence.gc2_v, self.ui.map_view.coords_for_geofence.gc3_v, self.ui.map_view.coords_for_geofence.gc4_v))
         self.geofence_dialog.close()
+
+    def _enable_fence(self) -> None:
+        self.mavlink_connection.mav.command_long_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            MAV_CMD_DO_FENCE_ENABLE,
+            0,
+            1,
+            0,0,0,0,0,0
+        )
+
+    def send_mission_data(self, index: int, use_item_int: bool):
+        qDebug("Requested Mission Data at index %s" % index)
+        ads_list_len = len(self.ui.map_view.server_ads_data_model.m_datas) + len(self.ui.map_view.user_ads_data_model.m_datas)
+        if index >= ads_list_len:
+            coords = [self.ui.map_view.coords_for_geofence.gc1_v, self.ui.map_view.coords_for_geofence.gc2_v,
+                      self.ui.map_view.coords_for_geofence.gc3_v, self.ui.map_view.coords_for_geofence.gc4_v]
+
+            qDebug("Sending fence with position %s" % coords[index - ads_list_len])
+
+            if use_item_int:
+                self.mavlink_connection.mav.mission_item_int_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    index,
+                    MAV_FRAME_GLOBAL_INT,
+                    MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                    0,
+                    0,
+                    ads_list_len + 4,
+                    0,
+                    0,
+                    0,
+                    int(coords[index - ads_list_len].latitude() * 1e7),
+                    int(coords[index - ads_list_len].longitude() * 1e7),
+                    0,
+                    MAV_MISSION_TYPE_FENCE
+                )
+            else:
+                self.mavlink_connection.mav.mission_item_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    index,
+                    MAV_FRAME_GLOBAL,
+                    MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                    0,
+                    0,
+                    ads_list_len + 4,
+                    0,
+                    0,
+                    0,
+                    coords[index - ads_list_len].latitude(),
+                    coords[index - ads_list_len].longitude(),
+                    0,
+                    MAV_MISSION_TYPE_FENCE
+                )
+        else:
+            ads_list: list[AdsData] = self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas
+            qDebug("Sending ads with position %s" % (ads_list[index].position))
+            if use_item_int:
+                self.mavlink_connection.mav.mission_item_int_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    index,
+                    MAV_FRAME_GLOBAL_INT,
+                    MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION,
+                    0,
+                    0,
+                    ads_list[index].size,
+                    0,
+                    0,
+                    0,
+                    int(ads_list[index].position.latitude() * 1e7),
+                    int(ads_list[index].position.longitude() * 1e7),
+                    0,
+                    MAV_MISSION_TYPE_FENCE
+                )
+            else:
+                self.mavlink_connection.mav.mission_item_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    index,
+                    MAV_FRAME_GLOBAL,
+                    MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION,
+                    0,
+                    0,
+                    ads_list[index].size,
+                    0,
+                    0,
+                    0,
+                    ads_list[index].position.latitude(),
+                    ads_list[index].position.longitude(),
+                    0,
+                    MAV_MISSION_TYPE_FENCE
+                )
+
+
+    def update_geofence_data(self, ads_list: list[AdsData]):
+        has_a_fence = self.ui.map_view.coords_for_geofence.is_set
+        self.mavlink_connection.mav.mission_clear_all_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_FENCE)
+        fence_count: int = len(ads_list)
+        if has_a_fence:
+            fence_count += 4
+        qDebug("Sending mission count: %s" % fence_count)
+        self.mavlink_connection.mav.mission_count_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            fence_count,
+            MAV_MISSION_TYPE_FENCE
+        )
 
     def __reset_geofence_dialog(self):
         self.geofence_dialog = None
@@ -734,6 +870,7 @@ class MainWindow(QMainWindow):
                                                             e.value[0],
                                                             e.value[3],
                                                             0, 0, 0, 0, 0))
+        self._enable_fence()
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)

@@ -1,13 +1,13 @@
 import math
 
 from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, Property, Signal, \
-    QPointF, qInfo
+    QPointF
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget, QDialogButtonBox
-from pymavlink.dialects.v10.all import MAV_CMD_DO_REPOSITION, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, MAV_FRAME_GLOBAL, \
-    MAV_FRAME_GLOBAL_TERRAIN_ALT, MAV_FRAME_GLOBAL_TERRAIN_ALT_INT
+from pymavlink.dialects.v20.all import MAV_CMD_DO_REPOSITION, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, \
+    MAV_FRAME_GLOBAL_TERRAIN_ALT_INT
 from pymavlink.mavutil import mavfile
 
 from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
@@ -147,7 +147,7 @@ def geo_to_screen(center: QGeoCoordinate, zoom: float, width: float, height: flo
 class MouseInputHandler(QObject):
     parent: MapWidget
     ard_dialog: AdvancedRepositionDialog = None
-    gc_cycle: int = 0
+    gc_cycle: int = 1
     def __init__(self, parent: MapWidget):
         super().__init__(parent)
         self.parent = parent
@@ -230,8 +230,6 @@ class MouseInputHandler(QObject):
             return
         qDebug("Pressed the mouse button %s in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
 
-        data: SpecialCoordsData = SpecialCoordsData()
-        data.position = coordinate
         match button:
             case Qt.MouseButton.LeftButton.value:
                 self.parent.selected_plane_team_no = -2
@@ -262,7 +260,6 @@ class MouseInputHandler(QObject):
                         # TODO: Following the plane
                         self.parent.plane_data_model.layoutChanged.emit()
                         return
-                return
             case Qt.MouseButton.RightButton.value:
                 if self.parent.mavlink_connection is None:
                     return
@@ -283,35 +280,35 @@ class MouseInputHandler(QObject):
                                                                     self.parent.reposition_altitude)
 
                 qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), self.parent.reposition_altitude, self.parent.reposition_loiter_radius))
-                return
             case Qt.MouseButton.MiddleButton.value:
-                data.coord_type = self.gc_cycle + 5
+                data: SpecialCoordsData = SpecialCoordsData()
+                data.position = coordinate
+                data.coord_type = self.gc_cycle + 5 # I hope i will remember how this works
+                qDebug("Gc cycle: %s" % self.gc_cycle)
+                current_cycle: int = self.gc_cycle
+                match self.gc_cycle:
+                    case 1:
+                        self.parent.coords_for_geofence.gc1_v = coordinate
+                    case 2:
+                        self.parent.coords_for_geofence.gc2_v = coordinate
+                    case 3:
+                        self.parent.coords_for_geofence.gc3_v = coordinate
+                    case 4:
+                        self.parent.coords_for_geofence.gc4_v = coordinate
+                        self.parent.coords_for_geofence.upload_geofence_data.emit()
+                        self.gc_cycle = 0
+                for mdata in self.parent.coord_data_model.m_datas:
+                    if mdata.coord_type == current_cycle + 5:
+                        qDebug("Removing mdata: %s, with type: %s" % (mdata.position, mdata.coord_type))
+                        self.parent.coord_data_model.m_datas.remove(mdata)
+                        break
+                self.parent.coords_for_geofence.gc_changed.emit()
+                self.gc_cycle = self.gc_cycle + 1
+                qDebug("next Gc cycle: %s" % self.gc_cycle)
+                self.parent.coord_data_model.m_datas.append(data)
+                self.parent.coord_data_model.layoutChanged.emit()
             case _:
                 qWarning("Invalid mouse input %s" % button)
-                return
-        if data.coord_type == self.gc_cycle + 5: # I hope i will remember how this works
-            qDebug("Gc cycle: %s" % self.gc_cycle)
-            match self.gc_cycle:
-                case 0 | 4:
-                    self.parent.coords_for_geofence.gc1_v = coordinate
-                    if self.gc_cycle == 4:
-                        self.gc_cycle = 0
-                case 1:
-                    self.parent.coords_for_geofence.gc2_v = coordinate
-                case 2:
-                    self.parent.coords_for_geofence.gc3_v = coordinate
-                case 3:
-                    self.parent.coords_for_geofence.gc4_v = coordinate
-            for mdata in self.parent.coord_data_model.m_datas:
-                if mdata.coord_type == self.gc_cycle + 5 or mdata.coord_type == 9: # 9 is 5
-                    qDebug("Removing mdata: %s, with type: %s" % (mdata.position, mdata.coord_type))
-                    self.parent.coord_data_model.m_datas.remove(mdata)
-                    break
-            self.parent.coords_for_geofence.gc_changed.emit()
-            self.gc_cycle = self.gc_cycle + 1
-            qDebug("next Gc cycle: %s" % self.gc_cycle)
-        self.parent.coord_data_model.m_datas.append(data)
-        self.parent.coord_data_model.layoutChanged.emit()
 
 ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
 
@@ -320,9 +317,15 @@ class GeofenceData(QObject):
     gc2_v: QGeoCoordinate = ZERO_GEO_COORDS
     gc3_v: QGeoCoordinate = ZERO_GEO_COORDS
     gc4_v: QGeoCoordinate = ZERO_GEO_COORDS
+    is_set: bool = False
+    upload_geofence_data = Signal()
     gc_changed = Signal()
     def __init__(self, parent: MapWidget):
         super().__init__(parent)
+        self.upload_geofence_data.connect(self.__on_set)
+
+    def __on_set(self):
+        self.is_set = True
 
     def read_gc1(self) -> QGeoCoordinate:
         return self.gc1_v
