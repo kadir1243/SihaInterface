@@ -88,7 +88,11 @@ class AdsData:
     is_selected: bool
 
 class AdsDataModel(QAbstractListModel):
-    m_datas: list[AdsData] = []
+    m_datas: list[AdsData]
+
+    def __init__(self, /):
+        super().__init__()
+        self.m_datas = []
 
     def data(self, index, /, role=...):
         if (not index.isValid()) or index.row() < 0 or index.row() >= len(self.m_datas):
