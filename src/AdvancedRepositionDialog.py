@@ -11,7 +11,7 @@ DEFAULT_SPEED: float = -1
 DEFAULT_YAW: float = float('nan')
 
 class AdvancedRepositionDialog(QDialog):
-    is_float_regex: QRegularExpression = QRegularExpression("[\\d.]+")
+    is_float_regex: QRegularExpression = QRegularExpression("[\\d.-]+")
     ui: Ui_AdvancedRepositionDialog
 
     def __init__(self, parent: QWidget):

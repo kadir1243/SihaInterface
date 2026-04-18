@@ -7,7 +7,7 @@ from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget, QDialogButtonBox
 from pymavlink.dialects.v20.all import MAV_CMD_DO_REPOSITION, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, \
-    MAV_FRAME_GLOBAL_TERRAIN_ALT_INT
+    MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
 from pymavlink.mavutil import mavfile
 
 from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
@@ -199,7 +199,7 @@ class MouseInputHandler(QObject):
         loiter_radius: float = self.return_non_null(self.ard_dialog.ui.loiter_radius.text(), self.parent.reposition_loiter_radius)
         self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                             self.parent.mavlink_connection.target_component,
-                                                            MAV_FRAME_GLOBAL_TERRAIN_ALT_INT,
+                                                            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
                                                             MAV_CMD_DO_REPOSITION,
                                                             0,
                                                             0,
@@ -238,7 +238,9 @@ class MouseInputHandler(QObject):
             case Qt.MouseButton.LeftButton.value:
                 self.parent.selected_plane_team_no = -2
                 for m_data in self.parent.user_ads_data_model.m_datas:
-                    m_data.is_selected = False
+                    if m_data.is_selected:
+                        m_data.is_selected = False
+                        self.parent.user_ads_data_model.layoutChanged.emit()
                 for m_data in self.parent.user_ads_data_model.m_datas:
                     d = distance(coordinate, m_data.position) * 100000
                     qDebug("Distance to ads: %s, radius: %s" % (d, m_data.size))
@@ -271,7 +273,7 @@ class MouseInputHandler(QObject):
                 self.parent.target_coord.updated.emit()
                 self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                                     self.parent.mavlink_connection.target_component,
-                                                                    MAV_FRAME_GLOBAL_TERRAIN_ALT_INT,
+                                                                    MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
                                                                     MAV_CMD_DO_REPOSITION,
                                                                     0,
                                                                     0,
