@@ -135,7 +135,7 @@ Item {
             property var gc3: coords_for_geofence.gc3
             property var gc4: coords_for_geofence.gc4
             id: geofence
-            color: "#32cd32FF"
+            color: "#4032cd32"
             path: [gc1, gc2, gc3, gc4]
         }
         MapQuickItem {
