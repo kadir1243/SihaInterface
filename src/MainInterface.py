@@ -18,7 +18,8 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAVLink_fence_status_message, \
     MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION, MAV_FRAME_GLOBAL_INT, \
     MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, MAVLINK_MSG_ID_MISSION_REQUEST_INT, MAV_MISSION_TYPE_FENCE, \
-    MAVLINK_MSG_ID_MISSION_ACK, MAVLINK_MSG_ID_MISSION_REQUEST, MAV_FRAME_GLOBAL
+    MAVLINK_MSG_ID_MISSION_ACK, MAVLINK_MSG_ID_MISSION_REQUEST, MAV_FRAME_GLOBAL, MAVLINK_MSG_ID_BAD_DATA, \
+    MAVLINK_MSG_ID_COMMAND_ACK
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -109,6 +110,8 @@ class TrackableDataUpdate:
 
 TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
 
+MSG_ID_2_TRACKABLE_DATA_TYPE: dict[int, TrackableDataPacketTimer] = {}
+
 class TrackableDataPacketTimer(Enum):
     # (msg id, msg name, type, update interval (ms), watch value ids that uses this packet)
     BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 1000000, [10])
@@ -119,6 +122,9 @@ class TrackableDataPacketTimer(Enum):
     GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 100000, [2, 12])
     SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 100000, [7])
     FENCE_STATUS = (162, "FENCE_STATUS", MAVLink_fence_status_message, 100000, [13])
+
+for ____trackable_data_packet_timer in TrackableDataPacketTimer:
+    MSG_ID_2_TRACKABLE_DATA_TYPE[____trackable_data_packet_timer.value[0]] = ____trackable_data_packet_timer
 
 class TrackableDataEnum(Enum):
     # (id, name, update function, updater packet, should be updated on background (telemetry etc), is it in watch_list widget)
@@ -237,25 +243,28 @@ class MavlinkWorker(QObject):
                 break
             if packet is None:
                 continue
-            if packet.get_type() == "BAD_DATA":
+            msgID: int = packet.get_header().msgId
+            if msgID == MAVLINK_MSG_ID_BAD_DATA:
                 if all_printable(packet.data):
                     qWarning("Invalid data received: %s" % packet.data)
                 else:
                     qWarning("Invalid data received")
                 continue
-            elif packet.get_header().msgId == MAVLINK_MSG_ID_MISSION_REQUEST_INT:
+            elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST_INT:
                 self.parent.send_mission_data(packet.seq, True)
-            elif packet.get_header().msgId == MAVLINK_MSG_ID_MISSION_REQUEST:
+            elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST:
                 self.parent.send_mission_data(packet.seq, False) # Time to handle weird Legacy code
-            elif packet.get_header().msgId == MAVLINK_MSG_ID_MISSION_ACK:
+            elif msgID == MAVLINK_MSG_ID_MISSION_ACK:
                 qDebug("MissionACK packet received with type %s and with mission_type %s" % (packet.type, packet.mission_type))
-            else:
-                for e in TrackableDataPacketTimer:
-                    if e.value[0] == packet.get_header().msgId:
-                        data_enum_values = e.value[4]
-                        for i in data_enum_values:
-                            self.trigger_update_value(TrackableDataEnum.from_id(i), packet)
-                        break
+            elif msgID == MAVLINK_MSG_ID_COMMAND_ACK:
+                qDebug("CommandACK received for command %s and result %s" % (packet.command, packet.result))
+            elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
+                e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
+                data_enum_values = e.value[4]
+                for i in data_enum_values:
+                    self.trigger_update_value(TrackableDataEnum.from_id(i), packet)
+            # else:
+            #     qDebug("Ignoring packet with id %s" % msgID)
 
 SERVER_IS_UNREACHABLE_COUNTER = 0
 
@@ -573,7 +582,7 @@ class MainWindow(QMainWindow):
                     MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
                     0,
                     0,
-                    ads_list_len + 4,
+                    4,
                     0,
                     0,
                     0,
@@ -591,7 +600,7 @@ class MainWindow(QMainWindow):
                     MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
                     0,
                     0,
-                    ads_list_len + 4,
+                    4,
                     0,
                     0,
                     0,
@@ -863,13 +872,13 @@ class MainWindow(QMainWindow):
             1
         )
         for e in TrackableDataPacketTimer:
-            self.mavlink_connection.mav.send(self.mavlink_connection.mav.command_long_encode(self.mavlink_connection.target_system,
+            self.mavlink_connection.mav.command_long_send(self.mavlink_connection.target_system,
                                                             self.mavlink_connection.target_component,
                                                             mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
                                                             0,
                                                             e.value[0],
                                                             e.value[3],
-                                                            0, 0, 0, 0, 0))
+                                                            0, 0, 0, 0, 0)
         self._enable_fence()
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
