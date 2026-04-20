@@ -4,9 +4,6 @@ import re
 from enum import Enum
 from functools import partial
 
-from src.CommandLandDialog import CommandLandDialog
-from src.CommandTakeoffDialog import CommandTakeoffDialog
-
 os.environ['MAVLINK20'] = '1'
 
 from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, QLocale, QTranslator, QCoreApplication
@@ -292,8 +289,6 @@ class MainWindow(QMainWindow):
     color_selector_dialog: ColorSelectorInterface | None = None
     geofence_dialog: SetGeofenceInterface | None = None
     add_ads_dialog: AddADSInterface | None = None
-    command_land_dialog: CommandLandDialog | None = None
-    command_takeoff_dialog: CommandTakeoffDialog | None = None
     server_connection: ServerConnection = ServerConnection()
     mavlink_connection: mavfile
     force_sending_telemetry: bool = False
@@ -366,34 +361,6 @@ class MainWindow(QMainWindow):
         self.ui.map_view.user_ads_data_model.layoutChanged.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
         self.ui.map_view.server_ads_data_model.layoutChanged.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
         self.ui.map_view.coords_for_geofence.upload_geofence_data.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
-        self.ui.actionLand.triggered.connect(self.__land_command)
-        self.ui.actionTakeoff.triggered.connect(self.__takeoff_command)
-        self.ui.actionReturn_To_Launch.triggered.connect(self.__action_rtl)
-
-    def __action_rtl(self) -> None:
-        if self.uav_connection.connection_type is None:
-            return
-        self.mavlink_connection.set_mode_rtl()
-
-    def __land_command(self):
-        if self.uav_connection.connection_type is None or not (self.command_land_dialog is None):
-            return
-        self.command_land_dialog = CommandLandDialog(self, self.mavlink_connection)
-        self.command_land_dialog.finished.connect(self.reset_command_land_dialog)
-        self.command_land_dialog.show()
-
-    def reset_command_land_dialog(self):
-        self.command_land_dialog = None
-
-    def __takeoff_command(self):
-        if self.uav_connection.connection_type is None or not (self.command_takeoff_dialog is None):
-            return
-        self.command_takeoff_dialog = CommandTakeoffDialog(self, self.mavlink_connection, self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam)
-        self.command_takeoff_dialog.finished.connect(self.reset_command_takeoff_dialog)
-        self.command_takeoff_dialog.show()
-
-    def reset_command_takeoff_dialog(self):
-        self.command_takeoff_dialog = None
 
     def _remove_ads(self):
         for m_data in self.ui.map_view.user_ads_data_model.m_datas:
@@ -468,15 +435,12 @@ class MainWindow(QMainWindow):
 
     def get_all_dialogs(self):
         return [self.uav_connection_dialog,
-                self.server_connection_dialog,
-                self.color_selector_dialog,
-                self.geofence_dialog,
-                self.add_ads_dialog,
-                self.camera_server_connection_dialog,
-                self.ui.map_view.mouse_input_handler.ard_dialog,
-                self.command_land_dialog,
-                self.command_takeoff_dialog
-        ]
+                   self.server_connection_dialog,
+                   self.color_selector_dialog,
+                   self.geofence_dialog,
+                   self.add_ads_dialog,
+                   self.camera_server_connection_dialog,
+                   self.ui.map_view.mouse_input_handler.ard_dialog]
 
     def retranslateOpenDialogs(self):
         dialogs = self.get_all_dialogs()
@@ -939,9 +903,6 @@ class MainWindow(QMainWindow):
     def enableFeaturesAfterUAVConnected(self):
         self.ui.arm_mode.setEnabled(True)
         self.ui.fly_mode_combobox.setEnabled(True)
-        self.ui.actionLand.setEnabled(True)
-        self.ui.actionTakeoff.setEnabled(True)
-        self.ui.actionReturn_To_Launch.setEnabled(True)
         self.ui.device_connection_warning.hide()
         if self.server_connection.ip is None:
             self.plane_on_map_update_timer.start()
@@ -949,9 +910,6 @@ class MainWindow(QMainWindow):
     def disableFeaturesAfterUAVDisconnected(self):
         self.ui.arm_mode.setEnabled(False)
         self.ui.fly_mode_combobox.setEnabled(False)
-        self.ui.actionLand.setEnabled(False)
-        self.ui.actionTakeoff.setEnabled(False)
-        self.ui.actionReturn_To_Launch.setEnabled(False)
         self.ui.device_connection_warning.show()
         if self.plane_on_map_update_timer.isActive():
             self.plane_on_map_update_timer.stop()
