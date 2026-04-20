@@ -201,8 +201,7 @@ class MouseInputHandler(QObject):
             self.parent.reposition_yaw = float(self.ard_dialog.ui.yaw.text())
 
     def ard_ok(self):
-        self.parent.target_coord.position_v = QGeoCoordinate(float(self.ard_dialog.ui.latitude.text()), float(self.ard_dialog.ui.longitude.text()))
-        self.parent.target_coord.updated.emit()
+        self.parent.target_coord.set_position(QGeoCoordinate(float(self.ard_dialog.ui.latitude.text()), float(self.ard_dialog.ui.longitude.text())))
         speed: float = self.return_non_null(self.ard_dialog.ui.speed.text(), self.parent.reposition_speed)
         yaw: float = self.return_non_null(self.ard_dialog.ui.yaw.text(), self.parent.reposition_yaw)
         loiter_radius: float = self.return_non_null(self.ard_dialog.ui.loiter_radius.text(), self.parent.reposition_loiter_radius)
@@ -278,8 +277,7 @@ class MouseInputHandler(QObject):
             case Qt.MouseButton.RightButton.value:
                 if self.parent.mavlink_connection is None:
                     return
-                self.parent.target_coord.position_v = coordinate
-                self.parent.target_coord.updated.emit()
+                self.parent.target_coord.set_position(coordinate)
                 self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                                     self.parent.mavlink_connection.target_component,
                                                                     MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
@@ -360,12 +358,22 @@ class GeofenceData(QObject):
     gc4 = Property(QGeoCoordinate, read_gc4, notify=gc_changed)
 class RepositionTargetHolder(QObject):
     position_v: QGeoCoordinate = QGeoCoordinate()
+    is_set: bool = False
     updated = Signal()
     def __init__(self, parent: QWidget):
         super().__init__(parent)
 
     def read_position(self) -> QGeoCoordinate:
         return self.position_v
+
+    def set_position(self, position: QGeoCoordinate):
+        self.position_v = position
+        self.is_set = True
+        self.updated.emit()
+
+    def remove_position(self):
+        self.set_position(QGeoCoordinate())
+        self.is_set = False
 
     position = Property(QGeoCoordinate, read_position, notify=updated)
 
@@ -378,6 +386,7 @@ class MapWidget(QQuickWidget):
     mavlink_connection: mavfile | None = None
     server_ads_data_model: AdsDataModel
     user_ads_data_model: AdsDataModel
+    upload_ads_data = Signal()
     selected_plane_team_no: int = -2
     target_coord: RepositionTargetHolder
     reposition_altitude: float = DEFAULT_ALTITUDE
@@ -433,6 +442,7 @@ class MapWidget(QQuickWidget):
             data.is_selected = False
             self.server_ads_data_model.m_datas.append(data)
         self.server_ads_data_model.layoutChanged.emit()
+        self.upload_ads_data.emit()
 
     def update_ads_data(self, ads: AdsData):
         self.user_ads_data_model.m_datas.append(ads)
