@@ -193,10 +193,22 @@ class SupportedLanguages(Enum):
 LANGUAGE_ACTIONS: dict[int, QAction] = {}
 
 class UavConnection:
-    connection_type: ConnectionType | None = None
-    serial_port: int | None = None
-    serial_baud_rate: int | None = None
-    ip: str | None = None
+    connection_type: ConnectionType | None
+    serial_port: int
+    serial_baud_rate: int
+    ip: str
+
+    def __init__(self):
+        self.connection_type = None
+        self.serial_port = None
+        self.serial_baud_rate = None
+        self.ip = None
+
+    def reset_connection_properties(self) -> None:
+        self.serial_port = None
+        self.serial_baud_rate = None
+        self.ip = None
+        self.connection_type = None
 
 class ServerConnection:
     ip: str | None = None
@@ -854,16 +866,13 @@ class MainWindow(QMainWindow):
                 qInfo("Can not connect to UAV from %s" % (str(self.uav_connection.serial_port) + "," + str(self.uav_connection.serial_baud_rate)))
             else:
                 qInfo("Can not connect to UAV from %s" % self.uav_connection.ip)
-            self.uav_connection.serial_baud_rate = None
-            self.uav_connection.serial_port = None
-            self.uav_connection.ip = None
-            self.uav_connection.connection_type = None
+            self.uav_connection.reset_connection_properties()
             self.ui.device_connection_warning.show()
             self.mavlink_connection.close()
             self.ui.map_view.mavlink_connection = None
             return
         self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
-        self.uav_connection.connection_type = self.uav_connection_dialog.connection_type # Only set connection_type after successfully connecting
+        self.uav_connection.connection_type = self.uav_connection_dialog.connection_type
         self.mavlink_connection.mav.request_data_stream_send(
             self.mavlink_connection.target_system,
             self.mavlink_connection.target_component,
@@ -913,7 +922,7 @@ class MainWindow(QMainWindow):
         self.mavlink_thread.quit()
         self.mavlink_thread.wait()
         self.mavlink_connection.close()
-        self.uav_connection.connection_type = None
+        self.uav_connection.reset_connection_properties()
         self.disableFeaturesAfterUAVDisconnected()
         self.next_telemetry = TelemetryData()
         self.resetWatcherWidgetValues()

@@ -16,7 +16,7 @@ class ConnectionType(Enum):
 class FightingUAVConnectionInterface(QDialog):
     _ip_with_port_regex: QRegularExpression = QRegularExpression("[\\d.:]+")
     _serial_baud_regex: QRegularExpression = QRegularExpression("[\\d]+")
-    ui = Ui_UAVConnection = Ui_UAVConnection()
+    ui: Ui_UAVConnection = Ui_UAVConnection()
     connection_type: ConnectionType
 
     def __init__(self, parent: QWidget | None = None):

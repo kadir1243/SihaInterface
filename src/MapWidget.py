@@ -27,7 +27,11 @@ class PlaneData:
         self.rotation = rotation
 
 class PlaneDataModel(QAbstractListModel):
-    m_datas: list[PlaneData] = []
+    m_datas: list[PlaneData]
+
+    def __init__(self, /):
+        super().__init__()
+        self.m_datas = []
 
     def data(self, index, /, role=...):
         if (not index.isValid()) or index.row() < 0 or index.row() >= len(self.m_datas):
@@ -57,10 +61,14 @@ class PlaneDataModel(QAbstractListModel):
 
 class SpecialCoordsData:
     position: QGeoCoordinate
-    coord_type: int = -1 # 0 for geofence, 1 for target coord
+    coord_type: int # 0 for geofence
 
 class SpecialCoordsDataModel(QAbstractListModel):
-    m_datas: list[SpecialCoordsData] = []
+    m_datas: list[SpecialCoordsData]
+
+    def __init__(self, /):
+        super().__init__()
+        self.m_datas = []
 
     def data(self, index, /, role=...):
         if (not index.isValid()) or index.row() < 0 or index.row() >= len(self.m_datas):
@@ -151,10 +159,11 @@ def geo_to_screen(center: QGeoCoordinate, zoom: float, width: float, height: flo
 class MouseInputHandler(QObject):
     parent: MapWidget
     ard_dialog: AdvancedRepositionDialog = None
-    gc_cycle: int = 1
+    gc_cycle: int
     def __init__(self, parent: MapWidget):
         super().__init__(parent)
         self.parent = parent
+        self.gc_cycle = 1
 
     @Slot(int, QGeoCoordinate)
     def handle_mouse_input_to_map_with_ctrl(self, button: int, coordinate: QGeoCoordinate):

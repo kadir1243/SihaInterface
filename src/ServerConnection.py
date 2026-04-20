@@ -13,10 +13,10 @@ def login_to_server(target_address: str, username: str, password: str) -> int:
     return int(login.text)
 
 class GpsSaati:
-    saat: int = 0
-    dakika: int = 0
-    saniye: int = 0
-    milisaniye: int = 0
+    saat: int
+    dakika: int
+    saniye: int
+    milisaniye: int
 
     def __init__(self, time: QTime):
         self.milisaniye = time.msec()
@@ -25,22 +25,40 @@ class GpsSaati:
         self.saat = time.hour()
 
 class TelemetryData:
-    takim_numarasi: int = -1
-    iha_enlem: float = 0
-    iha_boylam: float = 0
-    iha_irtifa: float = 0
-    iha_dikilme: float = 0
-    iha_yonelme: float = 0
-    iha_yatis: float = 0
-    iha_hiz: float = 0
-    iha_batarya: float = 0
-    iha_otonom: int = 1
-    iha_kilitlenme: int = 0
-    hedef_merkez_X: int = 0
-    hedef_merkez_Y: int = 0
-    hedef_genislik: int = 0
-    hedef_yukseklik: int = 0
-    gps_saati: GpsSaati = GpsSaati(QTime())
+    takim_numarasi: int
+    iha_enlem: float
+    iha_boylam: float
+    iha_irtifa: float
+    iha_dikilme: float
+    iha_yonelme: float
+    iha_yatis: float
+    iha_hiz: float
+    iha_batarya: float
+    iha_otonom: int
+    iha_kilitlenme: int
+    hedef_merkez_X: int
+    hedef_merkez_Y: int
+    hedef_genislik: int
+    hedef_yukseklik: int
+    gps_saati: GpsSaati
+
+    def __init__(self):
+        self.takim_numarasi = -1
+        self.iha_enlem = 0
+        self.iha_boylam = 0
+        self.iha_irtifa = 0
+        self.iha_dikilme = 0
+        self.iha_yonelme = 0
+        self.iha_yatis = 0
+        self.iha_hiz = 0
+        self.iha_batarya = 0
+        self.iha_otonom = 1
+        self.iha_kilitlenme = 0
+        self.hedef_merkez_X = 0
+        self.hedef_merkez_Y = 0
+        self.hedef_genislik = 0
+        self.hedef_yukseklik = 0
+        self.gps_saati = GpsSaati(QTime())
 
 class TelemetryResponseUavData:
     takim_numarasi: int
@@ -54,8 +72,11 @@ class TelemetryResponseUavData:
     zaman_farki: int
 
 class TelemetryResponseData:
-    sunucusaati: GpsSaati = GpsSaati(QTime()) # I don't really care 'gun' field in response
-    konumBilgileri: list[TelemetryResponseUavData] = []
+    sunucusaati: GpsSaati # I don't really care 'gun' field in response
+    konumBilgileri: list[TelemetryResponseUavData]
+    def __init__(self):
+        self.sunucusaati = GpsSaati(QTime())
+        self.konumBilgileri = []
 
 SERVER_IS_UNREACHABLE_COUNTER: int = 0 # When this hits 100, disconnect from server
 
