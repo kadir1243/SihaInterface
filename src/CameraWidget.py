@@ -2,8 +2,9 @@ import struct
 from enum import Enum
 
 import lz4.block
-from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal, QSize
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal, QSize, QPointF, \
+    QPoint
+from PySide6.QtGui import QImage, QPixmap, QPaintEvent, QPainterPath, QPainter, QPen
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
 from PySide6.QtWidgets import QWidget, QLabel, QGridLayout
 
@@ -16,7 +17,6 @@ class SocketWrapper(QObject):
     def __init__(self, parentWidget: CameraWidget):
         super().__init__()
         self.parentWidget = parentWidget
-        self.update_camera_in_ui.connect(lambda img: self.parentWidget.label.setPixmap(img.scaled(self.parentWidget.size(), Qt.AspectRatioMode.KeepAspectRatio)))
 
     # My Internal Server Code
     #def split_bylen(item, maxlen):  # I don't remember where i copied this from, but thanks for answer in stackoverflow :D
@@ -132,19 +132,49 @@ class CameraServerInfo:
     port: int
     protocol: CameraServerProtocol
 
+class LabelWithRectangle(QLabel):
+    is_no_stream_image: bool
+    def __init__(self, parent):
+        QLabel.__init__(self, parent=parent)
+        self.is_no_stream_image = True
+
+    def paintEvent(self, e: QPaintEvent, /):
+        super().paintEvent(e)
+        if self.is_no_stream_image:
+            return
+        size: QSize = self.size()
+        pos: QPoint = self.pos()
+        vertical_size = size.height() / 10
+        horizontal_size = size.width() / 4
+        painter: QPainter = QPainter(self)
+
+        point1 = QPointF(pos.x() + size.width() - horizontal_size, pos.y() + size.height() - vertical_size)
+        point2 = QPointF(pos.x() + horizontal_size, pos.y() + size.height() - vertical_size)
+        point3 = QPointF(pos.x() + horizontal_size, pos.y() + vertical_size)
+        point4 = QPointF(pos.x() + size.width() - horizontal_size, pos.y() + vertical_size)
+
+        painter_path: QPainterPath = QPainterPath(point1)
+        painter_path.lineTo(point2)
+        painter_path.lineTo(point3)
+        painter_path.lineTo(point4)
+        painter_path.lineTo(point1)
+        pen: QPen = QPen(Qt.GlobalColor.yellow)
+        painter.setPen(pen)
+        painter.drawPath(painter_path)
+
 class CameraWidget(QWidget):
     reconnect_timer: QTimer
     connection_thread: QThread | None = None
     socketWorker: SocketWrapper | None = None
     camera_server_info: CameraServerInfo = CameraServerInfo()
-    label: QLabel
+    label: LabelWithRectangle
 
     def __init__(self, parent: QWidget | None = None):
         QWidget.__init__(self, parent=parent)
         self.gridLayout = QGridLayout(self)
         self.gridLayout.setSpacing(0)
         self.gridLayout.setContentsMargins(0, 0, 0, 0)
-        self.label = QLabel(self)
+        self.label = LabelWithRectangle(self)
         self.label.setScaledContents(True)
         self.set_no_connection_image()
         self.label.show()
@@ -153,7 +183,8 @@ class CameraWidget(QWidget):
         self.reconnect_timer = QTimer(self)
 
     def set_no_connection_image(self):
-        self.label.setPixmap(QPixmap.fromImageInPlace(QImage("ui_files/no_video_stream_found.png")).scaled(QSize(500, 200)))
+        self.label.setPixmap(QPixmap.fromImageInPlace(QImage("ui_files/no_video_stream_found.png")).scaled(QSize(500, 200), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation))
+        self.label.is_no_stream_image = True
 
     def resizeEvent(self, event, /):
         if event.size().height() == 0 or event.size().width() == 0: # Widget should be hidden, for some reason hide and show does not get called on qsplitter
@@ -181,7 +212,9 @@ class CameraWidget(QWidget):
                 return
             qDebug("Camera Connection Thread already started")
             return
+        self.label.is_no_stream_image = False
         self.socketWorker = SocketWrapper(self)
+        self.socketWorker.update_camera_in_ui.connect(lambda img: self.label.setPixmap(img.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)))
         self.connection_thread = QThread(self)
         self.connection_thread.setObjectName("Camera Connection Thread")
         self.connection_thread.finished.connect(self.socketWorker.close)
