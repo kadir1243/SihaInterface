@@ -1,7 +1,7 @@
 import math
 
 from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, Property, Signal, \
-    QPointF
+    QPointF, QTimer
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
@@ -221,6 +221,7 @@ class MouseInputHandler(QObject):
         qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s, with speed %s, and with yaw %s" % (
             self.parent.target_coord.position_v.latitude(), self.parent.target_coord.position_v.longitude(), float(self.ard_dialog.ui.altitude.text()),
             loiter_radius, speed, yaw))
+        self.parent.reposition_timer.start()
         self.ard_dialog.close()
         self.ard_reset()
 
@@ -291,6 +292,7 @@ class MouseInputHandler(QObject):
                                                                     int(coordinate.latitude() * 10**7),
                                                                     int(coordinate.longitude() * 10**7),
                                                                     self.parent.reposition_altitude)
+                self.parent.reposition_timer.start()
 
                 qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), self.parent.reposition_altitude, self.parent.reposition_loiter_radius))
             case Qt.MouseButton.MiddleButton.value:
@@ -393,6 +395,7 @@ class MapWidget(QQuickWidget):
     reposition_loiter_radius: float = DEFAULT_LOITER_RADIUS
     reposition_yaw: float = DEFAULT_YAW
     reposition_speed: float = DEFAULT_SPEED
+    reposition_timer: QTimer
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
@@ -403,6 +406,7 @@ class MapWidget(QQuickWidget):
         self.server_ads_data_model = AdsDataModel()
         self.user_ads_data_model = AdsDataModel()
         self.target_coord = RepositionTargetHolder(self)
+        self.reposition_timer = QTimer(self, singleShot=True, interval=100)
 
         self.engine().rootContext().setContextProperty("plane_data_model", self.plane_data_model)
         self.engine().rootContext().setContextProperty("coord_data_model", self.coord_data_model)

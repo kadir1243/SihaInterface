@@ -102,7 +102,7 @@ class TrackableDataUpdate:
         if mainwindow.ui.fly_mode_combobox.currentIndex() != index:
             mainwindow.last_mode_change_was_from_uav = True
             mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
-        if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set:
+        if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set and not mainwindow.ui.map_view.reposition_timer.isActive():
             mainwindow.ui.map_view.target_coord.remove_position()
         return str(arm)
     @staticmethod
@@ -231,6 +231,9 @@ class MavlinkWorker(QObject):
     update_watch_list = Signal(int, str)
     create_warning = Signal(str)
     fence_mission_count: int
+    mission_fence_item_received = Signal(MAVLink_mission_item_message, int)
+    mission_fence_item_int_received = Signal(MAVLink_mission_item_int_message, int)
+    send_mission_data = Signal(int, bool)
     def __init__(self, mavlink_connection: mavfile, parent: MainWindow):
         super().__init__()
         self.mavlink_connection = mavlink_connection
@@ -265,10 +268,10 @@ class MavlinkWorker(QObject):
                     qWarning("Invalid data received")
             elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST_INT:
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.parent.send_mission_data(packet.seq, True)
+                    self.send_mission_data.emit(packet.seq, True)
             elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST: # Time to handle deprecated Legacy code
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.parent.send_mission_data(packet.seq, False)
+                    self.send_mission_data.emit(packet.seq, False)
             elif msgID == MAVLINK_MSG_ID_MISSION_ACK:
                 qDebug("MissionACK packet received with type %s and with mission_type %s" % (packet.type, packet.mission_type))
             elif msgID == MAVLINK_MSG_ID_MISSION_COUNT:
@@ -281,10 +284,10 @@ class MavlinkWorker(QObject):
                         self.parent.requested_to_get_fence = False
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM_INT:
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.parent.mission_fence_item_int_received(packet, self.fence_mission_count)
+                    self.mission_fence_item_int_received.emit(packet, self.fence_mission_count)
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM:
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.parent.mission_fence_item_received(packet, self.fence_mission_count)
+                    self.mission_fence_item_received.emit(packet, self.fence_mission_count)
             elif msgID == MAVLINK_MSG_ID_COMMAND_ACK:
                 command: int = packet.command
                 result: int = packet.result
@@ -386,12 +389,25 @@ class MainWindow(QMainWindow):
         self.ui.actionAbout.triggered.connect(self._about)
         self.ui.actionAbout_Qt.triggered.connect(lambda: QMessageBox.aboutQt(self))
         self.ui.actionDownload_Fence_Mission_Data.triggered.connect(self.request_fence_data)
+        self.fence_upload_timout = QTimer(self, singleShot=True, interval=10000)
+        self.fence_upload_timout.timeout.connect(self.fence_upload_reset)
+        self.fence_download_timout = QTimer(self, singleShot=True, interval=10000)
+        self.fence_download_timout.timeout.connect(self.request_fence_data_timeout)
 
     def request_fence_data(self):
         if self.uav_connection.connection_type is None:
             return
         self.requested_to_get_fence = True
         self.mavlink_connection.mav.mission_request_list_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_FENCE)
+        self.fence_download_timout.start()
+
+    def request_fence_data_timeout(self):
+        qWarning("Fence Upload taking really long, probably vehicle connection has been lost")
+        self._create_warning("Fence Upload taking really long, probably vehicle connection has been lost")
+        self.next_order_seq_id = 0
+        self.requested_to_get_fence = False
+        self.ui.map_view.user_ads_data_model.layoutChanged.emit()
+        self.coord_counter = 1
 
     coord_counter: int = 1
     next_order_seq_id: int = 0
@@ -436,6 +452,7 @@ class MainWindow(QMainWindow):
             self.ui.map_view.coord_data_model.m_datas.append(data)
             self.ui.map_view.coord_data_model.layoutChanged.emit()
             self.coord_counter += 1
+        self.fence_download_timout.start()
         if seq + 1 != count:
             if use_int:
                 self.mavlink_connection.mav.mission_request_int_send(self.mavlink_connection.target_system,
@@ -447,6 +464,7 @@ class MainWindow(QMainWindow):
                                                                      MAV_MISSION_TYPE_FENCE)
             self.next_order_seq_id = seq + 1
         else:
+            self.fence_download_timout.stop()
             self.mavlink_connection.mav.mission_ack_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_FENCE)
             self.next_order_seq_id = 0
             self.requested_to_get_fence = False
@@ -762,8 +780,10 @@ class MainWindow(QMainWindow):
                     0,
                     MAV_MISSION_TYPE_FENCE
                 )
+        self.fence_upload_timout.start()
         size: int = ads_list_len + 4 if self.requested_to_send_fence_with_fence else 0
         if size == index + 1:
+            self.fence_upload_timout.stop()
             self.ads_list_cache = []
             self.requested_to_send_fence_with_fence = False
     ads_list_cache: list[AdsData] = []
@@ -786,6 +806,13 @@ class MainWindow(QMainWindow):
             fence_count,
             MAV_MISSION_TYPE_FENCE
         )
+        self.fence_upload_timout.start()
+
+    def fence_upload_reset(self):
+        qWarning("Fence Upload taking really long, probably vehicle connection has been lost")
+        self._create_warning("Fence Upload taking really long, probably vehicle connection has been lost")
+        self.ads_list_cache = []
+        self.requested_to_send_fence_with_fence = False
 
     def __reset_geofence_dialog(self):
         self.geofence_dialog = None
@@ -1008,6 +1035,9 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.running = True
         self.mavlink_worker.update_watch_list.connect(self._apply_watch_update)
         self.mavlink_worker.create_warning.connect(self._create_warning)
+        self.mavlink_worker.mission_fence_item_received.connect(self.mission_fence_item_received)
+        self.mavlink_worker.mission_fence_item_int_received.connect(self.mission_fence_item_int_received)
+        self.mavlink_worker.send_mission_data.connect(self.send_mission_data)
         self.mavlink_thread.started.connect(self.mavlink_worker.run)
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
