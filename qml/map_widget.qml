@@ -129,6 +129,23 @@ Item {
                 }
             }
         }
+        MapItemView {
+            model: mission_coords_data_model
+            delegate: MapQuickItem {
+                id: mission_coords_item
+                property var position: model.position
+                coordinate: position
+                anchorPoint.x: waypoint_image.width / 2
+                anchorPoint.y: waypoint_image.height
+                sourceItem: Image {
+                    id: waypoint_image
+
+                    source: "../ui_files/waypoint_location.svg"
+                    width: 32
+                    height: 32
+            }
+            }
+        }
         MapPolygon {
             property var gc1: coords_for_geofence.gc1
             property var gc2: coords_for_geofence.gc2

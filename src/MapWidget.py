@@ -61,7 +61,7 @@ class PlaneDataModel(QAbstractListModel):
 
 class SpecialCoordsData:
     position: QGeoCoordinate
-    coord_type: int # 0 for geofence
+    coord_type: int # 0 for geofence, 1 for mission
 
 class SpecialCoordsDataModel(QAbstractListModel):
     m_datas: list[SpecialCoordsData]
@@ -383,6 +383,7 @@ class RepositionTargetHolder(QObject):
 class MapWidget(QQuickWidget):
     plane_data_model: PlaneDataModel
     coord_data_model: SpecialCoordsDataModel
+    mission_coords_data_model: SpecialCoordsDataModel
     coords_for_geofence: GeofenceData = None
     mouse_input_handler: MouseInputHandler
     mavlink_connection: mavfile | None = None
@@ -401,6 +402,7 @@ class MapWidget(QQuickWidget):
         QQuickWidget.__init__(self, parent)
         self.plane_data_model = PlaneDataModel()
         self.coord_data_model = SpecialCoordsDataModel()
+        self.mission_coords_data_model = SpecialCoordsDataModel()
         self.mouse_input_handler = MouseInputHandler(self)
         self.coords_for_geofence = GeofenceData(self)
         self.server_ads_data_model = AdsDataModel()
@@ -410,6 +412,7 @@ class MapWidget(QQuickWidget):
 
         self.engine().rootContext().setContextProperty("plane_data_model", self.plane_data_model)
         self.engine().rootContext().setContextProperty("coord_data_model", self.coord_data_model)
+        self.engine().rootContext().setContextProperty("mission_coords_data_model", self.mission_coords_data_model)
         self.engine().rootContext().setContextProperty("coords_for_geofence", self.coords_for_geofence)
         self.engine().rootContext().setContextProperty("server_ads_data_model", self.server_ads_data_model)
         self.engine().rootContext().setContextProperty("user_ads_data_model", self.user_ads_data_model)

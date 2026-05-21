@@ -21,7 +21,8 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAVLINK_MSG_ID_COMMAND_ACK, MAV_CMD_DO_REPOSITION, MAV_RESULT_ACCEPTED, MAV_RESULT_DENIED, \
     MAVLINK_MSG_ID_MISSION_COUNT, MAVLINK_MSG_ID_MISSION_ITEM_INT, MAVLink_mission_item_int_message, \
     MAV_MISSION_ACCEPTED, MAVLINK_MSG_ID_MISSION_ITEM, MAVLink_mission_item_message, MAV_MODE_FLAG_SAFETY_ARMED, \
-    MAV_CMD_COMPONENT_ARM_DISARM, MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, MAV_CMD_SET_MESSAGE_INTERVAL
+    MAV_CMD_COMPONENT_ARM_DISARM, MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
+    MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -231,9 +232,12 @@ class MavlinkWorker(QObject):
     update_watch_list = Signal(int, str)
     create_warning = Signal(str)
     fence_mission_count: int
+    waypoint_mission_count: int
     mission_fence_item_received = Signal(MAVLink_mission_item_message, int)
     mission_fence_item_int_received = Signal(MAVLink_mission_item_int_message, int)
-    send_mission_data = Signal(int, bool)
+    mission_waypoint_item_received = Signal(MAVLink_mission_item_message, int)
+    mission_waypoint_item_int_received = Signal(MAVLink_mission_item_int_message, int)
+    send_fence_mission_data = Signal(int, bool)
     def __init__(self, mavlink_connection: mavfile, parent: MainWindow):
         super().__init__()
         self.mavlink_connection = mavlink_connection
@@ -268,10 +272,10 @@ class MavlinkWorker(QObject):
                     qWarning("Invalid data received")
             elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST_INT:
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.send_mission_data.emit(packet.seq, True)
+                    self.send_fence_mission_data.emit(packet.seq, True)
             elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST: # Time to handle deprecated Legacy code
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.send_mission_data.emit(packet.seq, False)
+                    self.send_fence_mission_data.emit(packet.seq, False)
             elif msgID == MAVLINK_MSG_ID_MISSION_ACK:
                 qDebug("MissionACK packet received with type %s and with mission_type %s" % (packet.type, packet.mission_type))
             elif msgID == MAVLINK_MSG_ID_MISSION_COUNT:
@@ -282,12 +286,24 @@ class MavlinkWorker(QObject):
                         self.mavlink_connection.mav.mission_request_int_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, 0, MAV_MISSION_TYPE_FENCE)
                     else:
                         self.parent.requested_to_get_fence = False
+                elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
+                    self.waypoint_mission_count = packet.count
+                    qDebug("Received %s mission waypoint" % self.waypoint_mission_count)
+                    if self.waypoint_mission_count > 0:
+                        self.mavlink_connection.mav.mission_request_int_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, 0, MAV_MISSION_TYPE_MISSION)
+                    else:
+                        self.parent.requested_to_get_mission = False
+
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM_INT:
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
                     self.mission_fence_item_int_received.emit(packet, self.fence_mission_count)
+                elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
+                    self.mission_waypoint_item_int_received.emit(packet, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM:
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
                     self.mission_fence_item_received.emit(packet, self.fence_mission_count)
+                elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
+                    self.mission_waypoint_item_received.emit(packet, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_COMMAND_ACK:
                 command: int = packet.command
                 result: int = packet.result
@@ -393,6 +409,66 @@ class MainWindow(QMainWindow):
         self.fence_upload_timout.timeout.connect(self.fence_upload_reset)
         self.fence_download_timout = QTimer(self, singleShot=True, interval=10000)
         self.fence_download_timout.timeout.connect(self.request_fence_data_timeout)
+        self.mission_download_timout = QTimer(self, singleShot=True, interval=10000)
+        self.mission_download_timout.timeout.connect(self.request_mission_data_timeout)
+        self.ui.actionDownload_Waypoint_Mission_Data.triggered.connect(self.request_mission_data)
+
+    next_mission_order_seq_id: int = 0
+    requested_to_get_mission: bool = False
+    def request_mission_data(self):
+        if self.uav_connection.connection_type is None:
+            return
+        self.requested_to_get_mission = True
+        self.mavlink_connection.mav.mission_request_list_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_MISSION)
+        self.mission_download_timout.start()
+
+    def request_mission_data_timeout(self):
+        qWarning("Mission Download taking really long, probably vehicle connection has been lost")
+        self._create_warning("Mission Download taking really long, probably vehicle connection has been lost")
+        self.next_mission_order_seq_id = 0
+        self.requested_to_get_mission = False
+        self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
+
+    def mission_waypoint_received(self, coord: QGeoCoordinate, command: int, seq: int, use_int: bool, count: int):
+        if not self.requested_to_get_mission:
+            return
+        qDebug("Mission received with %s coords, %s command, %s seq" % (coord, command, seq))
+        if self.next_mission_order_seq_id != seq:
+            qDebug("Out of order mission")
+            return
+        if seq == 0:
+            self.ui.map_view.mission_coords_data_model.m_datas.clear()
+        coord_data: SpecialCoordsData = SpecialCoordsData()
+        coord_data.position = coord
+        coord_data.coord_type = 1
+        self.ui.map_view.mission_coords_data_model.m_datas.append(coord_data)
+        self.mission_download_timout.start()
+        if seq + 1 != count:
+            if use_int:
+                self.mavlink_connection.mav.mission_request_int_send(self.mavlink_connection.target_system,
+                                                                     self.mavlink_connection.target_component, seq + 1,
+                                                                     MAV_MISSION_TYPE_MISSION)
+            else:
+                self.mavlink_connection.mav.mission_request_send(self.mavlink_connection.target_system,
+                                                                     self.mavlink_connection.target_component, seq + 1,
+                                                                     MAV_MISSION_TYPE_MISSION)
+            self.next_mission_order_seq_id = seq + 1
+        else:
+            self.mission_download_timout.stop()
+            self.mavlink_connection.mav.mission_ack_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_MISSION)
+            self.next_mission_order_seq_id = 0
+            self.requested_to_get_mission = False
+            self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
+
+    def mission_waypoint_item_received(self, item: MAVLink_mission_item_message, count: int):
+        command: int = item.command
+        coord: QGeoCoordinate = QGeoCoordinate(item.x, item.y)
+        self.mission_waypoint_received(coord, command, item.seq, False, count)
+
+    def mission_waypoint_item_int_received(self, item: MAVLink_mission_item_int_message, count: int):
+        command: int = item.command
+        coord: QGeoCoordinate = QGeoCoordinate(item.x / 1e7, item.y / 1e7)
+        self.mission_waypoint_received(coord, command, item.seq, True, count)
 
     def request_fence_data(self):
         if self.uav_connection.connection_type is None:
@@ -402,15 +478,15 @@ class MainWindow(QMainWindow):
         self.fence_download_timout.start()
 
     def request_fence_data_timeout(self):
-        qWarning("Fence Upload taking really long, probably vehicle connection has been lost")
-        self._create_warning("Fence Upload taking really long, probably vehicle connection has been lost")
-        self.next_order_seq_id = 0
+        qWarning("Fence Download taking really long, probably vehicle connection has been lost")
+        self._create_warning("Fence Download taking really long, probably vehicle connection has been lost")
+        self.next_fence_order_seq_id = 0
         self.requested_to_get_fence = False
         self.ui.map_view.user_ads_data_model.layoutChanged.emit()
         self.coord_counter = 1
 
     coord_counter: int = 1
-    next_order_seq_id: int = 0
+    next_fence_order_seq_id: int = 0
     requested_to_get_fence: bool = False
     def mission_fence_item_int_received(self, item: MAVLink_mission_item_int_message, count: int):
         command: int = item.command
@@ -421,8 +497,8 @@ class MainWindow(QMainWindow):
     def mission_fence_received(self, coord: QGeoCoordinate, command: int, seq: int, ads_size: float, use_int: bool, count: int):
         if not self.requested_to_get_fence:
             return
-        qDebug("Mission fence received with %s coords, %s command, %s seq" % (coord, command, seq))
-        if self.next_order_seq_id != seq:
+        qDebug("Fence received with %s coords, %s command, %s seq" % (coord, command, seq))
+        if self.next_fence_order_seq_id != seq:
             qDebug("Out of order fence")
             return
         if command == MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION:
@@ -462,11 +538,11 @@ class MainWindow(QMainWindow):
                 self.mavlink_connection.mav.mission_request_send(self.mavlink_connection.target_system,
                                                                      self.mavlink_connection.target_component, seq + 1,
                                                                      MAV_MISSION_TYPE_FENCE)
-            self.next_order_seq_id = seq + 1
+            self.next_fence_order_seq_id = seq + 1
         else:
             self.fence_download_timout.stop()
             self.mavlink_connection.mav.mission_ack_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_ACCEPTED, MAV_MISSION_TYPE_FENCE)
-            self.next_order_seq_id = 0
+            self.next_fence_order_seq_id = 0
             self.requested_to_get_fence = False
             self.ui.map_view.user_ads_data_model.layoutChanged.emit()
 
@@ -695,7 +771,7 @@ class MainWindow(QMainWindow):
         )
 
     requested_to_send_fence_with_fence: bool = False
-    def send_mission_data(self, index: int, use_item_int: bool):
+    def send_fence_mission_data(self, index: int, use_item_int: bool):
         ads_list_len = len(self.ads_list_cache)
         if ads_list_len == 0 and not self.requested_to_send_fence_with_fence:
             return
@@ -1037,7 +1113,9 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.create_warning.connect(self._create_warning)
         self.mavlink_worker.mission_fence_item_received.connect(self.mission_fence_item_received)
         self.mavlink_worker.mission_fence_item_int_received.connect(self.mission_fence_item_int_received)
-        self.mavlink_worker.send_mission_data.connect(self.send_mission_data)
+        self.mavlink_worker.mission_waypoint_item_received.connect(self.mission_waypoint_item_received)
+        self.mavlink_worker.mission_waypoint_item_int_received.connect(self.mission_waypoint_item_int_received)
+        self.mavlink_worker.send_fence_mission_data.connect(self.send_fence_mission_data)
         self.mavlink_thread.started.connect(self.mavlink_worker.run)
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
