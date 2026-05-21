@@ -2,7 +2,7 @@ import math
 
 from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, Property, Signal, \
     QPointF, QTimer
-from PySide6.QtPositioning import QGeoCoordinate
+from PySide6.QtPositioning import QGeoCoordinate, QGeoPath
 from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget, QDialogButtonBox
@@ -379,11 +379,30 @@ class RepositionTargetHolder(QObject):
 
     position = Property(QGeoCoordinate, read_position, notify=updated)
 
+class MissionPathHolder(QObject):
+    mission_geopath_v: QGeoPath
+    mission_geopath_changed = Signal()
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        self.mission_geopath_v = QGeoPath()
+
+    def read_mission_geopath(self) -> QGeoPath:
+        return self.mission_geopath_v
+
+    def add_pos(self, coord: QGeoCoordinate):
+        self.mission_geopath_v.addCoordinate(coord)
+
+    def clear(self):
+        self.mission_geopath_v.clearPath()
+
+    mission_geopath = Property(QGeoPath, read_mission_geopath, notify=mission_geopath_changed)
 
 class MapWidget(QQuickWidget):
     plane_data_model: PlaneDataModel
     coord_data_model: SpecialCoordsDataModel
     mission_coords_data_model: SpecialCoordsDataModel
+    mission_geopath: MissionPathHolder
     coords_for_geofence: GeofenceData = None
     mouse_input_handler: MouseInputHandler
     mavlink_connection: mavfile | None = None
@@ -403,6 +422,7 @@ class MapWidget(QQuickWidget):
         self.plane_data_model = PlaneDataModel()
         self.coord_data_model = SpecialCoordsDataModel()
         self.mission_coords_data_model = SpecialCoordsDataModel()
+        self.mission_geopath = MissionPathHolder(self)
         self.mouse_input_handler = MouseInputHandler(self)
         self.coords_for_geofence = GeofenceData(self)
         self.server_ads_data_model = AdsDataModel()
@@ -413,6 +433,7 @@ class MapWidget(QQuickWidget):
         self.engine().rootContext().setContextProperty("plane_data_model", self.plane_data_model)
         self.engine().rootContext().setContextProperty("coord_data_model", self.coord_data_model)
         self.engine().rootContext().setContextProperty("mission_coords_data_model", self.mission_coords_data_model)
+        self.engine().rootContext().setContextProperty("mission_geopath", self.mission_geopath)
         self.engine().rootContext().setContextProperty("coords_for_geofence", self.coords_for_geofence)
         self.engine().rootContext().setContextProperty("server_ads_data_model", self.server_ads_data_model)
         self.engine().rootContext().setContextProperty("user_ads_data_model", self.user_ads_data_model)

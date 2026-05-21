@@ -428,6 +428,7 @@ class MainWindow(QMainWindow):
         self.next_mission_order_seq_id = 0
         self.requested_to_get_mission = False
         self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
+        self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
     def mission_waypoint_received(self, coord: QGeoCoordinate, command: int, seq: int, use_int: bool, count: int):
         if not self.requested_to_get_mission:
@@ -438,10 +439,12 @@ class MainWindow(QMainWindow):
             return
         if seq == 0:
             self.ui.map_view.mission_coords_data_model.m_datas.clear()
+            self.ui.map_view.mission_geopath.clear()
         coord_data: SpecialCoordsData = SpecialCoordsData()
         coord_data.position = coord
         coord_data.coord_type = 1
         self.ui.map_view.mission_coords_data_model.m_datas.append(coord_data)
+        self.ui.map_view.mission_geopath.add_pos(coord)
         self.mission_download_timout.start()
         if seq + 1 != count:
             if use_int:
@@ -459,6 +462,7 @@ class MainWindow(QMainWindow):
             self.next_mission_order_seq_id = 0
             self.requested_to_get_mission = False
             self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
+            self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
     def mission_waypoint_item_received(self, item: MAVLink_mission_item_message, count: int):
         command: int = item.command

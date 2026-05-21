@@ -60,6 +60,15 @@ Item {
                             }
             }
         }
+        MapPolyline {
+            property var lines: mission_geopath.mission_geopath
+            id: mission_geolines
+            line.width: 5
+            line.color: '#644B85B2'
+            onLinesChanged: {
+                setPath(lines)
+            }
+        }
         MapItemView {
             model: plane_data_model
             delegate: MapQuickItem{
