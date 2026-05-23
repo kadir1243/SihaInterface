@@ -712,4 +712,3 @@ cython_debug/
 #.idea/
 
 ui_files/*
-ui_files_python/*
