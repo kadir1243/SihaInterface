@@ -703,32 +703,20 @@ class MainWindow(QMainWindow):
 
         self.ui.map_view.update_server_ads_data(get_ads(self.server_connection.get_address()))
 
-    last_mode_set_by_user: int = -1
-
     def __setArmStatus(self, is_arm: int):
         if self.last_arm_change_was_from_uav:
             self.last_arm_change_was_from_uav = False
             return
 
-        is_already_tried_to_set_this_before = self.last_mode_set_by_user == is_arm
-        if is_already_tried_to_set_this_before:
-            qDebug("Sending armed status with force: %s" % is_arm)
-        else:
-            qDebug("Trying to send armed status: %s" % is_arm)
-        self.last_mode_set_by_user = is_arm
+        qDebug("Trying to send armed status: %s" % is_arm)
 
         self.mavlink_connection.mav.command_long_send(
             self.mavlink_connection.target_system,
             self.mavlink_connection.target_component,
             MAV_CMD_COMPONENT_ARM_DISARM,
-            0 if is_already_tried_to_set_this_before else 1,  # confirmation
-            is_arm,  # param1: 1=arm, 0=disarm
-            0,  # param2
-            0,  # param3
-            0,  # param4
-            0,  # param5
-            0,  # param6
-            0  # param7
+            0,
+            is_arm, # 1=arm, 0=disarm
+            0, 0, 0, 0, 0, 0
         )
 
     def __set_fence_clicked(self):
