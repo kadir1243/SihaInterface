@@ -118,15 +118,15 @@ TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
 MSG_ID_2_TRACKABLE_DATA_TYPE: dict[int, TrackableDataPacketTimer] = {}
 
 class TrackableDataPacketTimer(Enum):
-    # (msg id, msg name, type, update interval (ms), watch value ids that uses this packet)
+    # (msg id, msg name, type, update interval (microsecond), watch value ids that uses this packet)
     BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 1000000, [10])
     ATTITUDE = (30, "ATTITUDE", MAVLink_attitude_message, 100000, [3, 4, 5])
     GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 100000, [1, 8, 9])
     VFR_HUD = (74, "VFR_HUD", MAVLink_vfr_hud_message, 100000, [0, 6])
     HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 100000, [11])
     GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 100000, [2, 12])
-    SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 100000, [7])
-    FENCE_STATUS = (162, "FENCE_STATUS", MAVLink_fence_status_message, 100000, [13])
+    SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 1000000, [7])
+    FENCE_STATUS = (162, "FENCE_STATUS", MAVLink_fence_status_message, 1000000, [13])
 
 for ____trackable_data_packet_timer in TrackableDataPacketTimer:
     MSG_ID_2_TRACKABLE_DATA_TYPE[____trackable_data_packet_timer.value[0]] = ____trackable_data_packet_timer
@@ -244,6 +244,8 @@ class MavlinkWorker(QObject):
         self.parent = parent
         self.watch_list = parent.ui.watch_list
         self.running = False
+        self.fence_mission_count = 0
+        self.waypoint_mission_count = 0
 
     def trigger_update_value(self, e: TrackableDataEnum, packet: MAVLink_message):
         length: int = self.watch_list.rowCount()
@@ -431,7 +433,7 @@ class MainWindow(QMainWindow):
         self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
     def mission_waypoint_received(self, coord: QGeoCoordinate, command: int, seq: int, use_int: bool, count: int):
-        if not self.requested_to_get_mission:
+        if not self.requested_to_get_mission or count == 0:
             return
         qDebug("Mission received with %s coords, %s command, %s seq" % (coord, command, seq))
         if self.next_mission_order_seq_id != seq:
@@ -499,7 +501,7 @@ class MainWindow(QMainWindow):
 
     # TODO: This handling assumes 4 vertex fence
     def mission_fence_received(self, coord: QGeoCoordinate, command: int, seq: int, ads_size: float, use_int: bool, count: int):
-        if not self.requested_to_get_fence:
+        if not self.requested_to_get_fence or count == 0:
             return
         qDebug("Fence received with %s coords, %s command, %s seq" % (coord, command, seq))
         if self.next_fence_order_seq_id != seq:
