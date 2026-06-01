@@ -7,7 +7,7 @@ from PySide6.QtQuick import QQuickItem
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import QWidget, QDialogButtonBox
 from pymavlink.dialects.v20.all import MAV_CMD_DO_REPOSITION, MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, \
-    MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+    MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, MAV_CMD_DO_SET_MISSION_CURRENT, MAV_BOOL_FALSE, PLANE_MODE_AUTO
 from pymavlink.mavutil import mavfile
 
 from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
@@ -164,6 +164,19 @@ class MouseInputHandler(QObject):
         super().__init__(parent)
         self.parent = parent
         self.gc_cycle = 1
+
+    @Slot(int, QGeoCoordinate)
+    def handle_mouse_input_to_map_with_shift(self, button: int, coordinate: QGeoCoordinate):
+        if not coordinate.isValid():
+            qWarning("Invalid mouse input with shift coordinate.")
+            return
+        qDebug("Pressed the mouse button %s with shift in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
+        match button:
+            case Qt.MouseButton.RightButton.value:
+                if not self.parent.target_coord.is_set or self.parent.mavlink_connection is None:
+                    return
+                self.parent.mavlink_connection.set_mode_apm(PLANE_MODE_AUTO)
+                self.parent.target_coord.remove_position()
 
     @Slot(int, QGeoCoordinate)
     def handle_mouse_input_to_map_with_ctrl(self, button: int, coordinate: QGeoCoordinate):

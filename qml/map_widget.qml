@@ -54,6 +54,9 @@ Item {
                                 case Qt.ControlModifier:
                                     mouseInputHandler.handle_mouse_input_to_map_with_ctrl(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)));
                                     break;
+                                case Qt.ShiftModifier:
+                                    mouseInputHandler.handle_mouse_input_to_map_with_shift(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)));
+                                    break;
                                 default:
                                     mouseInputHandler.handle_mouse_input_to_map(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)), eventPoint.position.x, eventPoint.position.y);
                                     break;
