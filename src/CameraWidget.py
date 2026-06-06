@@ -3,20 +3,34 @@ from enum import Enum
 
 import lz4.block
 from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal, QSize, QPointF, \
-    QPoint
+    QPoint, QProcess, QByteArray
 from PySide6.QtGui import QImage, QPixmap, QPaintEvent, QPainterPath, QPainter, QPen
-from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket
+from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket, QTcpSocket
 from PySide6.QtWidgets import QWidget, QLabel, QGridLayout
 
 
-class SocketWrapper(QObject):
-    socket: QUdpSocket | None = None
+class AbstractProtocolWrapper(QObject):
+    socket: QAbstractSocket | None
     parentWidget: CameraWidget
     update_camera_in_ui: Signal = Signal(QPixmap)
-
     def __init__(self, parentWidget: CameraWidget):
-        super().__init__()
+        super().__init__(parentWidget)
         self.parentWidget = parentWidget
+        self.socket = None
+
+    def bindSocket(self) -> None:
+        pass
+
+    def error_happened_in_socket(self, error: QAbstractSocket.SocketError) -> None:
+        qWarning("%s" % self.socket.errorString())
+        qWarning("%s" % error.value)
+
+    def close(self) -> None:
+        self.socket.close()
+
+class ProtocolKadirSocketWrapper(AbstractProtocolWrapper):
+    def __init__(self, parentWidget: CameraWidget):
+        super().__init__(parentWidget)
 
     # My Internal Server Code
     #def split_bylen(item, maxlen):  # I don't remember where i copied this from, but thanks for answer in stackoverflow :D
@@ -51,19 +65,20 @@ class SocketWrapper(QObject):
     frame_data_map: dict[int, bytes]
     amount_of_parts_received: int
     connected_server_id: int
-    def bindSocket(self):
+
+    def bindSocket(self) -> None:
         if not self.socket:
             self.socket = QUdpSocket()
             self.socket.readyRead.connect(self.readPendingDatagrams)
             self.socket.errorOccurred.connect(self.error_happened_in_socket)
-        self.socket.bind(QHostAddress("127.0.0.1"), port=8000)
+        self.socket.bind(QHostAddress(self.parentWidget.camera_server_info.ip), port=self.parentWidget.camera_server_info.port)
         self.last_index_of_frame = 0
         self.last_amount_of_parts = 0
         self.frame_data_map = {}
         self.amount_of_parts_received = -1
         self.connected_server_id = 0
 
-    def readPendingDatagrams(self):
+    def readPendingDatagrams(self) -> None:
         while self.socket.hasPendingDatagrams():
             datagram = self.socket.receiveDatagram()
             data = datagram.data()
@@ -110,11 +125,65 @@ class SocketWrapper(QObject):
                 self.update_camera_in_ui.emit(QPixmap.fromImageInPlace(img))
                 self.frame_data_map.clear()
                 self.amount_of_parts_received = 0
-    def error_happened_in_socket(self, error: QAbstractSocket.SocketError):
-        qWarning("%s" % self.socket.errorString())
-        qWarning("%s" % error.value)
-    def close(self):
-        self.socket.close()
+
+_MAX_CHUNK = 65536
+_FRAME_W = 640
+_FRAME_H = 480
+_FRAME_BYTES = _FRAME_W * _FRAME_H * 3
+
+class ProtocolOsmanSocketWrapper(AbstractProtocolWrapper):
+    ffmpeg_process: QProcess | None = None
+
+    def __init__(self, parentWidget: CameraWidget):
+        super().__init__(parentWidget)
+
+    def bindSocket(self) -> None:
+        if not self.socket:
+            self.socket = QTcpSocket()
+            self.socket.readyRead.connect(self._on_ready_read)
+            self.socket.errorOccurred.connect(self.error_happened_in_socket)
+
+        self.__frame_buffer = b""
+        self.ffmpeg_process = QProcess(self)
+        self.ffmpeg_process.setProgram("ffmpeg")
+        self.ffmpeg_process.setArguments([
+            "-fflags", "nobuffer",
+            "-flags", "low_delay",
+            "-i", "pipe:0",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "pipe:1",
+        ])
+        self.ffmpeg_process.setReadChannel(QProcess.ProcessChannel.StandardOutput)
+        self.ffmpeg_process.readyReadStandardOutput.connect(self._read_frames)
+        self.ffmpeg_process.start()
+        if not self.ffmpeg_process.waitForStarted():
+            qWarning("Could not start ffmpeg process")
+
+        self.socket.connectToHost(self.parentWidget.camera_server_info.ip, self.parentWidget.camera_server_info.port)
+
+    __frame_buffer: bytes
+    def _read_frames(self) -> None:
+        self.__frame_buffer += self.ffmpeg_process.readAllStandardOutput().data()
+        while len(self.__frame_buffer) >= _FRAME_BYTES:
+            raw = self.__frame_buffer[:_FRAME_BYTES]
+            self.__frame_buffer = self.__frame_buffer[_FRAME_BYTES:]
+            img: QImage = QImage(raw, _FRAME_W, _FRAME_H, QImage.Format.Format_RGB888)
+            self.update_camera_in_ui.emit(QPixmap.fromImageInPlace(img))
+
+    def _on_ready_read(self) -> None:
+        if not self.ffmpeg_process or self.ffmpeg_process.state() != QProcess.ProcessState.Running:
+            return
+        data: QByteArray = self.socket.readAll()
+        self.ffmpeg_process.write(data)
+
+    def close(self) -> None:
+        if self.ffmpeg_process:
+            self.ffmpeg_process.closeWriteChannel()
+            self.ffmpeg_process.terminate()
+            self.ffmpeg_process.waitForFinished(2000)
+            self.ffmpeg_process = None
+        super().close()
 
 class CameraServerProtocol(Enum):
     Osman = (0,)
@@ -165,7 +234,7 @@ class LabelWithRectangle(QLabel):
 class CameraWidget(QWidget):
     reconnect_timer: QTimer
     connection_thread: QThread | None = None
-    socketWorker: SocketWrapper | None = None
+    socketWorker: AbstractProtocolWrapper | None = None
     camera_server_info: CameraServerInfo = CameraServerInfo()
     label: LabelWithRectangle
 
@@ -213,7 +282,10 @@ class CameraWidget(QWidget):
             qDebug("Camera Connection Thread already started")
             return
         self.label.is_no_stream_image = False
-        self.socketWorker = SocketWrapper(self)
+        if self.camera_server_info.protocol == CameraServerProtocol.Kadir:
+            self.socketWorker = ProtocolKadirSocketWrapper(self)
+        else:
+            self.socketWorker = ProtocolOsmanSocketWrapper(self)
         self.socketWorker.update_camera_in_ui.connect(lambda img: self.label.setPixmap(img.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)))
         self.connection_thread = QThread(self)
         self.connection_thread.setObjectName("Camera Connection Thread")
@@ -245,41 +317,26 @@ class CameraWidget(QWidget):
         self.is_paused = True
         if not self.camera_server_info.ip:
             return False
-        match self.camera_server_info.protocol:
-            case CameraServerProtocol.Osman:
-                pass # TODO:
-            case CameraServerProtocol.Kadir:
-                self.closeSocket()
+        self.closeSocket()
+        return True
 
     def on_play(self):
         self.is_paused = False
         if not self.camera_server_info.ip:
             return False
-        match self.camera_server_info.protocol:
-            case CameraServerProtocol.Osman:
-                pass # TODO:
-            case CameraServerProtocol.Kadir:
-                self.bindSocket()
+        self.bindSocket()
         return True
 
     def connect_to_server(self) -> bool:
         if not self.camera_server_info.ip:
             return False
-        match self.camera_server_info.protocol:
-            case CameraServerProtocol.Osman:
-                pass # TODO:
-            case CameraServerProtocol.Kadir:
-                self.bindSocket()
+        self.bindSocket()
         return True
 
     def disconnect_from_server(self) -> bool:
         if not self.camera_server_info.ip:
             return False
-        match self.camera_server_info.protocol:
-            case CameraServerProtocol.Osman:
-                pass # TODO:
-            case CameraServerProtocol.Kadir:
-                self.closeSocket()
+        self.closeSocket()
         return True
 
     def set_protocol(self, i: int) -> None:
