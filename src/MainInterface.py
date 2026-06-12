@@ -406,19 +406,22 @@ class MainWindow(QMainWindow):
         self.ui.map_view.upload_ads_data.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
         self.ui.actionAbout.triggered.connect(self._about)
         self.ui.actionAbout_Qt.triggered.connect(lambda: QMessageBox.aboutQt(self))
-        self.ui.actionDownload_Fence_Mission_Data.triggered.connect(self.request_fence_data)
         self.fence_upload_timout = QTimer(self, singleShot=True, interval=10000)
         self.fence_upload_timout.timeout.connect(self.fence_upload_reset)
         self.fence_download_timout = QTimer(self, singleShot=True, interval=10000)
         self.fence_download_timout.timeout.connect(self.request_fence_data_timeout)
         self.mission_download_timout = QTimer(self, singleShot=True, interval=10000)
         self.mission_download_timout.timeout.connect(self.request_mission_data_timeout)
-        self.ui.actionDownload_Waypoint_Mission_Data.triggered.connect(self.request_mission_data)
+        self.ui.download_missions.clicked.connect(self.request_mission_data)
+        self.ui.download_fence_data.clicked.connect(self.request_fence_data)
 
     next_mission_order_seq_id: int = 0
     requested_to_get_mission: bool = False
     def request_mission_data(self):
         if self.uav_connection.connection_type is None:
+            return
+        if self.requested_to_get_mission:
+            qDebug("Tried to get missions when already getting missions from uav")
             return
         self.requested_to_get_mission = True
         self.mavlink_connection.mav.mission_request_list_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_MISSION)
@@ -478,6 +481,9 @@ class MainWindow(QMainWindow):
 
     def request_fence_data(self):
         if self.uav_connection.connection_type is None:
+            return
+        if self.requested_to_get_fence:
+            qDebug("Tried to get fence when already getting fence from uav")
             return
         self.requested_to_get_fence = True
         self.mavlink_connection.mav.mission_request_list_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_FENCE)

@@ -227,6 +227,8 @@ class ColorSelectorInterface(QDialog):
     def update_icon_colors(self, index: int) -> None:
         window: QWidget = self.parent()
         self.changeColorOfButtonWithoutState("fence", window.ui.set_fence, index)
+        self.changeColorOfButtonWithoutState("download_fence", window.ui.download_fence_data, index)
+        self.changeColorOfButtonWithoutState("download_mission", window.ui.download_missions, index)
         self.changeColorOfButtonWithoutState("refresh", window.ui.refresh_ads, index)
         self.changeColorOfButtonWithoutState("plus", window.ui.add_to_watch, index)
         self.changeColorOfButtonWithoutState("plus", window.ui.add_ads, index)
