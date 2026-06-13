@@ -175,7 +175,7 @@ def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: 
             "milisaniye": end.milisaniye
         },
         "qrMetni": qr_text
-    })
+    }, headers={"Content-Type": "application/json"})
     r.raise_for_status()
 
 def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None:
@@ -187,5 +187,5 @@ def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None
                 "milisaniye": end.milisaniye
         },
         "otonom_kilitlenme": 1 if automatic else 0
-    })
+    }, headers={"Content-Type": "application/json"})
     r.raise_for_status()

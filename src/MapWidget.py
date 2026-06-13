@@ -456,6 +456,9 @@ class MapWidget(QQuickWidget):
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 
     def update_plane_data(self, our_team_number: int, last_server_response: TelemetryResponseData):
+        if last_server_response is None:
+            qWarning("Can not update plane coords, server connection error")
+            return
         self.plane_data_model.m_datas.clear()
         for uav in last_server_response.konumBilgileri:
             # TODO: Add types to uav
