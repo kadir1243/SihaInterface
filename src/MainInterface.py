@@ -322,6 +322,63 @@ class MavlinkWorker(QObject):
             # else:
             #     qDebug("Ignoring packet with id %s" % msgID)
 
+class ConnectionWaitWrapper(QObject):
+    after_heartbeat_successfully_received = Signal(mavfile)
+    after_heartbeat_not_received = Signal(mavfile)
+    mavlink_connection_error = Signal()
+    set_device_connection_text = Signal(str)
+    mavlink_connection: mavfile
+    uav_connection: UavConnection
+    __parent: MainWindow
+    con_thread: QThread
+
+    def __init__(self, parent: MainWindow, uav_connection: UavConnection):
+        super().__init__()
+        self.uav_connection = uav_connection
+        self.mavlink_connection = None
+        self.__parent = parent
+
+    def run(self):
+        self.set_device_connection_text.emit(QCoreApplication.translate("UAVConnection", "Trying to connect device :O", None))
+        try:
+            match self.uav_connection.connection_type:
+              case ConnectionType.TCP:
+                  self.mavlink_connection = mavtcp(self.uav_connection.ip, retries=1)
+              case ConnectionType.UDP:
+                  self.mavlink_connection = mavudp(self.uav_connection.ip, timeout=10)
+              case ConnectionType.SERIAL:
+                  system_identifier = re.sub("\\d", "", QSerialPortInfo.availablePorts()[0].systemLocation())
+                  self.mavlink_connection = mavserial(system_identifier + str(self.uav_connection.serial_port), baud=self.uav_connection.serial_baud_rate)
+              case None:
+                  self.mavlink_connection_error.emit()
+                  qWarning("Connection type is null ???")
+                  return
+        except OSError as e:
+            self.set_device_connection_text.emit(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
+            qWarning("Tried a invalid connection: %s" % str(e))
+            self.mavlink_connection_error.emit()
+            return
+        qInfo("Successfully Connected with mavlink, Target System: %s, Target component: %s" % (self.mavlink_connection.target_system, self.mavlink_connection.target_component))
+
+        self.mavlink_connection.mav.heartbeat_send(
+            MAV_TYPE_GCS,
+            MAV_AUTOPILOT_INVALID,
+            0, 0, 0
+        )
+
+        try:
+            msg: MAVLink_heartbeat_message = self.mavlink_connection.wait_heartbeat(timeout=10)
+            if msg is None:
+                raise Exception("Connection failed")
+
+            qInfo("Successfully Received first heartbeat")
+            self.after_heartbeat_successfully_received.emit(self.mavlink_connection)
+        except:
+            self.after_heartbeat_not_received.emit(self.mavlink_connection)
+        self.__parent.connection_wait_wrapper = None
+        self.con_thread.quit()
+
+
 SERVER_IS_UNREACHABLE_COUNTER = 0
 
 class MainWindow(QMainWindow):
@@ -334,7 +391,7 @@ class MainWindow(QMainWindow):
     geofence_dialog: SetGeofenceInterface | None = None
     add_ads_dialog: AddADSInterface | None = None
     server_connection: ServerConnection = ServerConnection()
-    mavlink_connection: mavfile
+    mavlink_connection: mavfile = None
     force_sending_telemetry: bool = False
     mavlink_worker: MavlinkWorker | None = None
     mavlink_thread: QThread | None = None
@@ -415,10 +472,17 @@ class MainWindow(QMainWindow):
         self.ui.download_missions.clicked.connect(self.request_mission_data)
         self.ui.download_fence_data.clicked.connect(self.request_fence_data)
 
+    def closeEvent(self, event, /):
+        try:
+            self._uav_disconnect()
+        except:
+            pass
+        super().closeEvent(event)
+
     next_mission_order_seq_id: int = 0
     requested_to_get_mission: bool = False
     def request_mission_data(self):
-        if self.uav_connection.connection_type is None:
+        if self.mavlink_connection is None:
             return
         if self.requested_to_get_mission:
             qDebug("Tried to get missions when already getting missions from uav")
@@ -480,7 +544,7 @@ class MainWindow(QMainWindow):
         self.mission_waypoint_received(coord, command, item.seq, True, count)
 
     def request_fence_data(self):
-        if self.uav_connection.connection_type is None:
+        if self.mavlink_connection is None:
             return
         if self.requested_to_get_fence:
             qDebug("Tried to get fence when already getting fence from uav")
@@ -626,7 +690,7 @@ class MainWindow(QMainWindow):
             tde = TrackableDataEnum.from_id(int(self.ui.watch_list.item(i, 0).text()))
 
             self.ui.watch_list.setItem(i, 1, QTableWidgetItem(tde.value[1]()))
-            if self.uav_connection.connection_type is None:
+            if self.mavlink_connection is None:
                 self.ui.watch_list.setItem(i, 3, QTableWidgetItem(QCoreApplication.translate("TrackableDataEnum", "Unknown", None)))
         for e in TRACKABLE_DATA_ENUM_ACTIONS.values():
             tde = TrackableDataEnum.from_id(int(e.objectName()))
@@ -896,7 +960,7 @@ class MainWindow(QMainWindow):
     kamikaze_start: GpsSaati
 
     def __start_kamikaze(self):
-        if self.uav_connection.connection_type is None:
+        if self.mavlink_connection is None:
             return
         longitude = float(self.ui.kamikaze_longitude.text())
         latitude = float(self.ui.kamikaze_latitude.text())
@@ -1012,7 +1076,7 @@ class MainWindow(QMainWindow):
                 else:
                     self.uav_connection_dialog.ui.connection_type.setCurrentIndex(1)
         self.uav_connection_dialog.ui.connect.clicked.connect(self._uav_connect)
-        self.uav_connection_dialog.ui.disconnect.clicked.connect(lambda: self._uav_disconnect(self.uav_connection_dialog))
+        self.uav_connection_dialog.ui.disconnect.clicked.connect(self._uav_disconnect)
         self.uav_connection_dialog.finished.connect(lambda e: self._reset_dialog(True))
 
     def _reset_dialog(self, is_uav: bool):
@@ -1020,6 +1084,8 @@ class MainWindow(QMainWindow):
             self.uav_connection_dialog = None
         else:
             self.server_connection_dialog = None
+
+    connection_wait_wrapper: ConnectionWaitWrapper | None = None
 
     def _uav_connect(self):
         if self.uav_connection_dialog.connection_type != ConnectionType.SERIAL:
@@ -1041,52 +1107,45 @@ class MainWindow(QMainWindow):
         else:
             self.uav_connection.ip = self.uav_connection_dialog.ui.ip_address.text()
 
-        try:
-            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Trying to connect device :O", None))
-            match self.uav_connection_dialog.connection_type:
-              case ConnectionType.TCP:
-                  self.mavlink_connection = mavtcp(self.uav_connection.ip, retries=1)
-              case ConnectionType.UDP:
-                  self.mavlink_connection = mavudp(self.uav_connection.ip, timeout=10)
-              case ConnectionType.SERIAL:
-                  system_identifier = re.sub("\\d", "", QSerialPortInfo.availablePorts()[0].systemLocation())
-                  self.mavlink_connection = mavserial(system_identifier + str(self.uav_connection.serial_port), baud=self.uav_connection.serial_baud_rate)
-              case None:
-                  qWarning("Connection type is null ???")
-                  return
-            qInfo("Successfully Connected with mavlink, Target System: %s, Target component: %s" % (self.mavlink_connection.target_system, self.mavlink_connection.target_component))
-        except OSError as e:
-            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
-            qWarning("Tried a invalid connection: %s" % str(e))
+        if self.connection_wait_wrapper is not None:
+            qDebug("Tried to press connect when trying to connect")
             return
-
-        self.mavlink_connection.mav.heartbeat_send(
-            MAV_TYPE_GCS,
-            MAV_AUTOPILOT_INVALID,
-            0, 0, 0
-        )
-
-        try:
-            msg: MAVLink_heartbeat_message = self.mavlink_connection.wait_heartbeat(timeout=10)
-            if msg is None:
-                raise Exception("Connection failed")
-
-            qInfo("Successfully Received first heartbeat")
-        except:
-            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
-
-            self.uav_connection_dialog.ui.invalid_input_error_label.show()
-            if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
-                qInfo("Can not connect to UAV from %s" % (str(self.uav_connection.serial_port) + "," + str(self.uav_connection.serial_baud_rate)))
-            else:
-                qInfo("Can not connect to UAV from %s" % self.uav_connection.ip)
-            self.uav_connection.reset_connection_properties()
-            self.ui.device_connection_warning.show()
-            self.mavlink_connection.close()
-            self.ui.map_view.mavlink_connection = None
-            return
-        self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
         self.uav_connection.connection_type = self.uav_connection_dialog.connection_type
+        self.connection_wait_wrapper = ConnectionWaitWrapper(self, self.uav_connection)
+        self.connection_wait_wrapper.after_heartbeat_successfully_received.connect(self.__successful_uav_connection)
+        self.connection_wait_wrapper.after_heartbeat_not_received.connect(self.__error_when_receiving_heartbeat)
+        self.connection_wait_wrapper.set_device_connection_text.connect(self.uav_connection_dialog.ui.device_connection_text.setText)
+        self.connection_wait_wrapper.mavlink_connection_error.connect(self.__uav_mav_connection_error)
+        connection_thread: QThread = QThread(self)
+        connection_thread.setObjectName("Connection Thread")
+        connection_thread.started.connect(self.connection_wait_wrapper.run)
+        self.connection_wait_wrapper.con_thread = connection_thread
+        self.connection_wait_wrapper.moveToThread(connection_thread)
+        connection_thread.start()
+
+    def __uav_mav_connection_error(self):
+        self.uav_connection.reset_connection_properties()
+
+    def __error_when_receiving_heartbeat(self, mav_connection: mavfile):
+        self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
+
+        self.uav_connection_dialog.ui.invalid_input_error_label.show()
+        if self.uav_connection.connection_type == ConnectionType.SERIAL:
+            qInfo("Can not connect to UAV from %s" % (
+                        str(self.uav_connection.serial_port) + "," + str(self.uav_connection.serial_baud_rate)))
+        else:
+            qInfo("Can not connect to UAV from %s" % self.uav_connection.ip)
+        self.uav_connection.reset_connection_properties()
+        self.ui.device_connection_warning.show()
+        try:
+            mav_connection.close()
+        except:
+            pass
+        self.ui.map_view.mavlink_connection = None
+
+    def __successful_uav_connection(self, mav_connection: mavfile):
+        self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
+        self.mavlink_connection = mav_connection
         self.mavlink_connection.mav.request_data_stream_send(
             self.mavlink_connection.target_system,
             self.mavlink_connection.target_component,
@@ -1142,8 +1201,8 @@ class MainWindow(QMainWindow):
             self.plane_on_map_update_timer.stop()
 
 
-    def _uav_disconnect(self, dialog: FightingUAVConnectionInterface):
-        if self.uav_connection.connection_type is None:
+    def _uav_disconnect(self):
+        if self.mavlink_connection is None:
             return
         self.mavlink_worker.running = False
         self.mavlink_thread.quit()
@@ -1191,13 +1250,13 @@ class MainWindow(QMainWindow):
         self.server_connection.telemetry_timer.start()
 
     def __update_plane_on_map_without_server(self):
-        if self.uav_connection.connection_type is None or self.server_connection.ip is not None:
+        if self.mavlink_connection is None or self.server_connection.ip is not None:
             self.plane_on_map_update_timer.stop()
             return
         self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam), (self.next_telemetry.iha_yatis * 4) + 180)
 
     def __send_telemetry(self):
-        if self.uav_connection.connection_type is None and not self.force_sending_telemetry:
+        if self.mavlink_connection is None and not self.force_sending_telemetry:
             qDebug("UAV not connected")
             return
         global SERVER_IS_UNREACHABLE_COUNTER
