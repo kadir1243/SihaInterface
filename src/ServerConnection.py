@@ -177,3 +177,15 @@ def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: 
         "qrMetni": qr_text
     })
     r.raise_for_status()
+
+def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None:
+    r: Response = requests.post(target_address + "/api/kilitlenme_bilgisi", json={
+        "kilitlenmeBitisZamani": {
+                "saat": end.saat,
+                "dakika": end.dakika,
+                "saniye": end.saniye,
+                "milisaniye": end.milisaniye
+        },
+        "otonom_kilitlenme": 1 if automatic else 0
+    })
+    r.raise_for_status()
