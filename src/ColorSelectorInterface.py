@@ -135,9 +135,9 @@ background-color: {1};
 QLineEdit {{
 border: 2px solid {};
 background: {};
-selection-background-color: darkgray;
+selection-background-color: {};
 }}
-""".format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Border), ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background))
+""".format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Border), ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background), ColorOptionEnumImpl.get_config(d, e, ColorAttribute.SelectedBackground))
 
 
 class ColorAttribute(Enum):
@@ -161,12 +161,12 @@ class ColorOption:
         self.color = color
 
 class ColorOptionEnum(Enum):
-    MainWindow = (0, lambda: QCoreApplication.translate("ColorOptionEnum", "Main Window", None), [ColorOption(ColorAttribute.Background, QColor(32, 35, 38)), ColorOption(ColorAttribute.AlternateBackground, QColor(41, 44, 48)), ColorOption(ColorAttribute.Frame, QColor("#eff0f1"))], ColorOptionEnumImpl.create_main_window)
+    MainWindow = (0, lambda: QCoreApplication.translate("ColorOptionEnum", "Main Window", None), [ColorOption(ColorAttribute.Background, QColor(32, 35, 38)), ColorOption(ColorAttribute.AlternateBackground, QColor(41, 44, 48)), ColorOption(ColorAttribute.Frame, QColor(239, 240, 241))], ColorOptionEnumImpl.create_main_window)
     Splitter = (1, lambda: QCoreApplication.translate("ColorOptionEnum", "Splitter", None), [ColorOption(ColorAttribute.Color, QColor(8, 56, 56))], ColorOptionEnumImpl.create_splitter)
-    MenuItem = (2, lambda: QCoreApplication.translate("ColorOptionEnum", "Menu Item", None), [ColorOption(ColorAttribute.SelectedBackground, QColor("#888888")), ColorOption(ColorAttribute.HoveredBackground, QColor("#a8a8a8"))], ColorOptionEnumImpl.create_menu_item)
-    Button = (3, lambda: QCoreApplication.translate("ColorOptionEnum", "Button", None), [ColorOption(ColorAttribute.Color, QColor("#eff0f1")), ColorOption(ColorAttribute.Background, QColor(45, 48, 51)), ColorOption(ColorAttribute.Selected, QColor("#eff0f1")), ColorOption(ColorAttribute.SelectedBackground, QColor(67, 72, 76)), ColorOption(ColorAttribute.Hovered, QColor("#eff0f1")), ColorOption(ColorAttribute.HoveredBackground, QColor(67, 72, 76))], ColorOptionEnumImpl.create_button)
-    ComboBox = (4, lambda: QCoreApplication.translate("ColorOptionEnum", "Combo Box", None), [ColorOption(ColorAttribute.Color, QColor("#eff0f1")), ColorOption(ColorAttribute.Background, QColor(45, 48, 51))], ColorOptionEnumImpl.create_combobox)
-    TextBox = (5, lambda: QCoreApplication.translate("ColorOptionEnum", "Text Box", None), [ColorOption(ColorAttribute.Border, QColor(45, 45, 45)), ColorOption(ColorAttribute.Background, QColor(45, 45, 45))], ColorOptionEnumImpl.create_textbox)
+    MenuItem = (2, lambda: QCoreApplication.translate("ColorOptionEnum", "Menu Item", None), [ColorOption(ColorAttribute.SelectedBackground, QColor(136, 136, 136)), ColorOption(ColorAttribute.HoveredBackground, QColor(168, 168, 168))], ColorOptionEnumImpl.create_menu_item)
+    Button = (3, lambda: QCoreApplication.translate("ColorOptionEnum", "Button", None), [ColorOption(ColorAttribute.Color, QColor(239, 240, 241)), ColorOption(ColorAttribute.Background, QColor(45, 48, 51)), ColorOption(ColorAttribute.Selected, QColor(239, 240, 241)), ColorOption(ColorAttribute.SelectedBackground, QColor(67, 72, 76)), ColorOption(ColorAttribute.Hovered, QColor(239, 240, 241)), ColorOption(ColorAttribute.HoveredBackground, QColor(67, 72, 76))], ColorOptionEnumImpl.create_button)
+    ComboBox = (4, lambda: QCoreApplication.translate("ColorOptionEnum", "Combo Box", None), [ColorOption(ColorAttribute.Color, QColor(239, 240, 241)), ColorOption(ColorAttribute.Background, QColor(45, 48, 51))], ColorOptionEnumImpl.create_combobox)
+    TextBox = (5, lambda: QCoreApplication.translate("ColorOptionEnum", "Text Box", None), [ColorOption(ColorAttribute.Border, QColor(45, 45, 45)), ColorOption(ColorAttribute.SelectedBackground, QColor(169, 169, 169)), ColorOption(ColorAttribute.Background, QColor(45, 45, 45))], ColorOptionEnumImpl.create_textbox)
 
 class ColorOptions:
     config: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]
@@ -189,16 +189,68 @@ class Ui_Fake:
         parent.icon_theme_label.setText(QCoreApplication.translate("ColorSelector", u"Icon Theme", None))
         parent.icon_theme.setItemText(0, QCoreApplication.translate("ColorSelector", u"Light", None))
         parent.icon_theme.setItemText(1, QCoreApplication.translate("ColorSelector", u"Dark", None))
+        for e in parent.color_option_submenu_tuples.keys():
+            t = parent.color_option_submenu_tuples[e]
+            t[0].setText(e.value[1]())
+            t[1].setText(QCoreApplication.translate("ColorSelectorInterface", "Customize", None))
+        for k in parent.dialogs.keys():
+            v = parent.dialogs[k]
+            v.retranslateUi()
+        parent.setWindowTitle(QCoreApplication.translate("ColorSelectorInterface", "Theme Editor", None))
+
+class SubMenuDialog(QDialog):
+    att2child: dict[ColorAttribute, QLabel]
+    _parent: ColorSelectorInterface
+    coe: ColorOptionEnum
+    def __init__(self, parent: ColorSelectorInterface, coe: ColorOptionEnum):
+        super().__init__(parent)
+        self.setWindowTitle(QCoreApplication.translate("ColorSelectorInterface", "Customize {}", None).format(coe.value[1]()))
+        self._parent = parent
+        self.coe = coe
+        self.att2child = dict()
+        self.formLayout = QFormLayout(self)
+        self.formLayout.setObjectName("main_layout")
+        for i, e in enumerate(coe.value[2]):
+            attribute: ColorAttribute = e.attribute
+            color = parent.get_config(parent.savedOptions.config, coe, attribute, e.color)
+            hl = QHBoxLayout()
+            label = QLabel(self)
+            label.setText(attribute.value[1]())
+            button = QToolButton(self)
+            button.clicked.connect(lambda b, button=button, c=color, a=attribute: self._openColorSelector(button, c, lambda nc, a=a: self._parent.update_config(coe, a, nc)))
+            ColorSelectorInterface.change_button_to_match_its_option(button, color.name())
+            hl.addWidget(label)
+            hl.addWidget(button)
+            self.formLayout.setLayout(i, QFormLayout.ItemRole.SpanningRole, hl)
+            self.att2child[attribute] = label
+
+    def retranslateUi(self):
+        for key in self.att2child.keys():
+            t = self.att2child[key]
+            t.setText(key.value[1]())
+        self.setWindowTitle(QCoreApplication.translate("ColorSelectorInterface", "Customize {}", None).format(self.coe.value[1]()))
+
+    def _openColorSelector(self, button: QToolButton, selected_color_as_text: QColor, set_color_function: Callable[[QColor], None]) -> None:
+        d = QColorDialog.getColor(initial=selected_color_as_text, parent=self, title="Choose Color")
+        if d.isValid():
+            qInfo("Color selected %s" % d)
+            ColorSelectorInterface.change_button_to_match_its_option(button, d.name())
+            set_color_function(d)
+        window: QWidget = self._parent.parent()
+        self._parent.updateStyleSheet(window)
 
 
 class ColorSelectorInterface(QDialog):
     ui: Ui_Fake # I am lazy to recreate anything
-    dialogs: dict[ColorOptionEnum, QDialog]
+    color_option_submenu_tuples = dict[ColorOptionEnum, tuple[QLabel, QPushButton]]
+    dialogs: dict[ColorOptionEnum, SubMenuDialog]
     savedOptions: ColorOptions
 
     def __init__(self, parent: QWidget | None, savedOptions: ColorOptions):
         QDialog.__init__(self, parent)
+        self.setWindowTitle(QCoreApplication.translate("ColorSelectorInterface", "Theme Editor", None))
         self.savedOptions = savedOptions
+        self.color_option_submenu_tuples = dict()
         self.dialogs = dict()
         self.resize(561, self.size().height())
         self.ui = Ui_Fake()
@@ -218,6 +270,7 @@ class ColorSelectorInterface(QDialog):
             hl.addWidget(label)
             hl.addWidget(button)
             self.formLayout.setLayout(e.value[0], QFormLayout.ItemRole.SpanningRole, hl)
+            self.color_option_submenu_tuples[e] = (label, button)
 
         hl_icontheme = QHBoxLayout()
         hl_icontheme.setObjectName("hl_icontheme")
@@ -250,21 +303,7 @@ class ColorSelectorInterface(QDialog):
     def _create_ui(self, coe: ColorOptionEnum):
         if coe in self.dialogs:
             return
-        dialog = QDialog(self)
-        formLayout = QFormLayout(dialog)
-        formLayout.setObjectName("main_layout")
-        for i, e in enumerate(coe.value[2]):
-            attribute: ColorAttribute = e.attribute
-            color = self.get_config(self.savedOptions.config, coe, attribute, e.color)
-            hl = QHBoxLayout()
-            label = QLabel(dialog)
-            label.setText(attribute.value[1]())
-            button = QToolButton(dialog)
-            button.clicked.connect(lambda b, button=button, c=color, a=attribute: self._openColorSelector(dialog, button, c, lambda nc, a=a: self.update_config(coe, a, nc)))
-            ColorSelectorInterface.change_button_to_match_its_option(button, color.name())
-            hl.addWidget(label)
-            hl.addWidget(button)
-            formLayout.setLayout(i, QFormLayout.ItemRole.SpanningRole, hl)
+        dialog = SubMenuDialog(self, coe)
         dialog.show()
         self.dialogs[coe] = dialog
         dialog.finished.connect(lambda: self.dialogs.pop(coe))
@@ -273,6 +312,9 @@ class ColorSelectorInterface(QDialog):
         if not a in self.savedOptions.config:
             self.savedOptions.config[a] = dict()
         self.savedOptions.config[a][b] = c
+
+    def get_dialogs(self) -> list[SubMenuDialog]:
+        return list(self.dialogs.values())
 
     @staticmethod
     def get_config(c: dict[ColorOptionEnum, dict[ColorAttribute, QColor]], a: ColorOptionEnum, b: ColorAttribute, default: QColor) -> QColor:
@@ -307,6 +349,8 @@ class ColorSelectorInterface(QDialog):
         for d in window.get_all_dialogs():
             if d is not None:
                 self.changeColorOfMainIcon("ares", d, index)
+        for d in self.get_dialogs():
+            self.changeColorOfMainIcon("ares", d, index)
 
     def changeColorOfButtonWithoutState(self, icon_name: str, button: QAbstractButton, color: int):
         color_suffix = "white" if color == 0 else "black"
@@ -331,15 +375,6 @@ class ColorSelectorInterface(QDialog):
     def change_button_to_match_its_option(button: QAbstractButton, color_name: str):
         button.setStyleSheet(f"background-color: {color_name};")
         button.setText(color_name)
-
-    def _openColorSelector(self, parent: QWidget, button: QToolButton, selected_color_as_text: QColor, set_color_function: Callable[[QColor], None]) -> None:
-        d = QColorDialog.getColor(initial=selected_color_as_text, parent=parent, title="Choose Color")
-        if d.isValid():
-            qInfo("Color selected %s" % d)
-            ColorSelectorInterface.change_button_to_match_its_option(button, d.name())
-            set_color_function(d)
-        window: QWidget = self.parent()
-        self.updateStyleSheet(window)
 
     def updateStyleSheet(self, window: QWidget):
         styleSheet: str = ""

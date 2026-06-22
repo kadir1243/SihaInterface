@@ -718,6 +718,9 @@ class MainWindow(QMainWindow):
             if dialog is not None:
                 dialog.ui.retranslateUi(dialog)
 
+        for dialog in self.color_selector_dialog.get_dialogs():
+            dialog.retranslateUi()
+
     translator: QTranslator
     def change_lang_to(self, index: int):
         slang = SupportedLanguages.from_id(index)
