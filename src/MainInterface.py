@@ -27,7 +27,7 @@ from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
 from src.CameraServerConnectionInterface import CameraServerConnectionInterface
-from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions, DEFAULT_COLORS
+from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions
 from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
@@ -1042,7 +1042,7 @@ class MainWindow(QMainWindow):
         self.server_connection_dialog.ui.disconnect.clicked.connect(lambda button: self._server_disconnect())
         self.server_connection_dialog.finished.connect(lambda e: self._reset_dialog(False))
 
-    color_options: ColorOptions = ColorOptions.create_copy(DEFAULT_COLORS)
+    color_options: ColorOptions = ColorOptions()
     def _actionConfigurateSetColors(self):
         if self.color_selector_dialog is not None:
             return

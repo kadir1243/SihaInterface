@@ -1,97 +1,73 @@
+from enum import Enum
 from typing import Callable
 
-from PySide6.QtCore import qInfo, QSize
-from PySide6.QtGui import QColor, QPalette, QIcon
-from PySide6.QtWidgets import QDialog, QColorDialog, QToolButton, QAbstractButton, QDialogButtonBox
+from PySide6.QtCore import qInfo, QSize, QCoreApplication, qWarning
+from PySide6.QtGui import QColor, QIcon
+from PySide6.QtWidgets import QDialog, QColorDialog, QToolButton, QAbstractButton, QDialogButtonBox, QFormLayout, \
+    QHBoxLayout, QLabel, QPushButton, QComboBox
 from PySide6.QtWidgets import QWidget
 
-from ui_files_python.color_selector import Ui_ColorSelector
-
-class ColorOptions:
-    main_window_background: QColor
-    main_window_alternate_background: QColor
-    splitter: QColor
-    main_window_frame: QColor
-    menu_item: QColor
-    menu_selected_item_color: QColor
-    button: QColor
-    selected_button: QColor
-    hovered_button: QColor
-    button_background: QColor
-    selected_button_background: QColor
-    hovered_button_background: QColor
-    combo_box: QColor
-    text_box_border: QColor
-    text_box_background: QColor
-    combo_box_background: QColor
-    icon_color: int
-
-    def __init__(self):
-        pass
+class ColorOptionEnumImpl:
+    @staticmethod
+    def get_config(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]], ea: ColorOptionEnum, attribute: ColorAttribute) -> str:
+        for e in ea.value[2]:
+            if e.attribute == attribute:
+                return ColorSelectorInterface.get_config(d, ea, attribute, e.color).name()
+        qWarning("Unknown attribute, probably bug in %s %s" % (ea.value[0], attribute.value[0]))
+        return None
 
     @staticmethod
-    def create_copy(copy: ColorOptions):
-        self: ColorOptions = ColorOptions()
-        self.main_window_background = copy.main_window_background
-        self.main_window_alternate_background = copy.main_window_alternate_background
-        self.splitter = copy.splitter
-        self.main_window_frame = copy.main_window_frame
-        self.menu_item = copy.menu_item
-        self.menu_selected_item_color = copy.menu_selected_item_color
-        self.button = copy.button
-        self.selected_button = copy.selected_button
-        self.hovered_button = copy.hovered_button
-        self.button_background = copy.button_background
-        self.selected_button_background = copy.selected_button_background
-        self.hovered_button_background = copy.hovered_button_background
-        self.combo_box = copy.combo_box
-        self.text_box_border = copy.text_box_border
-        self.text_box_background = copy.text_box_background
-        self.combo_box_background = copy.combo_box_background
-        self.icon_color = copy.icon_color
-        return self
-
-
-DEFAULT_COLORS: ColorOptions = ColorOptions()
-DEFAULT_COLORS.main_window_frame = QColor("#eff0f1")
-DEFAULT_COLORS.main_window_background = QColor(32, 35, 38)
-DEFAULT_COLORS.main_window_alternate_background = QColor(41,44,48)
-DEFAULT_COLORS.splitter = QColor(8, 56, 56)
-DEFAULT_COLORS.menu_selected_item_color = QColor("#a8a8a8")
-DEFAULT_COLORS.button = QColor("#eff0f1")
-DEFAULT_COLORS.button_background = QColor(45, 48, 51)
-DEFAULT_COLORS.selected_button = QColor("#eff0f1")
-DEFAULT_COLORS.selected_button_background = QColor(67, 72, 76)
-DEFAULT_COLORS.hovered_button = QColor("#eff0f1")
-DEFAULT_COLORS.hovered_button_background = QColor(67, 72, 76)
-DEFAULT_COLORS.combo_box = QColor("#eff0f1")
-DEFAULT_COLORS.combo_box_background = QColor(45, 48, 51)
-DEFAULT_COLORS.menu_item = QColor(0, 0, 0)
-DEFAULT_COLORS.text_box_border = QColor(45, 45, 45)
-DEFAULT_COLORS.text_box_background = QColor(45, 45, 45)
-DEFAULT_COLORS.icon_color = 0
-
-def create_new_stylesheet(options: ColorOptions):
-    return f"""
+    def create_main_window(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
+        e = ColorOptionEnum.MainWindow
+        return """
 QWidget#centralwidget, QWidget#remaining_thingies_frame, QWidget#kamikaze_panel, QWidget#target_tracking_panel
-{{
-color: {options.main_window_frame.name()};
-background-color: {options.main_window_background.name()};
-alternate-background-color: {options.main_window_alternate_background.name()};
+{
+color: %s;
+background-color: %s;
+alternate-background-color: %s;
 selection-background-color: #3daee9;
 selection-color: #eff0f1;
+}
+""" % (ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Frame),
+               ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background),
+               ColorOptionEnumImpl.get_config(d, e, ColorAttribute.AlternateBackground))
+
+    @staticmethod
+    def create_splitter(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
+        e = ColorOptionEnum.Splitter
+        return """
+QSplitterHandle
+{
+border: 1px dotted darkgrey;
+color: %s;
+height: 1px;
+}
+""" % (ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Color))
+
+    @staticmethod
+    def create_menu_item(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
+        e = ColorOptionEnum.MenuItem
+        return """
+QMenu::item:selected {{
+background: {0};
 }}
 
-QSplitter::handle:horizontal {{
-border: 1px dotted darkgrey;
-color: {options.splitter.name()};
-height: 1px;
+QMenu::item:pressed {{
+background: {1};
 }}
 
-QSplitter::handle:vertical {{
-border: 1px dotted darkgrey;
-color: {options.splitter.name()};
-height: 1px;
+QMenuBar::item {{
+background: transparent;
+padding: 1px 4px;
+border-radius: 4px;
+}}
+
+QMenuBar::item:selected {{
+background: {0};
+}}
+
+QMenuBar::item:pressed {{
+background: {1};
 }}
 
 QMenuBar {{
@@ -103,122 +79,214 @@ QMenu {{
 background: rgb(29, 34, 38);
 }}
 
-QMenu::item:selected {{
-background: {options.menu_selected_item_color.name()};
-}}
-
-QMenu::item:pressed {{
-background: #888888;
-}}
-
 QStatusBar {{
 background: rgb(29, 34, 38);
 }}
+""".format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.HoveredBackground), ColorOptionEnumImpl.get_config(d, e, ColorAttribute.SelectedBackground))
 
-QMenuBar::item {{
-background-color: {options.menu_item.name()};
-padding: 1px 4px;
-background: transparent;
-border-radius: 4px;
-}}
-
-QMenuBar::item:selected {{
-background: {options.menu_selected_item_color.name()};
-}}
-
-QMenuBar::item:pressed {{
-background: #888888;
-}}
-
-QAbstractButton {{
-color: {options.button.name()}; 
-background-color: {options.button_background.name()};
+    @staticmethod
+    def create_button(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
+        e = ColorOptionEnum.Button
+        return """
+QAbstractButton {
+color: %s; 
+background-color: %s;
 selection-background-color: rgb(63, 67, 71);
-}}
+}
 
-QAbstractButton:pressed {{
-color: {options.selected_button.name()}; 
-background-color: {options.selected_button_background.name()};
-}}
+QAbstractButton:pressed {
+color: %s; 
+background-color: %s;
+}
 
-QAbstractButton:checked {{
-color: {options.hovered_button.name()}; 
-background-color: {options.hovered_button_background.name()};
-}}
+QAbstractButton:checked {
+color: %s; 
+background-color: %s;
+}
+""" % (ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Color),
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background),
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Selected),
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.SelectedBackground),
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Hovered),
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.HoveredBackground))
 
+    @staticmethod
+    def create_combobox(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
+        e = ColorOptionEnum.ComboBox
+        return """
 QComboBox {{
-color: {options.combo_box.name()}; 
-background-color: {options.combo_box_background.name()};
+color: {0}; 
+background-color: {1};
 padding: 1px 18px 1px 3px;
 min-width: 6em;
 }}
 
 QComboBox QAbstractItemView {{
-color: {options.combo_box.name()}; 
-background-color: {options.combo_box_background.name()};
+color: {0}; 
+background-color: {1};
 }}
+""".format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Color), ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background))
 
-QTabBar::tab {{
-color: #eff0f1; 
-background-color: rgb(30, 30, 30);
-border-top-left-radius: 4px;
-border-top-right-radius: 4px;
-min-width: 8ex;
-padding: 2px;
-}}
 
-QTabBar::tab:selected, QTabBar::tab:hover {{
-color: #eff0f1; 
-background-color: rgb(45, 45, 45);
-}}
-
-QTabWidget::pane {{
-border: 1px solid rgb(41, 44, 47);
-}}
-
+    @staticmethod
+    def create_textbox(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
+        e = ColorOptionEnum.TextBox
+        return """
 QLineEdit {{
-border: 2px solid {options.text_box_border.name()};
-background: {options.text_box_background.name()};
+border: 2px solid {};
+background: {};
 selection-background-color: darkgray;
 }}
-"""
+""".format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Border), ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background))
+
+
+class ColorAttribute(Enum):
+    Color = (0, lambda: QCoreApplication.translate("ColorAttribute", "Color", None))
+    AlternateColor = (1, lambda: QCoreApplication.translate("ColorAttribute", "Alternate Color", None))
+    Background = (2, lambda: QCoreApplication.translate("ColorAttribute", "Background Color", None))
+    AlternateBackground = (3, lambda: QCoreApplication.translate("ColorAttribute", "Background Alternate Color", None))
+    Hovered = (4, lambda: QCoreApplication.translate("ColorAttribute", "Hovered Color", None))
+    HoveredBackground = (5, lambda: QCoreApplication.translate("ColorAttribute", "Hovered Background Color", None))
+    Selected = (6, lambda: QCoreApplication.translate("ColorAttribute", "Selected Color", None))
+    SelectedBackground = (7, lambda: QCoreApplication.translate("ColorAttribute", "Selected Background Color", None))
+    Border = (8, lambda: QCoreApplication.translate("ColorAttribute", "Border Color", None))
+    Frame = (9, lambda: QCoreApplication.translate("ColorAttribute", "Frame Color", None))
+
+class ColorOption:
+    attribute: ColorAttribute
+    color: QColor
+
+    def __init__(self, attribute: ColorAttribute, color: QColor):
+        self.attribute = attribute
+        self.color = color
+
+class ColorOptionEnum(Enum):
+    MainWindow = (0, lambda: QCoreApplication.translate("ColorOptionEnum", "Main Window", None), [ColorOption(ColorAttribute.Background, QColor(32, 35, 38)), ColorOption(ColorAttribute.AlternateBackground, QColor(41, 44, 48)), ColorOption(ColorAttribute.Frame, QColor("#eff0f1"))], ColorOptionEnumImpl.create_main_window)
+    Splitter = (1, lambda: QCoreApplication.translate("ColorOptionEnum", "Splitter", None), [ColorOption(ColorAttribute.Color, QColor(8, 56, 56))], ColorOptionEnumImpl.create_splitter)
+    MenuItem = (2, lambda: QCoreApplication.translate("ColorOptionEnum", "Menu Item", None), [ColorOption(ColorAttribute.SelectedBackground, QColor("#888888")), ColorOption(ColorAttribute.HoveredBackground, QColor("#a8a8a8"))], ColorOptionEnumImpl.create_menu_item)
+    Button = (3, lambda: QCoreApplication.translate("ColorOptionEnum", "Button", None), [ColorOption(ColorAttribute.Color, QColor("#eff0f1")), ColorOption(ColorAttribute.Background, QColor(45, 48, 51)), ColorOption(ColorAttribute.Selected, QColor("#eff0f1")), ColorOption(ColorAttribute.SelectedBackground, QColor(67, 72, 76)), ColorOption(ColorAttribute.Hovered, QColor("#eff0f1")), ColorOption(ColorAttribute.HoveredBackground, QColor(67, 72, 76))], ColorOptionEnumImpl.create_button)
+    ComboBox = (4, lambda: QCoreApplication.translate("ColorOptionEnum", "Combo Box", None), [ColorOption(ColorAttribute.Color, QColor("#eff0f1")), ColorOption(ColorAttribute.Background, QColor(45, 48, 51))], ColorOptionEnumImpl.create_combobox)
+    TextBox = (5, lambda: QCoreApplication.translate("ColorOptionEnum", "Text Box", None), [ColorOption(ColorAttribute.Border, QColor(45, 45, 45)), ColorOption(ColorAttribute.Background, QColor(45, 45, 45))], ColorOptionEnumImpl.create_textbox)
+
+class ColorOptions:
+    config: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]
+    icon_color: int
+
+    def __init__(self):
+        self.icon_color = 0
+        self.config = dict()
+
+    @staticmethod
+    def create_copy(copy: ColorOptions):
+        self: ColorOptions = ColorOptions()
+        self.icon_color = copy.icon_color
+        for e in copy.config:
+            self.config[e] = copy.config[e].copy()
+        return self
+
+class Ui_Fake:
+    def retranslateUi(self, parent: ColorSelectorInterface):
+        parent.icon_theme_label.setText(QCoreApplication.translate("ColorSelector", u"Icon Theme", None))
+        parent.icon_theme.setItemText(0, QCoreApplication.translate("ColorSelector", u"Light", None))
+        parent.icon_theme.setItemText(1, QCoreApplication.translate("ColorSelector", u"Dark", None))
 
 
 class ColorSelectorInterface(QDialog):
-    ui: Ui_ColorSelector
+    ui: Ui_Fake # I am lazy to recreate anything
+    dialogs: dict[ColorOptionEnum, QDialog]
     savedOptions: ColorOptions
 
     def __init__(self, parent: QWidget | None, savedOptions: ColorOptions):
         QDialog.__init__(self, parent)
         self.savedOptions = savedOptions
-        self.ui = Ui_ColorSelector()
-        self.ui.setupUi(self)
-        self.reloadButtonColors()
-        self.ui.main_window_background.clicked.connect(lambda b: self.openColorSelector(self.ui.main_window_background, self.ui.main_window_background.text(), lambda c : (setattr(self.savedOptions, "main_window_background", c))))
-        self.ui.main_window_alternate_background.clicked.connect(lambda b: self.openColorSelector(self.ui.main_window_alternate_background, self.ui.main_window_alternate_background.text(), lambda c: (setattr(self.savedOptions, "main_window_alternate_background", c))))
-        self.ui.splitter.clicked.connect(lambda b: self.openColorSelector(self.ui.splitter, self.ui.splitter.text(), lambda c: (setattr(self.savedOptions, "splitter", c))))
-        self.ui.main_window_frame.clicked.connect(lambda b: self.openColorSelector(self.ui.main_window_frame, self.ui.main_window_frame.text(), lambda c: (setattr(self.savedOptions, "main_window_frame", c))))
-        self.ui.menu_item.clicked.connect(lambda b: self.openColorSelector(self.ui.menu_item, self.ui.menu_item.text(), lambda c: (setattr(self.savedOptions, "menu_item", c))))
-        self.ui.menu_selected_item_color.clicked.connect(lambda b: self.openColorSelector(self.ui.menu_selected_item_color, self.ui.menu_selected_item_color.text(), lambda c: (setattr(self.savedOptions, "menu_selected_item_color", c))))
-        self.ui.button.clicked.connect(lambda b: self.openColorSelector(self.ui.button, self.ui.button.text(), lambda c: (setattr(self.savedOptions, "button", c))))
-        self.ui.selected_button.clicked.connect(lambda b: self.openColorSelector(self.ui.selected_button, self.ui.selected_button.text(), lambda c: (setattr(self.savedOptions, "selected_button", c))))
-        self.ui.hovered_button.clicked.connect(lambda b: self.openColorSelector(self.ui.hovered_button, self.ui.hovered_button.text(), lambda c: (setattr(self.savedOptions, "hovered_button", c))))
-        self.ui.button_background.clicked.connect(lambda b: self.openColorSelector(self.ui.button_background, self.ui.button_background.text(), lambda c: (setattr(self.savedOptions, "button_background", c))))
-        self.ui.selected_button_background.clicked.connect(lambda b: self.openColorSelector(self.ui.selected_button_background, self.ui.selected_button_background.text(), lambda c: (setattr(self.savedOptions, "selected_button_background", c))))
-        self.ui.hovered_button_background.clicked.connect(lambda b: self.openColorSelector(self.ui.hovered_button_background, self.ui.hovered_button_background.text(), lambda c: (setattr(self.savedOptions, "hovered_button_background", c))))
-        self.ui.combo_box.clicked.connect(lambda b: self.openColorSelector(self.ui.combo_box, self.ui.combo_box.text(), lambda c: (setattr(self.savedOptions, "combo_box", c))))
-        self.ui.text_box_border.clicked.connect(lambda b: self.openColorSelector(self.ui.text_box_border, self.ui.text_box_border.text(), lambda c: (setattr(self.savedOptions, "text_box_border", c))))
-        self.ui.text_box_background.clicked.connect(lambda b: self.openColorSelector(self.ui.text_box_background, self.ui.text_box_background.text(), lambda c: (setattr(self.savedOptions, "text_box_background", c))))
-        self.ui.combo_box_background.clicked.connect(lambda b: self.openColorSelector(self.ui.combo_box_background, self.ui.combo_box_background.text(), lambda c: (setattr(self.savedOptions, "combo_box_background", c))))
-        self.ui.icon_theme.currentIndexChanged.connect(self.changeIconColors)
-        self.ui.buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self.reset_colors)
+        self.dialogs = dict()
+        self.resize(561, self.size().height())
+        self.ui = Ui_Fake()
+        self.formLayout = QFormLayout(self)
+        self.formLayout.setObjectName("main_layout")
+        e: ColorOptionEnum
+        for e in ColorOptionEnum:
+            hl = QHBoxLayout()
+            hl.setObjectName(e.name + "_horizontal_layout")
+            label = QLabel(self)
+            label.setObjectName(e.name + "_label")
+            label.setText(e.value[1]())
+            button = QPushButton(self)
+            button.setObjectName(e.name + "_button")
+            button.setText(QCoreApplication.translate("ColorSelectorInterface", "Customize", None))
+            button.clicked.connect(lambda b, e=e: self._create_ui(e))
+            hl.addWidget(label)
+            hl.addWidget(button)
+            self.formLayout.setLayout(e.value[0], QFormLayout.ItemRole.SpanningRole, hl)
+
+        hl_icontheme = QHBoxLayout()
+        hl_icontheme.setObjectName("hl_icontheme")
+        self.icon_theme_label = QLabel(self)
+        self.icon_theme_label.setObjectName(u"icon_theme_label")
+
+        hl_icontheme.addWidget(self.icon_theme_label)
+
+        self.icon_theme = QComboBox(self)
+        self.icon_theme.addItem("")
+        self.icon_theme.addItem("")
+        self.icon_theme.setObjectName(u"icon_theme")
+        self.icon_theme.setCurrentIndex(self.savedOptions.icon_color)
+
+        hl_icontheme.addWidget(self.icon_theme)
+
+        self.formLayout.setLayout(e.value[0] + 1, QFormLayout.ItemRole.SpanningRole, hl_icontheme)
+
+        self.buttons = QDialogButtonBox(self)
+        self.buttons.setObjectName(u"buttons")
+        self.buttons.setStandardButtons(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.RestoreDefaults)
+
+        self.formLayout.setWidget(e.value[0] + 2, QFormLayout.ItemRole.LabelRole, self.buttons)
+        self.ui.retranslateUi(self)
+
+        self.icon_theme.currentIndexChanged.connect(self.changeIconColors)
+        self.buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self.reset_colors)
+        self.buttons.accepted.connect(self.accepted)
+
+    def _create_ui(self, coe: ColorOptionEnum):
+        if coe in self.dialogs:
+            return
+        dialog = QDialog(self)
+        formLayout = QFormLayout(dialog)
+        formLayout.setObjectName("main_layout")
+        for i, e in enumerate(coe.value[2]):
+            attribute: ColorAttribute = e.attribute
+            color = self.get_config(self.savedOptions.config, coe, attribute, e.color)
+            hl = QHBoxLayout()
+            label = QLabel(dialog)
+            label.setText(attribute.value[1]())
+            button = QToolButton(dialog)
+            button.clicked.connect(lambda b, button=button, c=color, a=attribute: self._openColorSelector(dialog, button, c, lambda nc, a=a: self.update_config(coe, a, nc)))
+            ColorSelectorInterface.change_button_to_match_its_option(button, color.name())
+            hl.addWidget(label)
+            hl.addWidget(button)
+            formLayout.setLayout(i, QFormLayout.ItemRole.SpanningRole, hl)
+        dialog.show()
+        self.dialogs[coe] = dialog
+        dialog.finished.connect(lambda: self.dialogs.pop(coe))
+
+    def update_config(self, a: ColorOptionEnum, b: ColorAttribute, c: QColor):
+        if not a in self.savedOptions.config:
+            self.savedOptions.config[a] = dict()
+        self.savedOptions.config[a][b] = c
+
+    @staticmethod
+    def get_config(c: dict[ColorOptionEnum, dict[ColorAttribute, QColor]], a: ColorOptionEnum, b: ColorAttribute, default: QColor) -> QColor:
+        if a in c:
+            if b in c[a]:
+                return c[a][b]
+        return default
 
     def reset_colors(self):
-        self.savedOptions = ColorOptions.create_copy(DEFAULT_COLORS)
+        self.savedOptions = ColorOptions()
         window: QWidget = self.parent()
         self.updateStyleSheet(window)
-        self.update_icon_colors(DEFAULT_COLORS.icon_color)
-        self.reloadButtonColors()
+        self.update_icon_colors(self.savedOptions.icon_color)
+        self.icon_theme.setCurrentIndex(self.savedOptions.icon_color)
 
     def changeIconColors(self, index: int) -> None:
         self.savedOptions.icon_color = index
@@ -259,38 +327,41 @@ class ColorSelectorInterface(QDialog):
         icon.addFile("ui_files/" + icon_name + "-" + color_suffix + ".svg", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         widget.setWindowIcon(icon)
 
-    def change_button_to_match_its_option(self, button: QAbstractButton, color_name: str):
+    @staticmethod
+    def change_button_to_match_its_option(button: QAbstractButton, color_name: str):
         button.setStyleSheet(f"background-color: {color_name};")
         button.setText(color_name)
 
-    def openColorSelector(self, button: QToolButton, selected_color_as_text: str, set_color_function: Callable[[QColor], None]) -> None:
-        d = QColorDialog.getColor(initial=QColor(selected_color_as_text), parent=self, title="Choose Color")
+    def _openColorSelector(self, parent: QWidget, button: QToolButton, selected_color_as_text: QColor, set_color_function: Callable[[QColor], None]) -> None:
+        d = QColorDialog.getColor(initial=selected_color_as_text, parent=parent, title="Choose Color")
         if d.isValid():
             qInfo("Color selected %s" % d)
-            self.change_button_to_match_its_option(button, d.name())
+            ColorSelectorInterface.change_button_to_match_its_option(button, d.name())
             set_color_function(d)
         window: QWidget = self.parent()
         self.updateStyleSheet(window)
 
     def updateStyleSheet(self, window: QWidget):
-        window.setStyleSheet(create_new_stylesheet(self.savedOptions))
+        styleSheet: str = ""
+        for e in ColorOptionEnum:
+            styleSheet += e.value[3](self.savedOptions.config)
+        styleSheet += """
+QTabBar::tab {
+color: #eff0f1; 
+background-color: rgb(30, 30, 30);
+border-top-left-radius: 4px;
+border-top-right-radius: 4px;
+min-width: 8ex;
+padding: 2px;
+}
 
+QTabBar::tab:selected, QTabBar::tab:hover {
+color: #eff0f1; 
+background-color: rgb(45, 45, 45);
+}
 
-    def reloadButtonColors(self):
-        self.change_button_to_match_its_option(self.ui.main_window_background, self.savedOptions.main_window_background.name())
-        self.change_button_to_match_its_option(self.ui.main_window_alternate_background, self.savedOptions.main_window_alternate_background.name())
-        self.change_button_to_match_its_option(self.ui.splitter, self.savedOptions.splitter.name())
-        self.change_button_to_match_its_option(self.ui.main_window_frame, self.savedOptions.main_window_frame.name())
-        self.change_button_to_match_its_option(self.ui.menu_item, self.savedOptions.menu_item.name())
-        self.change_button_to_match_its_option(self.ui.menu_selected_item_color, self.savedOptions.menu_selected_item_color.name())
-        self.change_button_to_match_its_option(self.ui.button, self.savedOptions.button.name())
-        self.change_button_to_match_its_option(self.ui.selected_button, self.savedOptions.selected_button.name())
-        self.change_button_to_match_its_option(self.ui.hovered_button, self.savedOptions.hovered_button.name())
-        self.change_button_to_match_its_option(self.ui.button_background, self.savedOptions.button_background.name())
-        self.change_button_to_match_its_option(self.ui.selected_button_background, self.savedOptions.selected_button_background.name())
-        self.change_button_to_match_its_option(self.ui.hovered_button_background, self.savedOptions.hovered_button_background.name())
-        self.change_button_to_match_its_option(self.ui.combo_box, self.savedOptions.combo_box.name())
-        self.change_button_to_match_its_option(self.ui.text_box_border, self.savedOptions.text_box_border.name())
-        self.change_button_to_match_its_option(self.ui.text_box_background, self.savedOptions.text_box_background.name())
-        self.change_button_to_match_its_option(self.ui.combo_box_background, self.savedOptions.combo_box_background.name())
-        self.ui.icon_theme.setCurrentIndex(self.savedOptions.icon_color)
+QTabWidget::pane {
+border: 1px solid rgb(41, 44, 47);
+}
+"""
+        window.setStyleSheet(styleSheet)
