@@ -177,7 +177,7 @@ border: 1px solid rgb(41, 44, 47);
 }}
 
 QLineEdit {{
-border: 2px solid {options.text_box_border.name()}
+border: 2px solid {options.text_box_border.name()};
 background: {options.text_box_background.name()};
 selection-background-color: darkgray;
 }}
