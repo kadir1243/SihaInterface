@@ -43,6 +43,13 @@ def to_degree(x: float) -> float:
         x = x + 2 * math.pi
     return x * (180 / math.pi)
 
+class KamikazeState(Enum):
+    IDLE = 0
+    APPROACHING = 1
+    DIVING = 2
+    RECOVERING = 3
+    RESUMING = 4
+
 class TrackableDataUpdate:
     @staticmethod
     def update_ground_speed(mainwindow:MainWindow, packet: MAVLink_vfr_hud_message) -> str:
@@ -410,6 +417,15 @@ class MainWindow(QMainWindow):
         self.translator = QTranslator()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+
+        self.kamikaze_state = KamikazeState.IDLE
+        self.kamikaze_original_alt = 0.0
+        self.kamikaze_target_lat = 0.0
+        self.kamikaze_target_lon = 0.0
+        self.kamikaze_previous_mode = None
+        self.kamikaze_timer = QTimer(self)
+        self.kamikaze_timer.setInterval(100)
+        self.kamikaze_timer.timeout.connect(self.__kamikaze_loop)
 
         mode: UAV_Modes
         for mode in UAV_Modes:
@@ -978,12 +994,143 @@ class MainWindow(QMainWindow):
     kamikaze_start: GpsSaati
 
     def __start_kamikaze(self):
+        if self.kamikaze_state != KamikazeState.IDLE:
+            qDebug("Kamikaze senaryosu iptal ediliyor.")
+            self.__finish_kamikaze()
+            return
+
+        if self.mavlink_connection is None:
+            qWarning("UAV bağlantısı yok, kamikaze senaryosu başlatılamaz.")
+            return
+
+        self.kamikaze_target_lat = 39.90455485218872
+        self.kamikaze_target_lon = 41.23689244652392
+
+        self.kamikaze_original_alt = self.next_telemetry.iha_irtifa
+        if self.kamikaze_original_alt <= 0:
+            qWarning("Geçerli irtifa verisi yok, senaryo iptal edildi.")
+            return
+
+        self.kamikaze_start = self.next_telemetry.gps_saati
+        self.kamikaze_previous_mode = self.ui.fly_mode_combobox.currentIndex()
+        self.kamikaze_state = KamikazeState.APPROACHING
+        self.kamikaze_timer.start()
+
+        self.mavlink_connection.mav.param_set_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            b'LIM_PITCH_MIN',
+            -45.0,
+            9
+        )
+        self.mavlink_connection.set_mode_apm(5)
+        qDebug("Kamikaze senaryosu başlatıldı. FBWA modunda hedefe yaklaşım.")
+
+    def __kamikaze_loop(self):
+        if self.kamikaze_state == KamikazeState.IDLE:
+            return
+
+        current_lat = self.next_telemetry.iha_enlem
+        current_lon = self.next_telemetry.iha_boylam
+        current_alt = self.next_telemetry.iha_irtifa
+
+        if current_lat == 0 and current_lon == 0:
+            return
+
+        distance = self.__calculate_distance(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon)
+        roll_ch = self.__heading_error_to_roll_channel()
+
+        if self.kamikaze_state == KamikazeState.APPROACHING:
+            alt_error = 80.0 - current_alt
+            pitch_offset = int(alt_error * 5)
+            pitch_ch = 1500 + max(-200, min(200, pitch_offset))
+            self.__send_rc_override(roll_ch, pitch_ch, 1500)
+            if distance <= 200.0:
+                qDebug(f"Hedefe {distance:.1f}m kaldı, dalış aşamasına geçiliyor.")
+                self.mavlink_connection.set_mode_apm(2)
+                self.kamikaze_state = KamikazeState.DIVING
+
+        elif self.kamikaze_state == KamikazeState.DIVING:
+            self.__send_rc_override(1500, 1250, 1200)
+            if current_alt <= 45.0:
+                qDebug("Hedef irtifaya ulaşıldı, toparlanma aşamasına geçiliyor.")
+                self.mavlink_connection.set_mode_apm(5)
+                self.kamikaze_state = KamikazeState.RECOVERING
+
+        elif self.kamikaze_state == KamikazeState.RECOVERING:
+            self.__send_rc_override(1500, 1900, 1900)
+            if current_alt >= (self.kamikaze_original_alt - 5.0):
+                qDebug("Toparlanma tamamlandı, önceki moda dönülüyor.")
+                self.kamikaze_state = KamikazeState.RESUMING
+                self.__finish_kamikaze()
+
+    def __calculate_distance(self, lat1, lon1, lat2, lon2):
+        R = 6371000
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        delta_phi = math.radians(lat2 - lat1)
+        delta_lambda = math.radians(lon2 - lon1)
+
+        a = math.sin(delta_phi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    def __bearing_to(self, lat1, lon1, lat2, lon2):
+        lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+        dlon = lon2 - lon1
+        x = math.sin(dlon) * math.cos(lat2)
+        y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
+        return math.atan2(x, y)
+
+    def __heading_error_to_roll_channel(self):
+        bearing = self.__bearing_to(
+            self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam,
+            self.kamikaze_target_lat, self.kamikaze_target_lon
+        )
+        current_heading = math.radians(self.next_telemetry.iha_yatis * 4 + 180)
+        heading_error = math.atan2(math.sin(bearing - current_heading), math.cos(bearing - current_heading))
+        steer = max(-1.0, min(1.0, heading_error * 0.8))
+        roll_ch = 1500 + int(steer * 330)
+        return max(1000, min(2000, roll_ch))
+
+    def __send_rc_override(self, roll_ch, pitch_ch, throttle_ch):
         if self.mavlink_connection is None:
             return
-        longitude = float(self.ui.kamikaze_longitude.text())
-        latitude = float(self.ui.kamikaze_latitude.text())
-        kamikaze_start = self.next_telemetry.gps_saati
-        qWarning("Kamikaze not implemented yet") # TODO
+        self.mavlink_connection.mav.rc_channels_override_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            roll_ch,
+            pitch_ch,
+            throttle_ch,
+            1500,
+            0, 0, 0, 0
+        )
+
+    def __finish_kamikaze(self):
+        self.kamikaze_timer.stop()
+        self.kamikaze_state = KamikazeState.IDLE
+        self.next_telemetry.iha_otonom = 1
+        if self.mavlink_connection is not None:
+            self.mavlink_connection.mav.rc_channels_override_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                0, 0, 0, 0, 0, 0, 0, 0
+            )
+            self.mavlink_connection.mav.param_set_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                b'LIM_PITCH_MIN',
+                -25.0,
+                9
+            )
+        if self.kamikaze_previous_mode is not None and self.mavlink_connection is not None:
+            prev_mode = self.kamikaze_previous_mode
+            if prev_mode > 8:
+                prev_mode = prev_mode + 1
+            self.mavlink_connection.set_mode_apm(prev_mode)
+        if self.server_connection.ip is not None:
+            self.on_kamikaze_end("")
+        qDebug("Kamikaze senaryosu tamamlandı.")
 
     def on_kamikaze_end(self, qr_text: str) -> None:
         kamikaze_end = self.next_telemetry.gps_saati
@@ -1180,6 +1327,13 @@ class MainWindow(QMainWindow):
                                                             e.value[3],
                                                             0, 0, 0, 0, 0)
         self._enable_fence()
+        self.mavlink_connection.mav.param_set_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            b'LIM_ROLL_CD',
+            4500.0,
+            9
+        )
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)
