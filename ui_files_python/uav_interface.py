@@ -163,6 +163,8 @@ class Ui_MainWindow(object):
         self.actionConfigurate_Camera_Stream.setObjectName(u"actionConfigurate_Camera_Stream")
         self.actionAbout_Qt = QAction(MainWindow)
         self.actionAbout_Qt.setObjectName(u"actionAbout_Qt")
+        self.actionChange_Input_Mapping = QAction(MainWindow)
+        self.actionChange_Input_Mapping.setObjectName(u"actionChange_Input_Mapping")
         self.centralwidget = QWidget(MainWindow)
         self.centralwidget.setObjectName(u"centralwidget")
         self.gridLayout_3 = QGridLayout(self.centralwidget)
@@ -591,6 +593,7 @@ class Ui_MainWindow(object):
         self.menuTesting.addAction(self.actionForce_Send_Testing_Telemetry_Data)
         self.menuCustomize.addAction(self.actionSet_Colors)
         self.menuCustomize.addAction(self.menuChange_Language.menuAction())
+        self.menuCustomize.addAction(self.actionChange_Input_Mapping)
 
         self.retranslateUi(MainWindow)
 
@@ -615,6 +618,7 @@ class Ui_MainWindow(object):
         self.actionSet_Colors.setText(QCoreApplication.translate("MainWindow", u"Theme Editor", None))
         self.actionConfigurate_Camera_Stream.setText(QCoreApplication.translate("MainWindow", u"Configurate Camera Stream", None))
         self.actionAbout_Qt.setText(QCoreApplication.translate("MainWindow", u"About Qt", None))
+        self.actionChange_Input_Mapping.setText(QCoreApplication.translate("MainWindow", u"Change Input Mapping", None))
         self.server_connection_warning.setText(QCoreApplication.translate("MainWindow", u"<html><head/><body><p><span style=\" font-size:14pt; color:#ff0000;\">Server not Connected</span></p></body></html>", None))
         self.device_connection_warning.setText(QCoreApplication.translate("MainWindow", u"<html><head/><body><p><span style=\" font-size:14pt; color:#ff0000;\">Device not Connected</span></p></body></html>", None))
         self.fly_mode_label.setText(QCoreApplication.translate("MainWindow", u"Fly Mode:", None))

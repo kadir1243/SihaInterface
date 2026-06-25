@@ -20,6 +20,7 @@ Item {
         objectName: "map"
         anchors.fill: parent
         plugin: mapPlugin
+        focus: true
         WheelHandler {
             id: wheel
             // workaround for QTBUG-87646 / QTBUG-112394 / QTBUG-112432:
@@ -48,20 +49,13 @@ Item {
             onActivated: map.zoomLevel = Math.round(map.zoomLevel - 1)
         }
         TapHandler {
-            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton | Qt.BackButton | Qt.ForwardButton | Qt.TaskButton
             onTapped: (eventPoint, button) => {
-                            switch (point.modifiers) {
-                                case Qt.ControlModifier:
-                                    mouseInputHandler.handle_mouse_input_to_map_with_ctrl(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)));
-                                    break;
-                                case Qt.ShiftModifier:
-                                    mouseInputHandler.handle_mouse_input_to_map_with_shift(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)));
-                                    break;
-                                default:
-                                    mouseInputHandler.handle_mouse_input_to_map(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)), eventPoint.position.x, eventPoint.position.y);
-                                    break;
-                            }
+                mouseInputHandler.handle_mouse_input_to_map(button, map.toCoordinate(mapToItem(parent, eventPoint.position.x, eventPoint.position.y)), point.modifiers, eventPoint.position.x, eventPoint.position.y);
             }
+        }
+        Keys.onPressed: (event) => {
+            mouseInputHandler.handle_key_input_to_map(event.key, event.modifiers);
         }
         MapPolyline {
             property var lines: mission_geopath.mission_geopath

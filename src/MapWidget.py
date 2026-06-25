@@ -1,4 +1,5 @@
 import math
+from typing import Callable
 
 from PySide6.QtCore import Qt, QByteArray, QObject, QAbstractListModel, Slot, qWarning, qDebug, Property, Signal, \
     QPointF, QTimer
@@ -13,7 +14,7 @@ from pymavlink.mavutil import mavfile
 from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
     DEFAULT_SPEED, DEFAULT_YAW
 from src.ServerConnection import TelemetryResponseData, ServerAdsData
-
+from src.input_types import InputMapping, KeybindingsEnum
 
 class PlaneData:
     position: QGeoCoordinate
@@ -160,49 +161,72 @@ class MouseInputHandler(QObject):
     parent: MapWidget
     ard_dialog: AdvancedRepositionDialog = None
     gc_cycle: int
+    input2Action: dict[KeybindingsEnum, Callable[[QGeoCoordinate, float, float], None]]
+
     def __init__(self, parent: MapWidget):
         super().__init__(parent)
         self.parent = parent
         self.gc_cycle = 1
+        self.input2Action = {
+            KeybindingsEnum.remove_reposition: self.remove_reposition,
+            KeybindingsEnum.send_adv_reposition_command: self.adv_reposition,
+            KeybindingsEnum.send_reposition_command: self.basic_reposition,
+            KeybindingsEnum.select_item: self.select_item,
+            KeybindingsEnum.add_geofence_point: self.set_geofence,
+            KeybindingsEnum.delete_manual_ads: self.remove_selected_ads,
+        }
 
-    @Slot(int, QGeoCoordinate)
-    def handle_mouse_input_to_map_with_shift(self, button: int, coordinate: QGeoCoordinate):
-        if not coordinate.isValid():
-            qWarning("Invalid mouse input with shift coordinate.")
-            return
-        qDebug("Pressed the mouse button %s with shift in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
-        match button:
-            case Qt.MouseButton.RightButton.value:
-                if not self.parent.target_coord.is_set or self.parent.mavlink_connection is None:
-                    return
-                self.parent.mavlink_connection.set_mode_apm(PLANE_MODE_AUTO)
-                self.parent.target_coord.remove_position()
+    def remove_selected_ads(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
+        for m_data in list(self.parent.user_ads_data_model.m_datas):
+            if m_data.is_selected:
+                self.parent.user_ads_data_model.m_datas.remove(m_data)
+                self.parent.user_ads_data_model.layoutChanged.emit()
+                self.parent.upload_ads_data.emit()
 
-    @Slot(int, QGeoCoordinate)
-    def handle_mouse_input_to_map_with_ctrl(self, button: int, coordinate: QGeoCoordinate):
-        if not coordinate.isValid():
-            qWarning("Invalid mouse input with ctrl coordinate.")
+    def get_input_config(self) -> dict[KeybindingsEnum, InputMapping]:
+        return self.parent.input_config_reference()
+
+    def match_and_execute(self, mouse_input: int, key_input: int, mod: int, coord: QGeoCoordinate, mouseX: float, mouseY: float) -> None:
+        qDebug("Pressed mouse button %s, keyboard button %s with mod %s, with mouse coords %s %s, in coordinates %s %s %s" % (mouse_input, key_input, mod, mouseX, mouseY, coord.altitude(), coord.latitude(), coord.longitude()))
+        cfg = self.get_input_config()
+        for e in cfg.keys():
+            v = cfg[e]
+            # qDebug("Checking %s Inputs for match: %s %s %s" % (e, v.mouse_input.value, v.key_input.value, v.mod.value))
+            if (mouse_input & v.mouse_input.value) != 0 and mod == v.mod.value:
+                self.input2Action[e](coord, mouseX, mouseY)
+            elif (key_input & v.key_input.value) != 0 and mod == v.mod.value:
+                self.input2Action[e](coord, mouseX, mouseY)
+            else:
+                # qDebug("Can not match with any input key currently: %s" % e)
+                pass
+
+    def remove_reposition(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
+        if not self.parent.target_coord.is_set or self.parent.mavlink_connection is None:
             return
-        qDebug("Pressed the mouse button %s with ctrl in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
-        match button:
-            case Qt.MouseButton.RightButton.value:
-                if not self.ard_dialog is None or self.parent.mavlink_connection is None:
-                    return
-                self.ard_dialog = AdvancedRepositionDialog(self.parent)
-                self.ard_dialog.ui.latitude.setText(str(coordinate.latitude()))
-                self.ard_dialog.ui.longitude.setText(str(coordinate.longitude()))
-                self.ard_dialog.ui.altitude.setText(str(self.parent.reposition_altitude))
-                if self.parent.reposition_loiter_radius != DEFAULT_LOITER_RADIUS:
-                    self.ard_dialog.ui.loiter_radius.setText(str(self.parent.reposition_loiter_radius))
-                if self.parent.reposition_speed != DEFAULT_SPEED:
-                    self.ard_dialog.ui.speed.setText(str(self.parent.reposition_speed))
-                if not math.isnan(self.parent.reposition_yaw):
-                    self.ard_dialog.ui.yaw.setText(str(self.parent.reposition_yaw))
-                self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Save).clicked.connect(self.ard_save)
-                self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Ok).clicked.connect(self.ard_ok)
-                self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Cancel).clicked.connect(self.ard_cancel)
-                self.ard_dialog.finished.connect(self.ard_reset)
-                self.ard_dialog.show()
+        self.parent.mavlink_connection.set_mode_apm(PLANE_MODE_AUTO)
+        self.parent.target_coord.remove_position()
+
+    def adv_reposition(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
+         if not self.ard_dialog is None or self.parent.mavlink_connection is None:
+             return
+         if not coordinate.isValid():
+             qWarning("Invalid input")
+             return
+         self.ard_dialog = AdvancedRepositionDialog(self.parent)
+         self.ard_dialog.ui.latitude.setText(str(coordinate.latitude()))
+         self.ard_dialog.ui.longitude.setText(str(coordinate.longitude()))
+         self.ard_dialog.ui.altitude.setText(str(self.parent.reposition_altitude))
+         if self.parent.reposition_loiter_radius != DEFAULT_LOITER_RADIUS:
+             self.ard_dialog.ui.loiter_radius.setText(str(self.parent.reposition_loiter_radius))
+         if self.parent.reposition_speed != DEFAULT_SPEED:
+             self.ard_dialog.ui.speed.setText(str(self.parent.reposition_speed))
+         if not math.isnan(self.parent.reposition_yaw):
+             self.ard_dialog.ui.yaw.setText(str(self.parent.reposition_yaw))
+         self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Save).clicked.connect(self.ard_save)
+         self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Ok).clicked.connect(self.ard_ok)
+         self.ard_dialog.ui.buttons.button(QDialogButtonBox.StandardButton.Cancel).clicked.connect(self.ard_cancel)
+         self.ard_dialog.finished.connect(self.ard_reset)
+         self.ard_dialog.show()
 
     def ard_save(self):
         self.parent.reposition_altitude = float(self.ard_dialog.ui.altitude.text())
@@ -249,94 +273,107 @@ class MouseInputHandler(QObject):
     def ard_reset(self):
         self.ard_dialog = None
 
-    @Slot(int, QGeoCoordinate, float, float)
-    def handle_mouse_input_to_map(self, button: int, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
-        if not coordinate.isValid():
-            qWarning("Invalid mouse input coordinate.")
+    @Slot(int, QGeoCoordinate, int, float, float)
+    def handle_mouse_input_to_map(self, button: int, coordinate: QGeoCoordinate, mod: int, mouseX: float, mouseY: float):
+        self.match_and_execute(button, 0, mod, coordinate, mouseX, mouseY)
+
+    @Slot(int, int)
+    def handle_key_input_to_map(self, key: int, mod: int):
+        self.match_and_execute(0, key, mod, QGeoCoordinate(), -1, -1)
+
+    def select_item(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
+        if mouseX == -1 or mouseY == -1:
             return
-        qDebug("Pressed the mouse button %s in coordinates %s %s %s" % (button, coordinate.altitude(), coordinate.latitude(), coordinate.longitude()))
+        if not coordinate.isValid():
+            qWarning("Invalid input")
+            return
+        self.parent.selected_plane_team_no = -2
+        for m_data in self.parent.user_ads_data_model.m_datas:
+            if m_data.is_selected:
+                m_data.is_selected = False
+                self.parent.user_ads_data_model.layoutChanged.emit()
+        for m_data in self.parent.user_ads_data_model.m_datas:
+            d = distance(coordinate, m_data.position) * 100000
+            qDebug("Distance to ads: %s, radius: %s" % (d, m_data.size))
+            if d <= m_data.size:
+                m_data.is_selected = True
+                self.parent.user_ads_data_model.layoutChanged.emit()
+                return
+        mapObject: QQuickItem = self.parent.rootObject().findChild(QQuickItem, "map")
+        center: QGeoCoordinate = mapObject.property("center")
+        zoom: float = mapObject.property("zoomLevel")
+        width: float = mapObject.property("width")
+        height: float = mapObject.property("height")
+        for m_data in self.parent.plane_data_model.m_datas:
+            coordinate_point: QPointF = QPointF(mouseX, mouseY)
+            plane_point: QPointF | None = geo_to_screen(center, zoom, width, height, m_data.position.latitude(), m_data.position.longitude())
+            if plane_point is None:
+                continue
+            d = point_distance(coordinate_point, plane_point)
+            qDebug("Distance to plane: %s" % d)
+            if d <= 30: # Yeah, I selected this number randomly, I think this will be good number
+                m_data.plane_type = 2
+                self.parent.selected_plane_team_no = m_data.team_no
+                # TODO: Following the plane
+                self.parent.plane_data_model.layoutChanged.emit()
+                return
 
-        match button:
-            case Qt.MouseButton.LeftButton.value:
-                self.parent.selected_plane_team_no = -2
-                for m_data in self.parent.user_ads_data_model.m_datas:
-                    if m_data.is_selected:
-                        m_data.is_selected = False
-                        self.parent.user_ads_data_model.layoutChanged.emit()
-                for m_data in self.parent.user_ads_data_model.m_datas:
-                    d = distance(coordinate, m_data.position) * 100000
-                    qDebug("Distance to ads: %s, radius: %s" % (d, m_data.size))
-                    if d <= m_data.size:
-                        m_data.is_selected = True
-                        self.parent.user_ads_data_model.layoutChanged.emit()
-                        return
-                mapObject: QQuickItem = self.parent.rootObject().findChild(QQuickItem, "map")
-                center: QGeoCoordinate = mapObject.property("center")
-                zoom: float = mapObject.property("zoomLevel")
-                width: float = mapObject.property("width")
-                height: float = mapObject.property("height")
-                for m_data in self.parent.plane_data_model.m_datas:
-                    coordinate_point: QPointF = QPointF(mouseX, mouseY)
-                    plane_point: QPointF | None = geo_to_screen(center, zoom, width, height, m_data.position.latitude(), m_data.position.longitude())
-                    if plane_point is None:
-                        continue
-                    d = point_distance(coordinate_point, plane_point)
-                    qDebug("Distance to plane: %s" % d)
-                    if d <= 30: # Yeah, I selected this number randomly, I think this will be good number
-                        m_data.plane_type = 2
-                        self.parent.selected_plane_team_no = m_data.team_no
-                        # TODO: Following the plane
-                        self.parent.plane_data_model.layoutChanged.emit()
-                        return
-            case Qt.MouseButton.RightButton.value:
-                if self.parent.mavlink_connection is None:
-                    return
-                self.parent.target_coord.set_position(coordinate)
-                self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
-                                                                    self.parent.mavlink_connection.target_component,
-                                                                    MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
-                                                                    MAV_CMD_DO_REPOSITION,
-                                                                    0,
-                                                                    0,
-                                                                    self.parent.reposition_speed,
-                                                                    MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
-                                                                    self.parent.reposition_loiter_radius,
-                                                                    self.parent.reposition_yaw,
-                                                                    int(coordinate.latitude() * 10**7),
-                                                                    int(coordinate.longitude() * 10**7),
-                                                                    self.parent.reposition_altitude)
-                self.parent.reposition_timer.start()
+    def basic_reposition(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
+        if self.parent.mavlink_connection is None:
+            return
+        if not coordinate.isValid():
+            qWarning("Invalid input")
+            return
+        self.parent.target_coord.set_position(coordinate)
+        self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
+                                                            self.parent.mavlink_connection.target_component,
+                                                            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                                                            MAV_CMD_DO_REPOSITION,
+                                                            0,
+                                                            0,
+                                                            self.parent.reposition_speed,
+                                                            MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
+                                                            self.parent.reposition_loiter_radius,
+                                                            self.parent.reposition_yaw,
+                                                            int(coordinate.latitude() * 10**7),
+                                                            int(coordinate.longitude() * 10**7),
+                                                            self.parent.reposition_altitude)
+        self.parent.reposition_timer.start()
 
-                qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), self.parent.reposition_altitude, self.parent.reposition_loiter_radius))
-            case Qt.MouseButton.MiddleButton.value:
-                data: SpecialCoordsData = SpecialCoordsData()
-                data.position = coordinate
-                data.coord_type = self.gc_cycle + 5 # I hope i will remember how this works
-                qDebug("Gc cycle: %s" % self.gc_cycle)
-                current_cycle: int = self.gc_cycle
-                match self.gc_cycle:
-                    case 1:
-                        self.parent.coords_for_geofence.gc1_v = coordinate
-                    case 2:
-                        self.parent.coords_for_geofence.gc2_v = coordinate
-                    case 3:
-                        self.parent.coords_for_geofence.gc3_v = coordinate
-                    case 4:
-                        self.parent.coords_for_geofence.gc4_v = coordinate
-                        self.parent.coords_for_geofence.upload_geofence_data.emit()
-                        self.gc_cycle = 0
-                for mdata in self.parent.coord_data_model.m_datas:
-                    if mdata.coord_type == current_cycle + 5:
-                        qDebug("Removing mdata: %s, with type: %s" % (mdata.position, mdata.coord_type))
-                        self.parent.coord_data_model.m_datas.remove(mdata)
-                        break
-                self.parent.coords_for_geofence.gc_changed.emit()
-                self.gc_cycle = self.gc_cycle + 1
-                qDebug("next Gc cycle: %s" % self.gc_cycle)
-                self.parent.coord_data_model.m_datas.append(data)
-                self.parent.coord_data_model.layoutChanged.emit()
-            case _:
-                qWarning("Invalid mouse input %s" % button)
+        qDebug("Sent reposition command to %s %s with relative altitude %s, with loiter radius %s" % (coordinate.latitude(), coordinate.longitude(), self.parent.reposition_altitude, self.parent.reposition_loiter_radius))
+
+    def set_geofence(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
+        if self.parent.mavlink_connection is None:
+            return
+        if not coordinate.isValid():
+            qWarning("Invalid input")
+            return
+        data: SpecialCoordsData = SpecialCoordsData()
+        data.position = coordinate
+        data.coord_type = self.gc_cycle + 5 # I hope i will remember how this works
+        qDebug("Gc cycle: %s" % self.gc_cycle)
+        current_cycle: int = self.gc_cycle
+        match self.gc_cycle:
+            case 1:
+                self.parent.coords_for_geofence.gc1_v = coordinate
+            case 2:
+                self.parent.coords_for_geofence.gc2_v = coordinate
+            case 3:
+                self.parent.coords_for_geofence.gc3_v = coordinate
+            case 4:
+                self.parent.coords_for_geofence.gc4_v = coordinate
+                self.parent.coords_for_geofence.upload_geofence_data.emit()
+                self.gc_cycle = 0
+        for mdata in self.parent.coord_data_model.m_datas:
+            if mdata.coord_type == current_cycle + 5:
+                qDebug("Removing mdata: %s, with type: %s" % (mdata.position, mdata.coord_type))
+                self.parent.coord_data_model.m_datas.remove(mdata)
+                break
+        self.parent.coords_for_geofence.gc_changed.emit()
+        self.gc_cycle = self.gc_cycle + 1
+        qDebug("next Gc cycle: %s" % self.gc_cycle)
+        self.parent.coord_data_model.m_datas.append(data)
+        self.parent.coord_data_model.layoutChanged.emit()
 
 ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
 
@@ -429,6 +466,7 @@ class MapWidget(QQuickWidget):
     reposition_yaw: float = DEFAULT_YAW
     reposition_speed: float = DEFAULT_SPEED
     reposition_timer: QTimer
+    input_config_reference: Callable[[], dict[KeybindingsEnum, InputMapping]]
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
@@ -491,3 +529,6 @@ class MapWidget(QQuickWidget):
     def update_ads_data(self, ads: AdsData):
         self.user_ads_data_model.m_datas.append(ads)
         self.user_ads_data_model.layoutChanged.emit()
+
+    def set_input_config_reference(self, input_config_reference: Callable[[], dict[KeybindingsEnum, InputMapping]]) -> None:
+        self.input_config_reference = input_config_reference

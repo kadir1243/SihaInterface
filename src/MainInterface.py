@@ -34,6 +34,8 @@ from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, C
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
     get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze
 from src.ServerConnectionInterface import ServerConnectionInterface
+from src.KeybindingConfigInterface import KeybindingConfigInterface
+from src.input_types import InputMapping, KeybindingsEnum
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -388,6 +390,7 @@ class MainWindow(QMainWindow):
     server_connection_dialog: ServerConnectionInterface | None = None
     camera_server_connection_dialog: CameraServerConnectionInterface | None = None
     color_selector_dialog: ColorSelectorInterface | None = None
+    input_selector_dialog: KeybindingConfigInterface | None = None
     geofence_dialog: SetGeofenceInterface | None = None
     add_ads_dialog: AddADSInterface | None = None
     server_connection: ServerConnection = ServerConnection()
@@ -471,6 +474,20 @@ class MainWindow(QMainWindow):
         self.mission_download_timout.timeout.connect(self.request_mission_data_timeout)
         self.ui.download_missions.clicked.connect(self.request_mission_data)
         self.ui.download_fence_data.clicked.connect(self.request_fence_data)
+        self.input_config = KeybindingConfigInterface.initialize_mappings()
+        self.ui.map_view.set_input_config_reference(lambda: self.input_config)
+        self.ui.actionChange_Input_Mapping.triggered.connect(self.__open_input_map_config_dialog)
+
+    input_config: dict[KeybindingsEnum, InputMapping]
+    def __open_input_map_config_dialog(self):
+        if self.input_selector_dialog is not None:
+            return
+        self.input_selector_dialog = KeybindingConfigInterface(self, self.input_config)
+        self.input_selector_dialog.finished.connect(self._input_map_close_screen)
+        self.input_selector_dialog.show()
+
+    def _input_map_close_screen(self):
+        self.input_selector_dialog = None
 
     def closeEvent(self, event, /):
         try:
@@ -631,11 +648,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(self, QCoreApplication.translate("MainWindow", u"About", None), QCoreApplication.translate("MainWindow", "Designed and developed by Muzaffer Kadir Belen to be used by ARES teknofest team", None))
 
     def _remove_ads(self):
-        for m_data in self.ui.map_view.user_ads_data_model.m_datas:
-            if m_data.is_selected:
-                self.ui.map_view.user_ads_data_model.m_datas.remove(m_data)
-                self.ui.map_view.user_ads_data_model.layoutChanged.emit()
-                self.ui.map_view.upload_ads_data.emit()
+        self.ui.map_view.mouse_input_handler.remove_selected_ads(None, 0, 0)
 
     def _actionConfigurateCameraServer(self):
         if self.camera_server_connection_dialog is not None:
@@ -709,7 +722,8 @@ class MainWindow(QMainWindow):
                    self.geofence_dialog,
                    self.add_ads_dialog,
                    self.camera_server_connection_dialog,
-                   self.ui.map_view.mouse_input_handler.ard_dialog]
+                   self.ui.map_view.mouse_input_handler.ard_dialog,
+                   self.input_selector_dialog]
 
     def retranslateOpenDialogs(self):
         dialogs = self.get_all_dialogs()
@@ -718,8 +732,9 @@ class MainWindow(QMainWindow):
             if dialog is not None:
                 dialog.ui.retranslateUi(dialog)
 
-        for dialog in self.color_selector_dialog.get_dialogs():
-            dialog.retranslateUi()
+        if self.color_selector_dialog is not None:
+            for dialog in self.color_selector_dialog.get_dialogs():
+                dialog.retranslateUi()
 
     translator: QTranslator
     def change_lang_to(self, index: int):
