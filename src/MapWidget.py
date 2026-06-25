@@ -194,7 +194,7 @@ class MouseInputHandler(QObject):
             # qDebug("Checking %s Inputs for match: %s %s %s" % (e, v.mouse_input.value, v.key_input.value, v.mod.value))
             if (mouse_input & v.mouse_input.value) != 0 and mod == v.mod.value:
                 self.input2Action[e](coord, mouseX, mouseY)
-            elif (key_input & v.key_input.value) != 0 and mod == v.mod.value:
+            elif (not e.value[4]) and (key_input & v.key_input.value) != 0 and mod == v.mod.value:
                 self.input2Action[e](coord, mouseX, mouseY)
             else:
                 # qDebug("Can not match with any input key currently: %s" % e)
@@ -210,7 +210,7 @@ class MouseInputHandler(QObject):
          if not self.ard_dialog is None or self.parent.mavlink_connection is None:
              return
          if not coordinate.isValid():
-             qWarning("Invalid input")
+             qWarning("Invalid input, advanced reposition needs a coordinate")
              return
          self.ard_dialog = AdvancedRepositionDialog(self.parent)
          self.ard_dialog.ui.latitude.setText(str(coordinate.latitude()))
@@ -279,13 +279,14 @@ class MouseInputHandler(QObject):
 
     @Slot(int, int)
     def handle_key_input_to_map(self, key: int, mod: int):
-        self.match_and_execute(0, key, mod, QGeoCoordinate(), -1, -1)
+        self.match_and_execute(Qt.MouseButton.NoButton.value, key, mod, QGeoCoordinate(), -1, -1)
 
     def select_item(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
         if mouseX == -1 or mouseY == -1:
+            qWarning("Invalid input, Item selection needs mouse position")
             return
         if not coordinate.isValid():
-            qWarning("Invalid input")
+            qWarning("Invalid input, Item selection needs a coordinate")
             return
         self.parent.selected_plane_team_no = -2
         for m_data in self.parent.user_ads_data_model.m_datas:
@@ -322,7 +323,7 @@ class MouseInputHandler(QObject):
         if self.parent.mavlink_connection is None:
             return
         if not coordinate.isValid():
-            qWarning("Invalid input")
+            qWarning("Invalid input, repositioning needs a coordinate")
             return
         self.parent.target_coord.set_position(coordinate)
         self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
@@ -346,7 +347,7 @@ class MouseInputHandler(QObject):
         if self.parent.mavlink_connection is None:
             return
         if not coordinate.isValid():
-            qWarning("Invalid input")
+            qWarning("Invalid input, adding geofence pos needs a coordinate")
             return
         data: SpecialCoordsData = SpecialCoordsData()
         data.position = coordinate
