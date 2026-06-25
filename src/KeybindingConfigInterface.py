@@ -81,18 +81,6 @@ class KeybindingConfigInterface(QDialog):
         self.original_config.update(self.config)
         self.accept()
 
-    def disable_all_except(self, type: KeybindingsEnum):
-        for e in self.input_type2button.keys():
-            if type != e:
-                self.input_type2button[e].setDisabled(True)
-        self.ui.buttons.setDisabled(True)
-
-    def enable_all_except(self, type: KeybindingsEnum):
-        for e in self.input_type2button.keys():
-            if type != e:
-                self.input_type2button[e].setDisabled(False)
-        self.ui.buttons.setDisabled(False)
-
     def set_to_config(self, config: dict[KeybindingsEnum, InputMapping]):
         for e in config.keys():
             value = config[e]
@@ -125,8 +113,9 @@ class KeybindingConfigInterface(QDialog):
         self.set_to_config(self.config)
 
     def set_current_waiting(self, currently_waiting: KeybindingsEnum):
+        if self.currently_waiting is not None:
+            return
         qInfo("Starting to wait for %s" % currently_waiting)
-        self.disable_all_except(currently_waiting)
         self.currently_waiting = currently_waiting
         self.input_type2button[currently_waiting].setText(QCoreApplication.translate("InputMapper", "Waiting for input", None))
 
@@ -136,7 +125,6 @@ class KeybindingConfigInterface(QDialog):
             self.config[self.currently_waiting] = InputMapping(self.currently_waiting.value[0], event.buttons(), Qt.Key.Key_unknown, event.modifiers())
             self.input_type2button[self.currently_waiting].setText(_translate_mouse_keys(event.buttons(), event.modifiers()))
             qInfo("Changed to %s" % _translate_mouse_keys(event.buttons(), event.modifiers()))
-            self.enable_all_except(self.currently_waiting)
             self.currently_waiting = None
         else:
             super().mousePressEvent(event)
@@ -159,7 +147,6 @@ class KeybindingConfigInterface(QDialog):
             self.config[self.currently_waiting] = InputMapping(self.currently_waiting.value[0], Qt.MouseButton.NoButton, event.keyCombination().key(), event.modifiers())
             self.input_type2button[self.currently_waiting].setText(QKeySequence(event.keyCombination()).toString())
             qInfo("Changed to %s" % QKeySequence(event.keyCombination()).toString())
-            self.enable_all_except(self.currently_waiting)
             self.currently_waiting = None
         else:
             super().keyPressEvent(event)
