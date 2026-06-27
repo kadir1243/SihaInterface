@@ -11,7 +11,7 @@ from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDeb
 from PySide6.QtGui import QAction, QRegularExpressionValidator
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
-from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication, QMessageBox
+from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication, QMessageBox, QStyle, QProxyStyle
 from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
     MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message, \
     MAVLink_global_position_int_message, MAVLink_system_time_message, MAV_CMD_DO_FENCE_ENABLE, \
@@ -389,6 +389,16 @@ class ConnectionWaitWrapper(QObject):
         self.__parent.connection_wait_wrapper = None
         self.con_thread.quit()
 
+class NoAccentStyle(QProxyStyle):
+    def __init__(self, style: QStyle):
+        super().__init__(style)
+
+    def drawPrimitive(self, element, option, painter, /, widget=...):
+        if element == QStyle.PrimitiveElement.PE_PanelItemViewRow:
+            return
+
+        super().drawPrimitive(element, option, painter, widget)
+
 
 SERVER_IS_UNREACHABLE_COUNTER = 0
 
@@ -417,6 +427,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         QMainWindow.__init__(self)
         self.translator = QTranslator()
+        self.setStyle(NoAccentStyle(self.style()))
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
