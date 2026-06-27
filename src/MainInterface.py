@@ -1,7 +1,7 @@
 import math
 import os
 import re
-from enum import Enum
+from enum import Enum, IntEnum
 from functools import partial
 
 os.environ['MAVLINK20'] = '1'
@@ -19,11 +19,12 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION, MAV_FRAME_GLOBAL_INT, \
     MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, MAVLINK_MSG_ID_MISSION_REQUEST_INT, MAV_MISSION_TYPE_FENCE, \
     MAVLINK_MSG_ID_MISSION_ACK, MAVLINK_MSG_ID_MISSION_REQUEST, MAV_FRAME_GLOBAL, MAVLINK_MSG_ID_BAD_DATA, \
-    MAVLINK_MSG_ID_COMMAND_ACK, MAV_CMD_DO_REPOSITION, MAV_RESULT_ACCEPTED, MAV_RESULT_DENIED, \
+    MAVLINK_MSG_ID_COMMAND_ACK, MAV_CMD_DO_REPOSITION, MAV_RESULT_DENIED, \
     MAVLINK_MSG_ID_MISSION_COUNT, MAVLINK_MSG_ID_MISSION_ITEM_INT, MAVLink_mission_item_int_message, \
     MAV_MISSION_ACCEPTED, MAVLINK_MSG_ID_MISSION_ITEM, MAVLink_mission_item_message, MAV_MODE_FLAG_SAFETY_ARMED, \
-    MAV_CMD_COMPONENT_ARM_DISARM, MAV_TYPE_GCS, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
-    MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION
+    MAV_CMD_COMPONENT_ARM_DISARM, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
+    MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION, MAV_RESULT_TEMPORARILY_REJECTED, MAV_CMD_DO_SET_MODE, \
+    MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -103,21 +104,38 @@ class TrackableDataUpdate:
         return str(packet.battery_remaining) + "%"
     @staticmethod
     def update_arm_status(mainwindow:MainWindow, packet: MAVLink_heartbeat_message):
-        arm = (packet.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0
-        if not mainwindow._arm_change_cooldown.isActive() and mainwindow.ui.arm_mode.currentIndex() != arm:
-            mainwindow.ui.arm_mode.blockSignals(True)
+        arm: int = 1 if (packet.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0 else 0
+        if mainwindow.ui.arm_mode.currentIndex() != arm:
             mainwindow.ui.arm_mode.setCurrentIndex(arm)
-            mainwindow.ui.arm_mode.blockSignals(False)
-        index: int = packet.custom_mode
-        if index > 9:
-            index = index - 1  # FIXME: I hardcoded index after 9
-        if not mainwindow._mode_change_cooldown.isActive() and mainwindow.ui.fly_mode_combobox.currentIndex() != index:
-            mainwindow.ui.fly_mode_combobox.blockSignals(True)
-            mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
-            mainwindow.ui.fly_mode_combobox.blockSignals(False)
-        if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set and not mainwindow.ui.map_view.reposition_timer.isActive():
-            mainwindow.ui.map_view.target_coord.remove_position()
-        return str(arm)
+        if mainwindow.current_pilot != packet.autopilot:
+            mainwindow.change_autopilot(packet.autopilot)
+        mainwindow.next_telemetry.iha_otonom = 1 if (packet.base_mode & MAV_MODE_FLAG_AUTO_ENABLED) != 0 else 0
+
+        if mainwindow.current_pilot == MAV_AUTOPILOT_PX4:
+            sub_mod = packet.custom_mode >> 24
+            base_mod = (packet.custom_mode >> 16) - (sub_mod << 8)
+            px4mode = main_and_sub_mode_to_px4_uav_mode[base_mod]
+            if px4mode:
+                sub = px4mode.get(sub_mod)
+                if sub:
+                    mainwindow.ui.fly_mode_combobox.setCurrentIndex(sub.value[0])
+                else:
+                    qWarning("Can not handle px4 sub mode %s %s %s" % (packet.custom_mode, base_mod, sub_mod))
+            else:
+                qWarning("Can not handle px4 mode %s %s" % (packet.custom_mode, base_mod))
+        elif mainwindow.current_pilot == MAV_AUTOPILOT_ARDUPILOTMEGA:
+            index: int = packet.custom_mode
+            if 27 > index >= 0:
+                if mainwindow.ui.fly_mode_combobox.currentIndex() != index:
+                    mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
+                if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set and not mainwindow.ui.map_view.reposition_timer.isActive():
+                    mainwindow.ui.map_view.target_coord.remove_position()
+            else:
+                qWarning("Don't know how to handle this custom mode data")
+        else:
+            qWarning("Unknown pilot type, fly mode unsupported")
+        return str(arm != 0)
+
     @staticmethod
     def update_breach_status(mainwindow:MainWindow, packet: MAVLink_fence_status_message) -> str:
         text = "Breached"
@@ -169,33 +187,119 @@ class TrackableDataEnum(Enum):
                 return e
         return None
 
-class UAV_Modes(Enum):
-    MANUAL = ('MANUAL', 0)
-    CIRCLE = ('CIRCLE', 1)
-    STABILIZE = ('STABILIZE', 2)
-    TRAINING = ('TRAINING', 3)
-    ACRO = ('ACRO', 4)
-    FLY_BY_WIRE_A = ('FBWA', 5)
-    FLY_BY_WIRE_B = ('FBWB', 6)
-    CRUISE = ('CRUISE', 7)
-    AUTOTUNE = ('AUTOTUNE', 8)
-    AUTO = ('AUTO', 10)
-    ReturnToLaunch = ('RTL', 11)
-    LOITER = ('LOITER', 12)
-    TAKEOFF = ('TAKEOFF', 13)
-    AVOID_ADSB = ('AVOID_ADSB', 14)
-    GUIDED = ('GUIDED', 15)
-    INITIALISING = ('INITIALISING', 16)
-    QSTABILIZE = ('QSTABILIZE', 17)
-    QHOVER = ('QHOVER', 18)
-    QLOITER = ('QLOITER', 19)
-    QLAND = ('QLAND', 20)
-    QRTL = ('QRTL', 21)
-    QAUTOTUNE = ('QAUTOTUNE', 22)
-    QACRO = ('QACRO', 23)
-    THERMAL = ('THERMAL', 24)
-    LOITERALTQLAND = ('LOITERALTQLAND', 25)
-    AUTOLAND = ('AUTOLAND', 26)
+class PX4_CUSTOM_MAIN_MODE(IntEnum):
+    MANUAL = 1
+    ALTCTL = 2
+    POSCTL = 3
+    AUTO = 4
+    ACRO = 5
+    OFFBOARD = 6
+    STABILIZED = 7
+    RATTITUDE_LEGACY = 8
+    SIMPLE = 9 #/* unused, but reserved for future use */
+    TERMINATION = 10
+    ALTITUDE_CRUISE = 11
+
+class PX4_CUSTOM_SUB_MODE(IntEnum):
+    AUTO_READY = 1
+    AUTO_TAKEOFF = 2
+    AUTO_LOITER = 3
+    AUTO_MISSION = 4
+    AUTO_RTL = 5
+    AUTO_LAND = 6
+    AUTO_RESERVED_DO_NOT_USE = 7 #// was PX4_CUSTOM_SUB_MODE_AUTO_RTGS, deleted 2020-03-05
+    AUTO_FOLLOW_TARGET = 8
+    AUTO_PRECLAND = 9
+    AUTO_VTOL_TAKEOFF = 10
+    EXTERNAL1 = 11
+    EXTERNAL2 = 12
+    EXTERNAL3 = 13
+    EXTERNAL4 = 14
+    EXTERNAL5 = 15
+    EXTERNAL6 = 16
+    EXTERNAL7 = 17
+    EXTERNAL8 = 18
+    GUIDED_COURSE = 19
+
+class PX4_CUSTOM_SUB_MODE_POSCTL(Enum):
+    POSCTL = 0
+    ORBIT = 1
+    SLOW = 2
+
+class PX4_UAV_Modes(Enum):
+    MANUAL = (0, "MANUAL", PX4_CUSTOM_MAIN_MODE.MANUAL, 0)  # Manual mode
+    ALTCTL = (1, "ALTCTL", PX4_CUSTOM_MAIN_MODE.ALTCTL, 0)  # Altitude control mode
+    POSCTL = (2, "POSCTL", PX4_CUSTOM_MAIN_MODE.POSCTL, 0)  # Position control mode
+    AUTO_MISSION = (3, "AUTO_MISSION", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_MISSION)  # Auto mission mode
+    AUTO_LOITER = (4, "AUTO_LOITER", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_LOITER)  # Auto loiter mode
+    AUTO_RTL = (5, "AUTO_RTL", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_RTL)  # Auto return to launch mode
+    POSITION_SLOW = (6, "POSITION_SLOW", PX4_CUSTOM_MAIN_MODE.POSCTL, PX4_CUSTOM_SUB_MODE_POSCTL.SLOW)
+    GUIDED_COURSE = (7, "GUIDED_COURSE", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.GUIDED_COURSE)  # Guided Course mode (FW: maintain course/alt/speed)
+    ALTITUDE_CRUISE = (8, "ALTITUDE_CRUISE", PX4_CUSTOM_MAIN_MODE.ALTITUDE_CRUISE, 0)  # Altitude with Cruise mode
+    FREE3 = (9, "FREE3", 0, 0)
+    ACRO = (10, "ACRO", PX4_CUSTOM_MAIN_MODE.ACRO, 0)  # Acro mode
+    FREE2 = (11, "FREE2", 0, 0)
+    DESCEND = (12, "DESCEND", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_LAND)  # Descend mode (no position control)
+    TERMINATION = (13, "TERMINATION", PX4_CUSTOM_MAIN_MODE.TERMINATION, 0)  # Termination mode
+    OFFBOARD = (14, "OFFBOARD", PX4_CUSTOM_MAIN_MODE.OFFBOARD, 0)
+    STAB = (15, "STAB", PX4_CUSTOM_MAIN_MODE.STABILIZED, 0)  # Stabilized mode
+    FREE1 = (16, "FREE1", 0, 0)
+    AUTO_TAKEOFF = (17, "AUTO_TAKEOFF", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_TAKEOFF)  # Takeoff
+    AUTO_LAND = (18, "AUTO_LAND", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_LAND)  # Land
+    AUTO_FOLLOW_TARGET = (19, "AUTO_FOLLOW_TARGET", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_FOLLOW_TARGET)  # Auto Follow
+    AUTO_PRECLAND = (20, "AUTO_PRECLAND", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_PRECLAND)  # Precision land with landing target
+    ORBIT = (21, "ORBIT", PX4_CUSTOM_MAIN_MODE.POSCTL, PX4_CUSTOM_SUB_MODE_POSCTL.ORBIT)  # Orbit in a circle
+    AUTO_VTOL_TAKEOFF = (22, "AUTO_VTOL_TAKEOFF", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.AUTO_VTOL_TAKEOFF)  # Takeoff, transition, establish loiter
+    EXTERNAL1 = (23, "EXTERNAL1", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL1)
+    EXTERNAL2 = (24, "EXTERNAL2", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL2)
+    EXTERNAL3 = (25, "EXTERNAL3", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL3)
+    EXTERNAL4 = (26, "EXTERNAL4", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL4)
+    EXTERNAL5 = (27, "EXTERNAL5", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL5)
+    EXTERNAL6 = (28, "EXTERNAL6", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL6)
+    EXTERNAL7 = (29, "EXTERNAL7", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL7)
+    EXTERNAL8 = (30, "EXTERNAL8", PX4_CUSTOM_MAIN_MODE.AUTO, PX4_CUSTOM_SUB_MODE.EXTERNAL8)
+
+main_and_sub_mode_to_px4_uav_mode: dict[int, dict[int, PX4_UAV_Modes]] = dict()
+
+for __px4_uav_mode in PX4_UAV_Modes:
+    m = main_and_sub_mode_to_px4_uav_mode.get(__px4_uav_mode.value[2])
+    if not m:
+        m = dict()
+    m[__px4_uav_mode.value[3]] = __px4_uav_mode
+    main_and_sub_mode_to_px4_uav_mode[__px4_uav_mode.value[2]] = m
+
+index_to_px4_uav_mode: dict[int, PX4_UAV_Modes] = dict()
+for ____px4_uav_mode in PX4_UAV_Modes:
+    index_to_px4_uav_mode[____px4_uav_mode.value[0]] = ____px4_uav_mode
+
+class Ardupilot_UAV_Modes(Enum):
+    MANUAL = (0, 'MANUAL', 0)
+    CIRCLE = (1, 'CIRCLE', 1)
+    STABILIZE = (2, 'STABILIZE', 2)
+    TRAINING = (3, 'TRAINING', 3)
+    ACRO = (4, 'ACRO', 4)
+    FLY_BY_WIRE_A = (5, 'FBWA', 5)
+    FLY_BY_WIRE_B = (6, 'FBWB', 6)
+    CRUISE = (7, 'CRUISE', 7)
+    AUTOTUNE = (8, 'AUTOTUNE', 8)
+    RESERVED_NON_SELECTABLE = (9, 'FREE_NON_SELECTABLE_INTERNAL', -1)
+    AUTO = (10, 'AUTO', 10)
+    ReturnToLaunch = (11, 'RTL', 11)
+    LOITER = (12, 'LOITER', 12)
+    TAKEOFF = (13, 'TAKEOFF', 13)
+    AVOID_ADSB = (14, 'AVOID_ADSB', 14)
+    GUIDED = (15, 'GUIDED', 15)
+    INITIALISING = (16, 'INITIALISING', 16)
+    QSTABILIZE = (17, 'QSTABILIZE', 17)
+    QHOVER = (18, 'QHOVER', 18)
+    QLOITER = (19, 'QLOITER', 19)
+    QLAND = (20, 'QLAND', 20)
+    QRTL = (21, 'QRTL', 21)
+    QAUTOTUNE = (22, 'QAUTOTUNE', 22)
+    QACRO = (23, 'QACRO', 23)
+    THERMAL = (24, 'THERMAL', 24)
+    LOITERALTQLAND = (25, 'LOITERALTQLAND', 25)
+    AUTOLAND = (26, 'AUTOLAND', 26)
 
 class SupportedLanguages(Enum):
     English = (0, lambda: QCoreApplication.translate("SupportedLanguages", "English", None), QLocale.Language.English, QLocale.Country.UnitedStates)
@@ -327,6 +431,9 @@ class MavlinkWorker(QObject):
                     if result == MAV_RESULT_DENIED:
                         self.create_warning.emit("Reposition command denied by vehicle")
                         self.parent.ui.map_view.target_coord.remove_position()
+                elif command == MAV_CMD_DO_SET_MODE:
+                    if result == MAV_RESULT_TEMPORARILY_REJECTED:
+                        self.create_warning.emit("Set mode temporarily rejected by vehicle, sensor/calibration error")
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
                 e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
                 data_enum_values = e.value[4]
@@ -337,6 +444,7 @@ class MavlinkWorker(QObject):
 
 class ConnectionWaitWrapper(QObject):
     after_heartbeat_successfully_received = Signal(mavfile)
+    setup_for_autopilot = Signal(int)
     after_heartbeat_not_received = Signal(mavfile)
     mavlink_connection_error = Signal()
     set_device_connection_text = Signal(str)
@@ -372,18 +480,13 @@ class ConnectionWaitWrapper(QObject):
             return
         qInfo("Successfully Connected with mavlink, Target System: %s, Target component: %s" % (self.mavlink_connection.target_system, self.mavlink_connection.target_component))
 
-        self.mavlink_connection.mav.heartbeat_send(
-            MAV_TYPE_GCS,
-            MAV_AUTOPILOT_INVALID,
-            0, 0, 0
-        )
-
         try:
             msg: MAVLink_heartbeat_message = self.mavlink_connection.wait_heartbeat(timeout=10)
             if msg is None:
                 raise Exception("Connection failed")
 
             qInfo("Successfully Received first heartbeat")
+            self.setup_for_autopilot.emit(msg.autopilot)
             self.after_heartbeat_successfully_received.emit(self.mavlink_connection)
         except:
             self.after_heartbeat_not_received.emit(self.mavlink_connection)
@@ -420,13 +523,13 @@ class MainWindow(QMainWindow):
     mavlink_thread: QThread | None = None
     next_telemetry: TelemetryData = TelemetryData()
     last_server_telemetry_response: TelemetryResponseData = TelemetryResponseData()
-    _mode_change_cooldown: QTimer
-    _arm_change_cooldown: QTimer
     plane_on_map_update_timer: QTimer = QTimer(interval=500)
-    current_lang: int = 0
+    current_lang: int
+    current_pilot: int
 
     def __init__(self):
         QMainWindow.__init__(self)
+        self.current_lang = 0
         self.translator = QTranslator()
         self.setStyle(NoAccentStyle(self.style()))
         self.ui = Ui_MainWindow()
@@ -440,13 +543,8 @@ class MainWindow(QMainWindow):
         self.kamikaze_timer = QTimer(self)
         self.kamikaze_timer.setInterval(100)
         self.kamikaze_timer.timeout.connect(self.__kamikaze_loop)
-        self._mode_change_cooldown = QTimer(self, singleShot=True, interval=2000)
-        self._arm_change_cooldown = QTimer(self, singleShot=True, interval=2000)
 
-        mode: UAV_Modes
-        for mode in UAV_Modes:
-            self.ui.fly_mode_combobox.insertItem(mode.value[1], mode.value[0])
-        self.ui.fly_mode_combobox.setCurrentIndex(-1)
+        self.current_pilot = MAV_AUTOPILOT_INVALID
 
         self.ui.actionConfigurate_UAV.triggered.connect(self._actionConfigurate_UAV)
         self.ui.actionConfigurateServer.triggered.connect(self._actionConfigurateServer)
@@ -479,7 +577,7 @@ class MainWindow(QMainWindow):
 
         self.ui.remove_from_watch.clicked.connect(self.__remove_from_watch_signal)
         self.ui.watch_list.setColumnHidden(0, True) # hide id column
-        self.ui.fly_mode_combobox.currentIndexChanged.connect(self._change_index)
+        self.ui.fly_mode_combobox.activated.connect(self._change_index)
         self.ui.actionForce_Send_Testing_Telemetry_Data.triggered.connect(self.__change_state_for_force_sending_telemetry)
         self.ui.get_kamikaze_coords_from_server.clicked.connect(self.__get_kamikaze_coords)
         self.ui.start_kamikaze.clicked.connect(self.__start_kamikaze)
@@ -487,7 +585,7 @@ class MainWindow(QMainWindow):
         self.server_connection.telemetry_timer = QTimer()
         self.server_connection.telemetry_timer.setInterval(500)
         self.server_connection.telemetry_timer.timeout.connect(self.__send_telemetry)
-        self.ui.arm_mode.currentIndexChanged.connect(self.__setArmStatus)
+        self.ui.arm_mode.activated.connect(self.__setArmStatus)
         self.ui.refresh_ads.clicked.connect(self.__refresh_ads)
         self.ui.add_ads.clicked.connect(self.__add_ads_button_clicked)
         self.plane_on_map_update_timer.timeout.connect(self.__update_plane_on_map_without_server)
@@ -511,6 +609,22 @@ class MainWindow(QMainWindow):
         self.ui.actionChange_Input_Mapping.triggered.connect(self.__open_input_map_config_dialog)
         self.ui.kamikaze_latitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
         self.ui.kamikaze_longitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
+
+    def change_autopilot(self, new_autopilot: int):
+        self.current_pilot = new_autopilot
+        if new_autopilot == MAV_AUTOPILOT_PX4:
+            self.ui.fly_mode_combobox.clear()
+            for mode in PX4_UAV_Modes:
+                self.ui.fly_mode_combobox.insertItem(mode.value[0], mode.value[1])
+                if mode.value[2] == 0:
+                    self.ui.fly_mode_combobox.view().setRowHidden(mode.value[0], True)
+        elif new_autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA:
+            self.ui.fly_mode_combobox.clear()
+            for mode in Ardupilot_UAV_Modes:
+                self.ui.fly_mode_combobox.insertItem(mode.value[0], mode.value[1])
+                if mode.value[2] == -1:
+                    self.ui.fly_mode_combobox.view().setRowHidden(mode.value[0], True)
+        self.ui.fly_mode_combobox.setCurrentIndex(-1)
 
     input_config: dict[KeybindingsEnum, InputMapping]
     def __open_input_map_config_dialog(self):
@@ -826,7 +940,6 @@ class MainWindow(QMainWindow):
         self.ui.map_view.update_server_ads_data(get_ads(self.server_connection.get_address()))
 
     def __setArmStatus(self, is_arm: int):
-        self._arm_change_cooldown.start()
         qDebug("Trying to send armed status: %s" % is_arm)
 
         self.mavlink_connection.mav.command_long_send(
@@ -874,14 +987,15 @@ class MainWindow(QMainWindow):
         self.geofence_dialog.close()
 
     def _enable_fence(self) -> None:
-        self.mavlink_connection.mav.command_long_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            MAV_CMD_DO_FENCE_ENABLE,
-            0,
-            1,
-            0,0,0,0,0,0
-        )
+        if self.current_pilot != MAV_AUTOPILOT_PX4:
+            self.mavlink_connection.mav.command_long_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                MAV_CMD_DO_FENCE_ENABLE,
+                0,
+                1,
+                0,0,0,0,0,0
+            )
 
     requested_to_send_fence_with_fence: bool = False
     def send_fence_mission_data(self, index: int, use_item_int: bool):
@@ -1150,8 +1264,6 @@ class MainWindow(QMainWindow):
             )
         if self.kamikaze_previous_mode is not None and self.mavlink_connection is not None:
             prev_mode = self.kamikaze_previous_mode
-            if prev_mode > 8:
-                prev_mode = prev_mode + 1
             self.mavlink_connection.set_mode_apm(prev_mode)
         if self.server_connection.ip is not None:
             self.on_kamikaze_end("")
@@ -1172,12 +1284,15 @@ class MainWindow(QMainWindow):
         self.force_sending_telemetry = state
 
     def _change_index(self, index: int):
-        self._mode_change_cooldown.start()
-        if index > 8:
-            index = index + 1
-        qDebug("Sending mode with index: %s" % index)
-        self.mavlink_connection.set_mode_apm(index)
-        self.next_telemetry.iha_otonom = 1 if index == 10 else 0
+        if self.current_pilot == MAV_AUTOPILOT_PX4:
+            base_mode = index_to_px4_uav_mode[index].value[2]
+            sub_mode = index_to_px4_uav_mode[index].value[3]
+            qDebug("Sending standard mode with mode %s, sub mode %s" % (base_mode, sub_mode))
+            self.mavlink_connection.set_mode_px4(MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, base_mode, sub_mode)
+        else:
+            qDebug("Sending mode with index: %s" % index)
+
+            self.mavlink_connection.set_mode_apm(index)
 
     def add_to_watch_list(self, e: TrackableDataEnum):
         if not TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].isEnabled():
@@ -1258,6 +1373,8 @@ class MainWindow(QMainWindow):
                 idx = self.uav_connection_dialog.ui.connection_type.findText(self.uav_connection.serial_port)
                 if idx >= 0:
                     self.uav_connection_dialog.ui.connection_type.setCurrentIndex(idx)
+                else:
+                    qWarning("Can not find index for serial port: %s" % self.uav_connection.serial_port)
             else:
                 isTCP: bool = self.uav_connection_dialog.connection_type == ConnectionType.TCP
                 self.uav_connection_dialog.ui.ip_address.setText(self.uav_connection.ip)
@@ -1302,6 +1419,7 @@ class MainWindow(QMainWindow):
             return
         self.uav_connection.connection_type = self.uav_connection_dialog.connection_type
         self.connection_wait_wrapper = ConnectionWaitWrapper(self, self.uav_connection)
+        self.connection_wait_wrapper.setup_for_autopilot.connect(self.change_autopilot)
         self.connection_wait_wrapper.after_heartbeat_successfully_received.connect(self.__successful_uav_connection)
         self.connection_wait_wrapper.after_heartbeat_not_received.connect(self.__error_when_receiving_heartbeat)
         self.connection_wait_wrapper.set_device_connection_text.connect(self.uav_connection_dialog.ui.device_connection_text.setText)
@@ -1317,12 +1435,12 @@ class MainWindow(QMainWindow):
         self.uav_connection.reset_connection_properties()
 
     def __error_when_receiving_heartbeat(self, mav_connection: mavfile):
-        self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
+        if self.uav_connection_dialog is not None:
+            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connection Failed :(", None))
+            self.uav_connection_dialog.ui.invalid_input_error_label.show()
 
-        self.uav_connection_dialog.ui.invalid_input_error_label.show()
         if self.uav_connection.connection_type == ConnectionType.SERIAL:
-            qInfo("Can not connect to UAV from %s" % (
-                        str(self.uav_connection.serial_port) + "," + str(self.uav_connection.serial_baud_rate)))
+            qInfo("Can not connect to UAV from %s" % (self.uav_connection.serial_port + "," + str(self.uav_connection.serial_baud_rate)))
         else:
             qInfo("Can not connect to UAV from %s" % self.uav_connection.ip)
         self.uav_connection.reset_connection_properties()
@@ -1334,7 +1452,8 @@ class MainWindow(QMainWindow):
         self.ui.map_view.mavlink_connection = None
 
     def __successful_uav_connection(self, mav_connection: mavfile):
-        self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
+        if self.uav_connection_dialog is not None:
+            self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
         self.mavlink_connection = mav_connection
         self.mavlink_connection.mav.request_data_stream_send(
             self.mavlink_connection.target_system,
@@ -1409,6 +1528,8 @@ class MainWindow(QMainWindow):
         self.disableFeaturesAfterUAVDisconnected()
         self.next_telemetry = TelemetryData()
         self.resetWatcherWidgetValues()
+        self.ui.fly_mode_combobox.setCurrentIndex(-1)
+        self.ui.arm_mode.setCurrentIndex(-1)
 
     def _server_connect(self, dialog: ServerConnectionInterface):
         # TODO: Test connection
