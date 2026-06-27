@@ -104,15 +104,17 @@ class TrackableDataUpdate:
     @staticmethod
     def update_arm_status(mainwindow:MainWindow, packet: MAVLink_heartbeat_message):
         arm = (packet.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0
-        if mainwindow.ui.arm_mode.currentIndex() != arm:
-            mainwindow.last_arm_change_was_from_uav = True
+        if not mainwindow._arm_change_cooldown.isActive() and mainwindow.ui.arm_mode.currentIndex() != arm:
+            mainwindow.ui.arm_mode.blockSignals(True)
             mainwindow.ui.arm_mode.setCurrentIndex(arm)
+            mainwindow.ui.arm_mode.blockSignals(False)
         index: int = packet.custom_mode
         if index > 9:
             index = index - 1  # FIXME: I hardcoded index after 9
-        if mainwindow.ui.fly_mode_combobox.currentIndex() != index:
-            mainwindow.last_mode_change_was_from_uav = True
+        if not mainwindow._mode_change_cooldown.isActive() and mainwindow.ui.fly_mode_combobox.currentIndex() != index:
+            mainwindow.ui.fly_mode_combobox.blockSignals(True)
             mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
+            mainwindow.ui.fly_mode_combobox.blockSignals(False)
         if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set and not mainwindow.ui.map_view.reposition_timer.isActive():
             mainwindow.ui.map_view.target_coord.remove_position()
         return str(arm)
@@ -210,7 +212,7 @@ LANGUAGE_ACTIONS: dict[int, QAction] = {}
 
 class UavConnection:
     connection_type: ConnectionType | None
-    serial_port: int
+    serial_port: str
     serial_baud_rate: int
     ip: str
 
@@ -358,8 +360,7 @@ class ConnectionWaitWrapper(QObject):
               case ConnectionType.UDP:
                   self.mavlink_connection = mavudp(self.uav_connection.ip, timeout=10)
               case ConnectionType.SERIAL:
-                  system_identifier = re.sub("\\d", "", QSerialPortInfo.availablePorts()[0].systemLocation())
-                  self.mavlink_connection = mavserial(system_identifier + str(self.uav_connection.serial_port), baud=self.uav_connection.serial_baud_rate)
+                  self.mavlink_connection = mavserial(self.uav_connection.serial_port, baud=self.uav_connection.serial_baud_rate)
               case None:
                   self.mavlink_connection_error.emit()
                   qWarning("Connection type is null ???")
@@ -419,8 +420,8 @@ class MainWindow(QMainWindow):
     mavlink_thread: QThread | None = None
     next_telemetry: TelemetryData = TelemetryData()
     last_server_telemetry_response: TelemetryResponseData = TelemetryResponseData()
-    last_arm_change_was_from_uav: bool = False
-    last_mode_change_was_from_uav: bool = False
+    _mode_change_cooldown: QTimer
+    _arm_change_cooldown: QTimer
     plane_on_map_update_timer: QTimer = QTimer(interval=500)
     current_lang: int = 0
 
@@ -439,6 +440,8 @@ class MainWindow(QMainWindow):
         self.kamikaze_timer = QTimer(self)
         self.kamikaze_timer.setInterval(100)
         self.kamikaze_timer.timeout.connect(self.__kamikaze_loop)
+        self._mode_change_cooldown = QTimer(self, singleShot=True, interval=2000)
+        self._arm_change_cooldown = QTimer(self, singleShot=True, interval=2000)
 
         mode: UAV_Modes
         for mode in UAV_Modes:
@@ -823,10 +826,7 @@ class MainWindow(QMainWindow):
         self.ui.map_view.update_server_ads_data(get_ads(self.server_connection.get_address()))
 
     def __setArmStatus(self, is_arm: int):
-        if self.last_arm_change_was_from_uav:
-            self.last_arm_change_was_from_uav = False
-            return
-
+        self._arm_change_cooldown.start()
         qDebug("Trying to send armed status: %s" % is_arm)
 
         self.mavlink_connection.mav.command_long_send(
@@ -1172,9 +1172,7 @@ class MainWindow(QMainWindow):
         self.force_sending_telemetry = state
 
     def _change_index(self, index: int):
-        if self.last_mode_change_was_from_uav:
-            self.last_mode_change_was_from_uav = False
-            return
+        self._mode_change_cooldown.start()
         if index > 8:
             index = index + 1
         qDebug("Sending mode with index: %s" % index)
@@ -1252,12 +1250,14 @@ class MainWindow(QMainWindow):
         availablePorts = list(QSerialPortInfo.availablePorts())
         availablePorts.sort(key=lambda a: int(re.sub("\\D", "", a.portName())))
         for availablePort in availablePorts:
-            self.uav_connection_dialog.ui.connection_type.addItem(availablePort.systemLocation())
+            self.uav_connection_dialog.ui.connection_type.addItem(availablePort.portName())
         if self.uav_connection.connection_type is not None:
             self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
             if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
                 self.uav_connection_dialog.ui.serial_baud.setText(str(self.uav_connection.serial_baud_rate))
-                self.uav_connection_dialog.ui.connection_type.setCurrentIndex(2 + self.uav_connection.serial_port)
+                idx = self.uav_connection_dialog.ui.connection_type.findText(self.uav_connection.serial_port)
+                if idx >= 0:
+                    self.uav_connection_dialog.ui.connection_type.setCurrentIndex(idx)
             else:
                 isTCP: bool = self.uav_connection_dialog.connection_type == ConnectionType.TCP
                 self.uav_connection_dialog.ui.ip_address.setText(self.uav_connection.ip)
@@ -1293,7 +1293,7 @@ class MainWindow(QMainWindow):
 
         if self.uav_connection_dialog.connection_type == ConnectionType.SERIAL:
             self.uav_connection.serial_baud_rate = int(self.uav_connection_dialog.ui.serial_baud.text())
-            self.uav_connection.serial_port = self.uav_connection_dialog.ui.connection_type.currentIndex() - 2
+            self.uav_connection.serial_port = self.uav_connection_dialog.ui.connection_type.currentText()
         else:
             self.uav_connection.ip = self.uav_connection_dialog.ui.ip_address.text()
 
