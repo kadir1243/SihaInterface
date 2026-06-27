@@ -24,7 +24,8 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAV_MISSION_ACCEPTED, MAVLINK_MSG_ID_MISSION_ITEM, MAVLink_mission_item_message, MAV_MODE_FLAG_SAFETY_ARMED, \
     MAV_CMD_COMPONENT_ARM_DISARM, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
     MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION, MAV_RESULT_TEMPORARILY_REJECTED, MAV_CMD_DO_SET_MODE, \
-    MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+    MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, \
+    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -350,10 +351,10 @@ class MavlinkWorker(QObject):
     create_warning = Signal(str)
     fence_mission_count: int
     waypoint_mission_count: int
-    mission_fence_item_received = Signal(MAVLink_mission_item_message, int)
-    mission_fence_item_int_received = Signal(MAVLink_mission_item_int_message, int)
-    mission_waypoint_item_received = Signal(MAVLink_mission_item_message, int)
-    mission_waypoint_item_int_received = Signal(MAVLink_mission_item_int_message, int)
+    mission_fence_item_received = Signal(int, float, float, int, float, int)
+    mission_fence_item_int_received = Signal(int, float, float, int, float, int)
+    mission_waypoint_item_received = Signal(int, float, float, int, int)
+    mission_waypoint_item_int_received = Signal(int, float, float, int, int)
     send_fence_mission_data = Signal(int, bool)
     def __init__(self, mavlink_connection: mavfile, parent: MainWindow):
         super().__init__()
@@ -414,26 +415,50 @@ class MavlinkWorker(QObject):
                         self.parent.requested_to_get_mission = False
 
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM_INT:
+                packet: MAVLink_mission_item_int_message = packet
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.mission_fence_item_int_received.emit(packet, self.fence_mission_count)
+                    self.mission_fence_item_int_received.emit(packet.command, packet.x / 1e7, packet.y / 1e7, packet.seq, packet.param1, self.fence_mission_count)
                 elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
-                    self.mission_waypoint_item_int_received.emit(packet, self.waypoint_mission_count)
+                    self.mission_waypoint_item_int_received.emit(packet.command, packet.x / 1e7, packet.y / 1e7, packet.seq, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM:
+                packet: MAVLink_mission_item_message = packet
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.mission_fence_item_received.emit(packet, self.fence_mission_count)
+                    self.mission_fence_item_received.emit(packet.command, packet.x, packet.y, packet.seq, packet.param1, self.fence_mission_count)
                 elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
-                    self.mission_waypoint_item_received.emit(packet, self.waypoint_mission_count)
+                    self.mission_waypoint_item_received.emit(packet.command, packet.x, packet.y, packet.seq, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_COMMAND_ACK:
                 command: int = packet.command
                 result: int = packet.result
-                qDebug("CommandACK received for command %s and result %s" % (command, result))
+
                 if command == MAV_CMD_DO_REPOSITION:
-                    if result == MAV_RESULT_DENIED:
+                    if result == MAV_RESULT_ACCEPTED:
+                        qDebug("Reposition command successfully executed")
+                    elif result == MAV_RESULT_DENIED:
                         self.create_warning.emit("Reposition command denied by vehicle")
                         self.parent.ui.map_view.target_coord.remove_position()
+                    else:
+                        qDebug("Reposition result: %s" % result)
                 elif command == MAV_CMD_DO_SET_MODE:
-                    if result == MAV_RESULT_TEMPORARILY_REJECTED:
+                    if result == MAV_RESULT_ACCEPTED:
+                        qDebug("Set mode command successfully executed")
+                    elif result == MAV_RESULT_TEMPORARILY_REJECTED:
                         self.create_warning.emit("Set mode temporarily rejected by vehicle, sensor/calibration error")
+                    else:
+                        qDebug("Set mode result: %s" % result)
+                elif command == MAV_CMD_SET_MESSAGE_INTERVAL:
+                    if result == MAV_RESULT_ACCEPTED:
+                        qDebug("Message interval successfully set")
+                    elif result == MAV_RESULT_FAILED:
+                        qWarning("Couldn't set some message interval")
+                    else:
+                        qDebug("Set message interval result: %s" % result)
+                elif command == MAV_CMD_REQUEST_MESSAGE:
+                    if result == MAV_RESULT_ACCEPTED:
+                        qDebug("Message request successful")
+                    else:
+                        qDebug("Message request result: %s" % result)
+                else:
+                    qDebug("CommandACK received for command %s and result %s" % (command, result))
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
                 e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
                 data_enum_values = e.value[4]
@@ -657,7 +682,6 @@ class MainWindow(QMainWindow):
         self.mission_download_timout.start()
 
     def request_mission_data_timeout(self):
-        qWarning("Mission Download taking really long, probably vehicle connection has been lost")
         self._create_warning("Mission Download taking really long, probably vehicle connection has been lost")
         self.next_mission_order_seq_id = 0
         self.requested_to_get_mission = False
@@ -698,15 +722,13 @@ class MainWindow(QMainWindow):
             self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
             self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
-    def mission_waypoint_item_received(self, item: MAVLink_mission_item_message, count: int):
-        command: int = item.command
-        coord: QGeoCoordinate = QGeoCoordinate(item.x, item.y)
-        self.mission_waypoint_received(coord, command, item.seq, False, count)
+    def mission_waypoint_item_received(self, command: int, x: float, y: float, seq: int, count: int):
+        coord: QGeoCoordinate = QGeoCoordinate(x, y)
+        self.mission_waypoint_received(coord, command, seq, False, count)
 
-    def mission_waypoint_item_int_received(self, item: MAVLink_mission_item_int_message, count: int):
-        command: int = item.command
-        coord: QGeoCoordinate = QGeoCoordinate(item.x / 1e7, item.y / 1e7)
-        self.mission_waypoint_received(coord, command, item.seq, True, count)
+    def mission_waypoint_item_int_received(self, command: int, x: float, y: float, seq: int, count: int):
+        coord: QGeoCoordinate = QGeoCoordinate(x, y)
+        self.mission_waypoint_received(coord, command, seq, True, count)
 
     def request_fence_data(self):
         if self.mavlink_connection is None:
@@ -715,11 +737,12 @@ class MainWindow(QMainWindow):
             qDebug("Tried to get fence when already getting fence from uav")
             return
         self.requested_to_get_fence = True
+        self.coord_counter = 1
+        self.next_fence_order_seq_id = 0
         self.mavlink_connection.mav.mission_request_list_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_FENCE)
         self.fence_download_timout.start()
 
     def request_fence_data_timeout(self):
-        qWarning("Fence Download taking really long, probably vehicle connection has been lost")
         self._create_warning("Fence Download taking really long, probably vehicle connection has been lost")
         self.next_fence_order_seq_id = 0
         self.requested_to_get_fence = False
@@ -729,10 +752,9 @@ class MainWindow(QMainWindow):
     coord_counter: int = 1
     next_fence_order_seq_id: int = 0
     requested_to_get_fence: bool = False
-    def mission_fence_item_int_received(self, item: MAVLink_mission_item_int_message, count: int):
-        command: int = item.command
-        coord: QGeoCoordinate = QGeoCoordinate(item.x / 1e7, item.y / 1e7)
-        self.mission_fence_received(coord, command, item.seq, item.param1, True, count)
+    def mission_fence_item_int_received(self, command: int, x: float, y: float, seq: int, ads_size: float, count: int):
+        coord: QGeoCoordinate = QGeoCoordinate(x, y)
+        self.mission_fence_received(coord, command, seq, ads_size, True, count)
 
     # TODO: This handling assumes 4 vertex fence
     def mission_fence_received(self, coord: QGeoCoordinate, command: int, seq: int, ads_size: float, use_int: bool, count: int):
@@ -787,10 +809,9 @@ class MainWindow(QMainWindow):
             self.requested_to_get_fence = False
             self.ui.map_view.user_ads_data_model.layoutChanged.emit()
 
-    def mission_fence_item_received(self, item: MAVLink_mission_item_message, count: int):
-        command: int = item.command
-        coord: QGeoCoordinate = QGeoCoordinate(item.x, item.y)
-        self.mission_fence_received(coord, command, item.seq, item.param1, False, count)
+    def mission_fence_item_received(self, command: int, x: float, y: float, seq: int, ads_size: float, count: int):
+        coord: QGeoCoordinate = QGeoCoordinate(x, y)
+        self.mission_fence_received(coord, command, seq, ads_size, False, count)
 
     def _about(self):
         QMessageBox.about(self, QCoreApplication.translate("MainWindow", u"About", None), QCoreApplication.translate("MainWindow", "Designed and developed by Muzaffer Kadir Belen to be used by ARES teknofest team", None))
@@ -923,9 +944,15 @@ class MainWindow(QMainWindow):
         self.add_ads_dialog = None
 
     def __add_ads_add_new_button_clicked(self):
-        radius = float(self.add_ads_dialog.ui.ads_radius.text())
-        latitude = float(self.add_ads_dialog.ui.ads_latitude.text())
-        longitude = float(self.add_ads_dialog.ui.ads_longitude.text())
+        radius: float
+        latitude: float
+        longitude: float
+        try:
+            radius = float(self.add_ads_dialog.ui.ads_radius.text())
+            latitude = float(self.add_ads_dialog.ui.ads_latitude.text())
+            longitude = float(self.add_ads_dialog.ui.ads_longitude.text())
+        except:
+            return
         data = AdsData()
         data.position = QGeoCoordinate(latitude, longitude)
         data.size = radius
@@ -1112,7 +1139,6 @@ class MainWindow(QMainWindow):
         self.fence_upload_timout.start()
 
     def fence_upload_reset(self):
-        qWarning("Fence Upload taking really long, probably vehicle connection has been lost")
         self._create_warning("Fence Upload taking really long, probably vehicle connection has been lost")
         self.ads_list_cache = []
         self.requested_to_send_fence_with_fence = False
@@ -1500,6 +1526,7 @@ class MainWindow(QMainWindow):
         self.ui.watch_list.setItem(row, 3, QTableWidgetItem(value))
 
     def _create_warning(self, text: str) -> None:
+        qWarning(text)
         self.ui.statusbar.showMessage(text, 2000)
 
     def enableFeaturesAfterUAVConnected(self):
