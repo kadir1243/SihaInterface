@@ -131,6 +131,14 @@ class TrackableDataUpdate:
                     mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
                 if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set and not mainwindow.ui.map_view.reposition_timer.isActive():
                     mainwindow.ui.map_view.target_coord.remove_position()
+                    if mainwindow.mavlink_connection is not None:
+                        mainwindow.mavlink_connection.mav.param_set_send(
+                            mainwindow.mavlink_connection.target_system,
+                            mainwindow.mavlink_connection.target_component,
+                            b'THR_MAX',
+                            100.0,
+                            9
+                        )
             else:
                 qWarning("Don't know how to handle this custom mode data")
         else:
@@ -634,6 +642,8 @@ class MainWindow(QMainWindow):
         self.ui.actionChange_Input_Mapping.triggered.connect(self.__open_input_map_config_dialog)
         self.ui.kamikaze_latitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
         self.ui.kamikaze_longitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
+        self.ui.kamikaze_latitude.setText("39.90445947062722")
+        self.ui.kamikaze_longitude.setText("41.236949005794656")
 
     def change_autopilot(self, new_autopilot: int):
         self.current_pilot = new_autopilot
@@ -1154,6 +1164,17 @@ class MainWindow(QMainWindow):
     kamikaze_previous_mode: int | None
     kamikaze_timer: QTimer
 
+    def __set_param(self, name: bytes, value: float):
+        if self.mavlink_connection is None:
+            return
+        self.mavlink_connection.mav.param_set_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            name,
+            value,
+            9
+        )
+
     def __start_kamikaze(self):
         if self.kamikaze_state != KamikazeState.IDLE:
             qDebug("Cancelling Kamikaze")
@@ -1163,8 +1184,12 @@ class MainWindow(QMainWindow):
         if self.mavlink_connection is None:
             qWarning("No UAV Connection, Can not Start Kamikaze")
             return
-        latitude: float = float(self.ui.kamikaze_latitude.text())
-        longitude: float = float(self.ui.kamikaze_longitude.text())
+        try:
+            latitude: float = float(self.ui.kamikaze_latitude.text())
+            longitude: float = float(self.ui.kamikaze_longitude.text())
+        except ValueError:
+            qWarning("Invalid Kamikaze Coordinates")
+            return
 
         self.kamikaze_target_lat = latitude
         self.kamikaze_target_lon = longitude
@@ -1179,13 +1204,13 @@ class MainWindow(QMainWindow):
         self.kamikaze_state = KamikazeState.APPROACHING
         self.kamikaze_timer.start()
 
-        self.mavlink_connection.mav.param_set_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            b'LIM_PITCH_MIN',
-            -45.0,
-            9
-        )
+        # Dive pitch limit -45deg and turn/roll limit 60deg. Set both the old
+        # (centidegree: LIM_*) and new (degree: *_DEG) ArduPlane parameter names so
+        # this works regardless of firmware version (4.1+ renamed these params).
+        self.__set_param(b'PTCH_LIM_MIN_DEG', -45.0)
+        self.__set_param(b'LIM_PITCH_MIN', -4500.0)
+        self.__set_param(b'ROLL_LIMIT_DEG', 60.0)
+        self.__set_param(b'LIM_ROLL_CD', 6000.0)
         self.mavlink_connection.set_mode_apm(5)
         qDebug("Kamikaze Started")
 
@@ -1204,25 +1229,25 @@ class MainWindow(QMainWindow):
         roll_ch: int = self.__heading_error_to_roll_channel()
 
         if self.kamikaze_state == KamikazeState.APPROACHING:
-            alt_error: float = 80.0 - current_alt
+            alt_error: float = 120.0 - current_alt
             pitch_offset: int = int(alt_error * 5)
             pitch_ch: int = 1500 + max(-200, min(200, pitch_offset))
-            self.__send_rc_override(roll_ch, pitch_ch, 1500)
-            if distance <= 200.0:
+            self.__send_rc_override(roll_ch, pitch_ch, 1550)
+            if distance <= 140.0:
                 qDebug(f"Remaining Distance is {distance:.1f}m, entering dive state")
-                self.mavlink_connection.set_mode_apm(2)
+                self.mavlink_connection.set_mode_apm(5)
                 self.kamikaze_state = KamikazeState.DIVING
 
         elif self.kamikaze_state == KamikazeState.DIVING:
-            self.__send_rc_override(1500, 1250, 1200)
-            if current_alt <= 45.0:
+            self.__send_rc_override(1500, 1000, 1150)
+            if current_alt <= 60.0:
                 qDebug("Achieved target altitude, entering recovering state")
                 self.mavlink_connection.set_mode_apm(5)
                 self.kamikaze_state = KamikazeState.RECOVERING
 
         elif self.kamikaze_state == KamikazeState.RECOVERING:
-            self.__send_rc_override(1500, 1900, 1900)
-            if current_alt >= (self.kamikaze_original_alt - 5.0):
+            self.__send_rc_override(1500, 1900, 1950)
+            if current_alt >= 100.0:
                 qDebug("Recovering complete, returning to last mode")
                 self.kamikaze_state = KamikazeState.RESUMING
                 self.__finish_kamikaze()
@@ -1255,7 +1280,7 @@ class MainWindow(QMainWindow):
         current_heading: float = math.radians(self.next_telemetry.iha_yatis * 4 + 180)
         heading_error: float = math.atan2(math.sin(bearing - current_heading), math.cos(bearing - current_heading))
         steer: float = max(-1.0, min(1.0, heading_error * 0.8))
-        roll_ch: int = 1500 + int(steer * 330)
+        roll_ch: int = 1500 + int(steer * 500)
         return max(1000, min(2000, roll_ch))
 
     def __send_rc_override(self, roll_ch: int, pitch_ch: int, throttle_ch: int):
@@ -1281,13 +1306,10 @@ class MainWindow(QMainWindow):
                 self.mavlink_connection.target_component,
                 0, 0, 0, 0, 0, 0, 0, 0
             )
-            self.mavlink_connection.mav.param_set_send(
-                self.mavlink_connection.target_system,
-                self.mavlink_connection.target_component,
-                b'LIM_PITCH_MIN',
-                -25.0,
-                9
-            )
+            self.__set_param(b'PTCH_LIM_MIN_DEG', -25.0)
+            self.__set_param(b'LIM_PITCH_MIN', -2500.0)
+            self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
+            self.__set_param(b'LIM_ROLL_CD', 4500.0)
         if self.kamikaze_previous_mode is not None and self.mavlink_connection is not None:
             prev_mode = self.kamikaze_previous_mode
             self.mavlink_connection.set_mode_apm(prev_mode)
@@ -1497,13 +1519,8 @@ class MainWindow(QMainWindow):
                                                             e.value[3],
                                                             0, 0, 0, 0, 0)
         self._enable_fence()
-        self.mavlink_connection.mav.param_set_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            b'LIM_ROLL_CD',
-            4500.0,
-            9
-        )
+        self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
+        self.__set_param(b'LIM_ROLL_CD', 4500.0)
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)
