@@ -551,7 +551,7 @@ class MainWindow(QMainWindow):
     add_ads_dialog: AddADSInterface | None = None
     server_connection: ServerConnection = ServerConnection()
     mavlink_connection: mavfile = None
-    force_sending_telemetry: bool = False
+    color_options: ColorOptions
     mavlink_worker: MavlinkWorker | None = None
     mavlink_thread: QThread | None = None
     next_telemetry: TelemetryData = TelemetryData()
@@ -565,8 +565,10 @@ class MainWindow(QMainWindow):
         self.current_lang = 0
         self.translator = QTranslator()
         self.setStyle(NoAccentStyle(self.style()))
+        self.color_options = ColorOptions()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        self.setup_colors()
 
         self.kamikaze_state = KamikazeState.IDLE
         self.kamikaze_original_alt = 0.0
@@ -611,7 +613,6 @@ class MainWindow(QMainWindow):
         self.ui.remove_from_watch.clicked.connect(self.__remove_from_watch_signal)
         self.ui.watch_list.setColumnHidden(0, True) # hide id column
         self.ui.fly_mode_combobox.activated.connect(self._change_index)
-        self.ui.actionForce_Send_Testing_Telemetry_Data.triggered.connect(self.__change_state_for_force_sending_telemetry)
         self.ui.get_kamikaze_coords_from_server.clicked.connect(self.__get_kamikaze_coords)
         self.ui.start_kamikaze.clicked.connect(self.__start_kamikaze)
         self.ui.set_fence.clicked.connect(self.__set_fence_clicked)
@@ -644,6 +645,11 @@ class MainWindow(QMainWindow):
         self.ui.kamikaze_longitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
         self.ui.kamikaze_latitude.setText("39.90445947062722")
         self.ui.kamikaze_longitude.setText("41.236949005794656")
+
+    def setup_colors(self):
+        i = ColorSelectorInterface(self, self.color_options)
+        i.reset_colors() # Yep this is ugly :D
+        i.close()
 
     def change_autopilot(self, new_autopilot: int):
         self.current_pilot = new_autopilot
@@ -1328,9 +1334,6 @@ class MainWindow(QMainWindow):
         self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
         self.ui.kamikaze_latitude.setText(str(qr_coords.qrEnlem))
 
-    def __change_state_for_force_sending_telemetry(self, state: bool):
-        self.force_sending_telemetry = state
-
     def _change_index(self, index: int):
         if self.current_pilot == MAV_AUTOPILOT_PX4:
             base_mode = index_to_px4_uav_mode[index].value[2]
@@ -1393,7 +1396,6 @@ class MainWindow(QMainWindow):
         self.server_connection_dialog.ui.disconnect.clicked.connect(lambda button: self._server_disconnect())
         self.server_connection_dialog.finished.connect(lambda e: self._reset_dialog(False))
 
-    color_options: ColorOptions = ColorOptions()
     def _actionConfigurateSetColors(self):
         if self.color_selector_dialog is not None:
             return
@@ -1618,7 +1620,7 @@ class MainWindow(QMainWindow):
         self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam), (self.next_telemetry.iha_yatis * 4) + 180)
 
     def __send_telemetry(self):
-        if self.mavlink_connection is None and not self.force_sending_telemetry:
+        if self.mavlink_connection is None:
             qDebug("UAV not connected")
             return
         global SERVER_IS_UNREACHABLE_COUNTER

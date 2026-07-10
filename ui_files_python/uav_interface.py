@@ -34,116 +34,6 @@ class Ui_MainWindow(object):
         icon = QIcon()
         icon.addFile(u"ui_files/ares-white.svg", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         MainWindow.setWindowIcon(icon)
-        MainWindow.setStyleSheet(u"QWidget#centralwidget, QWidget#remaining_thingies_frame, QWidget#kamikaze_panel, QWidget#target_tracking_panel\n"
-"{\n"
-"    color: #eff0f1;\n"
-"	background-color: rgb(32, 35, 38);\n"
-"	alternate-background-color: rgb(41,44,48);\n"
-"    selection-background-color: #3daee9;\n"
-"    selection-color: #eff0f1;\n"
-"}\n"
-"\n"
-"QSplitter::handle:horizontal {\n"
-"    border: 1px dotted darkgrey;\n"
-"	color: rgb(8, 56, 56);\n"
-"    height: 1px;\n"
-"}\n"
-"\n"
-"QSplitter::handle:vertical {\n"
-"    border: 1px dotted darkgrey;\n"
-"	color: rgb(8, 56, 56);\n"
-"    height: 1px;\n"
-"}\n"
-"\n"
-"QMenuBar {\n"
-"	background-color: rgb(29, 34, 38);\n"
-"    spacing: 3px;\n"
-"}\n"
-"\n"
-"QMenu {\n"
-"	background: rgb(29, 34, 38);\n"
-"}\n"
-"\n"
-"QMenu::item:selected {\n"
-"    background: #a8a8a8;\n"
-"}\n"
-"\n"
-"QMenu::item:pressed {\n"
-"    background: #888888;\n"
-"}\n"
-"\n"
-"QStatusBar {\n"
-"    background: rgb(29, 34, 38);\n"
-"}\n"
-"\n"
-"QMenuBar::item {\n"
-"	background-color: black;\n"
-"    padding: 1px 4px;\n"
-"    background: tran"
-                        "sparent;\n"
-"    border-radius: 4px;\n"
-"}\n"
-"\n"
-"QMenuBar::item:selected {\n"
-"    background: #a8a8a8;\n"
-"}\n"
-"\n"
-"QMenuBar::item:pressed {\n"
-"    background: #888888;\n"
-"}\n"
-"\n"
-"QAbstractButton {\n"
-"	color: #eff0f1; \n"
-"	background-color: rgb(45, 48, 51);\n"
-"	selection-background-color: rgb(63, 67, 71);\n"
-"}\n"
-"\n"
-"QAbstractButton:pressed {\n"
-"	color: #eff0f1; \n"
-"	background-color: rgb(67, 72, 76);\n"
-"}\n"
-"\n"
-"QAbstractButton:checked {\n"
-"	color: #eff0f1; \n"
-"	background-color: rgb(67, 72, 76);\n"
-"}\n"
-"\n"
-"QComboBox {\n"
-"	color: #eff0f1; \n"
-"    background-color: rgb(45, 48, 51);\n"
-"    padding: 1px 18px 1px 3px;\n"
-"    min-width: 6em;\n"
-"}\n"
-"\n"
-"QComboBox QAbstractItemView {\n"
-"	color: #eff0f1; \n"
-"    background-color: rgb(45, 48, 51);\n"
-"}\n"
-"\n"
-"QTabBar::tab {\n"
-"	color: #eff0f1; \n"
-"	background-color: rgb(30, 30, 30);\n"
-"    border-top-left-radius: 4px;\n"
-"    border-top-right-radius: 4px;\n"
-"    min-width: 8ex;\n"
-"    padding: 2px;\n"
-"}\n"
-"\n"
-"QTabBar::"
-                        "tab:selected, QTabBar::tab:hover {\n"
-"	color: #eff0f1; \n"
-"	background-color: rgb(45, 45, 45);\n"
-"}\n"
-"\n"
-"QTabWidget::pane {\n"
-"    border: 1px solid rgb(41, 44, 47);\n"
-"}\n"
-"\n"
-"QLineEdit {\n"
-"	border: 2px solid rgb(45, 45, 45);\n"
-"    background: rgb(45, 45, 45);\n"
-"	selection-background-color: darkgray;\n"
-"}")
         self.actionConfigurateServer = QAction(MainWindow)
         self.actionConfigurateServer.setObjectName(u"actionConfigurateServer")
         self.actionAir_Defence_System_Location = QAction(MainWindow)
@@ -154,9 +44,6 @@ class Ui_MainWindow(object):
         self.actionConfigurate_UAV.setObjectName(u"actionConfigurate_UAV")
         self.actionConfigurate_KamikazeCoords = QAction(MainWindow)
         self.actionConfigurate_KamikazeCoords.setObjectName(u"actionConfigurate_KamikazeCoords")
-        self.actionForce_Send_Testing_Telemetry_Data = QAction(MainWindow)
-        self.actionForce_Send_Testing_Telemetry_Data.setObjectName(u"actionForce_Send_Testing_Telemetry_Data")
-        self.actionForce_Send_Testing_Telemetry_Data.setCheckable(True)
         self.actionSet_Colors = QAction(MainWindow)
         self.actionSet_Colors.setObjectName(u"actionSet_Colors")
         self.actionConfigurate_Camera_Stream = QAction(MainWindow)
@@ -559,13 +446,11 @@ class Ui_MainWindow(object):
         MainWindow.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(MainWindow)
         self.menubar.setObjectName(u"menubar")
-        self.menubar.setGeometry(QRect(0, 0, 1021, 20))
+        self.menubar.setGeometry(QRect(0, 0, 1021, 30))
         self.menuConfigurations = QMenu(self.menubar)
         self.menuConfigurations.setObjectName(u"menuConfigurations")
         self.menuHelp = QMenu(self.menubar)
         self.menuHelp.setObjectName(u"menuHelp")
-        self.menuTesting = QMenu(self.menubar)
-        self.menuTesting.setObjectName(u"menuTesting")
         self.menuCustomize = QMenu(self.menubar)
         self.menuCustomize.setObjectName(u"menuCustomize")
         self.menuChange_Language = QMenu(self.menuCustomize)
@@ -583,14 +468,12 @@ class Ui_MainWindow(object):
 
         self.menubar.addAction(self.menuConfigurations.menuAction())
         self.menubar.addAction(self.menuCustomize.menuAction())
-        self.menubar.addAction(self.menuTesting.menuAction())
         self.menubar.addAction(self.menuHelp.menuAction())
         self.menuConfigurations.addAction(self.actionConfigurateServer)
         self.menuConfigurations.addAction(self.actionConfigurate_UAV)
         self.menuConfigurations.addAction(self.actionConfigurate_Camera_Stream)
         self.menuHelp.addAction(self.actionAbout)
         self.menuHelp.addAction(self.actionAbout_Qt)
-        self.menuTesting.addAction(self.actionForce_Send_Testing_Telemetry_Data)
         self.menuCustomize.addAction(self.actionSet_Colors)
         self.menuCustomize.addAction(self.menuChange_Language.menuAction())
         self.menuCustomize.addAction(self.actionChange_Input_Mapping)
@@ -611,10 +494,6 @@ class Ui_MainWindow(object):
         self.actionAbout.setText(QCoreApplication.translate("MainWindow", u"About", None))
         self.actionConfigurate_UAV.setText(QCoreApplication.translate("MainWindow", u"Configurate UAV", None))
         self.actionConfigurate_KamikazeCoords.setText(QCoreApplication.translate("MainWindow", u"Configurate Kamikaze Coords", None))
-        self.actionForce_Send_Testing_Telemetry_Data.setText(QCoreApplication.translate("MainWindow", u"Force Send Testing Telemetry Data", None))
-#if QT_CONFIG(statustip)
-        self.actionForce_Send_Testing_Telemetry_Data.setStatusTip(QCoreApplication.translate("MainWindow", u"Start sending telemetry data even if uav not connected", None))
-#endif // QT_CONFIG(statustip)
         self.actionSet_Colors.setText(QCoreApplication.translate("MainWindow", u"Theme Editor", None))
         self.actionConfigurate_Camera_Stream.setText(QCoreApplication.translate("MainWindow", u"Configurate Camera Stream", None))
         self.actionAbout_Qt.setText(QCoreApplication.translate("MainWindow", u"About Qt", None))
@@ -679,7 +558,6 @@ class Ui_MainWindow(object):
 #endif // QT_CONFIG(whatsthis)
         self.menuConfigurations.setTitle(QCoreApplication.translate("MainWindow", u"Configurations", None))
         self.menuHelp.setTitle(QCoreApplication.translate("MainWindow", u"Help", None))
-        self.menuTesting.setTitle(QCoreApplication.translate("MainWindow", u"Testing", None))
         self.menuCustomize.setTitle(QCoreApplication.translate("MainWindow", u"Customize", None))
         self.menuChange_Language.setTitle(QCoreApplication.translate("MainWindow", u"Change Language", None))
     # retranslateUi
