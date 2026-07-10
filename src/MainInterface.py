@@ -647,9 +647,7 @@ class MainWindow(QMainWindow):
         self.ui.kamikaze_longitude.setText("41.236949005794656")
 
     def setup_colors(self):
-        i = ColorSelectorInterface(self, self.color_options)
-        i.reset_colors() # Yep this is ugly :D
-        i.close()
+        self.setStyleSheet(ColorSelectorInterface.create_stylesheet(self.color_options))
 
     def change_autopilot(self, new_autopilot: int):
         self.current_pilot = new_autopilot

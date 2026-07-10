@@ -392,27 +392,31 @@ class ColorSelectorInterface(QDialog):
         button.setStyleSheet(f"background-color: {color_name};")
         button.setText(color_name)
 
-    def updateStyleSheet(self, window: QWidget):
+    @staticmethod
+    def create_stylesheet(options: ColorOptions) -> str:
         styleSheet: str = ""
         for e in ColorOptionEnum:
-            styleSheet += e.value[3](self.savedOptions.config)
+            styleSheet += e.value[3](options.config)
         styleSheet += """
-QTabBar::tab {
-color: #eff0f1; 
-background-color: rgb(30, 30, 30);
-border-top-left-radius: 4px;
-border-top-right-radius: 4px;
-min-width: 8ex;
-padding: 2px;
-}
+        QTabBar::tab {
+        color: #eff0f1; 
+        background-color: rgb(30, 30, 30);
+        border-top-left-radius: 4px;
+        border-top-right-radius: 4px;
+        min-width: 8ex;
+        padding: 2px;
+        }
 
-QTabBar::tab:selected, QTabBar::tab:hover {
-color: #eff0f1; 
-background-color: rgb(45, 45, 45);
-}
+        QTabBar::tab:selected, QTabBar::tab:hover {
+        color: #eff0f1; 
+        background-color: rgb(45, 45, 45);
+        }
 
-QTabWidget::pane {
-border: 1px solid rgb(41, 44, 47);
-}
-"""
-        window.setStyleSheet(styleSheet)
+        QTabWidget::pane {
+        border: 1px solid rgb(41, 44, 47);
+        }
+        """
+        return styleSheet
+
+    def updateStyleSheet(self, window: QWidget):
+        window.setStyleSheet(ColorSelectorInterface.create_stylesheet(self.savedOptions))
