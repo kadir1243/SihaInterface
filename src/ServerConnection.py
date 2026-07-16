@@ -4,12 +4,18 @@ from requests import Response
 
 # FIXME: This should be set to false
 INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST = True
+AUTH_UUID_TOKEN: str | None = None
 
 def login_to_server(target_address: str, username: str, password: str) -> int:
     if INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST:
-        requests.post(target_address + "/internal/add_new_user", json={"team": 1, "username": username, "password": password}, headers={"Content-Type": "application/json"})
+        requests.post(target_address + "/internal/add_new_user", json={"username": username, "password": password}, headers={"Content-Type": "application/json"})
     login = requests.post(target_address + "/api/giris", data=f'{{\"kadi\": \"{username}\",\"sifre\":\"{password}\"}}', headers={'Content-Type': 'application/json'})
     login.raise_for_status()
+    if login.headers["uuid-token"]:
+        global AUTH_UUID_TOKEN
+        AUTH_UUID_TOKEN = login.headers["uuid-token"]
+    else:
+        AUTH_UUID_TOKEN = None
     return int(login.text)
 
 class GpsSaati:
@@ -23,6 +29,8 @@ class GpsSaati:
         self.saniye = time.second()
         self.dakika = time.minute()
         self.saat = time.hour()
+    def __str__(self) -> str:
+        return "%s:%s:%s.%s" % (self.saat, self.dakika, self.dakika, self.milisaniye)
 
 class TelemetryData:
     takim_numarasi: int
@@ -82,6 +90,9 @@ SERVER_IS_UNREACHABLE_COUNTER: int = 0 # When this hits 100, disconnect from ser
 
 def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> TelemetryResponseData:
     try:
+        headers = {"Content-Type": "application/json"}
+        if AUTH_UUID_TOKEN:
+            headers["uuid-token"] = AUTH_UUID_TOKEN
         r: Response = requests.post(target_address + "/api/telemetri_gonder", json={
             "takim_numarasi": telemetry_data.takim_numarasi,
             "iha_enlem": telemetry_data.iha_enlem,
@@ -104,7 +115,7 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
                 "saniye": telemetry_data.gps_saati.saniye,
                 "milisaniye": telemetry_data.gps_saati.milisaniye
             }
-        }, headers={"Content-Type": "application/json"}, timeout=100)
+        }, headers=headers, timeout=100)
         r.raise_for_status()
         data = r.json()
         d: TelemetryResponseData = TelemetryResponseData()
@@ -131,7 +142,10 @@ class QrCoords:
     qrBoylam: float
 
 def get_kamikaze_coords(target_address: str) -> QrCoords:
-    r: Response = requests.get(target_address + "/api/qr_koordinati")
+    headers = {"Content-Type": "application/json"}
+    if AUTH_UUID_TOKEN:
+        headers["uuid-token"] = AUTH_UUID_TOKEN
+    r: Response = requests.get(target_address + "/api/qr_koordinati", headers=headers)
     r.raise_for_status()
     data = r.json()
     d: QrCoords = QrCoords()
@@ -146,7 +160,10 @@ class ServerAdsData:
     hssYariCap: float
 
 def get_ads(target_address: str) -> list[ServerAdsData]:
-    r: Response = requests.get(target_address + "/api/hss_koordinatlari")
+    headers = {"Content-Type": "application/json"}
+    if AUTH_UUID_TOKEN:
+        headers["uuid-token"] = AUTH_UUID_TOKEN
+    r: Response = requests.get(target_address + "/api/hss_koordinatlari", headers=headers)
     r.raise_for_status()
     data = r.json()
 
@@ -161,6 +178,9 @@ def get_ads(target_address: str) -> list[ServerAdsData]:
     return ads_list
 
 def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: str) -> None:
+    headers = {"Content-Type": "application/json"}
+    if AUTH_UUID_TOKEN:
+        headers["uuid-token"] = AUTH_UUID_TOKEN
     r: Response = requests.post(target_address + "/api/kamikaze_bilgisi", json={
         "kamikazeBaslangicZamani": {
                 "saat": start.saat,
@@ -175,10 +195,13 @@ def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: 
             "milisaniye": end.milisaniye
         },
         "qrMetni": qr_text
-    }, headers={"Content-Type": "application/json"})
+    }, headers=headers)
     r.raise_for_status()
 
 def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None:
+    headers = {"Content-Type": "application/json"}
+    if AUTH_UUID_TOKEN:
+        headers["uuid-token"] = AUTH_UUID_TOKEN
     r: Response = requests.post(target_address + "/api/kilitlenme_bilgisi", json={
         "kilitlenmeBitisZamani": {
                 "saat": end.saat,
@@ -187,5 +210,5 @@ def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None
                 "milisaniye": end.milisaniye
         },
         "otonom_kilitlenme": 1 if automatic else 0
-    }, headers={"Content-Type": "application/json"})
+    }, headers=headers)
     r.raise_for_status()

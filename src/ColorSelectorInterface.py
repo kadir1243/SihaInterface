@@ -31,10 +31,15 @@ selection-color: #eff0f1;
 
 QLabel {
 color: %s;
+}
+
+QLabel:disabled {
+color: %s;
 }""" % (ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Frame),
                ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background),
                ColorOptionEnumImpl.get_config(d, e, ColorAttribute.AlternateBackground),
-               ColorOptionEnumImpl.get_config(d, e, ColorAttribute.TextColor))
+               ColorOptionEnumImpl.get_config(d, e, ColorAttribute.TextColor),
+               ColorOptionEnumImpl.get_config(d, e, ColorAttribute.DisabledTextColor))
 
     @staticmethod
     def create_splitter(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
@@ -63,6 +68,11 @@ color: {2};
 background: {1};
 }}
 
+QMenu::item:disabled {{
+color: {3};
+background: {4};
+}}
+
 QMenuBar::item {{
 color: {2};
 background: transparent;
@@ -76,6 +86,11 @@ background: {0};
 
 QMenuBar::item:pressed {{
 background: {1};
+}}
+
+QMenuBar::item:disabled {{
+color: {3};
+background: {4};
 }}
 
 QMenuBar {{
@@ -94,7 +109,9 @@ background: rgb(29, 34, 38);
 }}
 """.format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.HoveredBackground),
            ColorOptionEnumImpl.get_config(d, e, ColorAttribute.SelectedBackground),
-           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.TextColor))
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.TextColor),
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Disabled),
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.DisabledBackground))
 
     @staticmethod
     def create_button(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
@@ -115,12 +132,19 @@ QAbstractButton:checked {
 color: %s; 
 background-color: %s;
 }
+
+QAbstractButton:disabled {
+color: %s;
+background-color: %s;
+}
 """ % (ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Color),
                    ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background),
                    ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Selected),
                    ColorOptionEnumImpl.get_config(d, e, ColorAttribute.SelectedBackground),
                    ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Hovered),
-                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.HoveredBackground))
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.HoveredBackground),
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Disabled),
+                   ColorOptionEnumImpl.get_config(d, e, ColorAttribute.DisabledBackground))
 
     @staticmethod
     def create_combobox(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
@@ -137,7 +161,15 @@ QComboBox QAbstractItemView {{
 color: {0}; 
 background-color: {1};
 }}
-""".format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Color), ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background))
+
+QComboBox:disabled {{
+color: {2};
+background-color: {3};
+}}
+""".format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Color),
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background),
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Disabled),
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.DisabledBackground))
 
     @staticmethod
     def create_textbox(d: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]) -> str:
@@ -149,10 +181,17 @@ border: 2px solid {};
 background-color: {};
 selection-background-color: {};
 }}
+
+QLineEdit:disabled {{
+color: {};
+background-color: {};
+}}
 """.format(ColorOptionEnumImpl.get_config(d, e, ColorAttribute.TextColor),
            ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Border),
            ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Background),
-           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.SelectedBackground))
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.SelectedBackground),
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.Disabled),
+           ColorOptionEnumImpl.get_config(d, e, ColorAttribute.DisabledBackground))
 
 
 class ColorAttribute(Enum):
@@ -167,6 +206,9 @@ class ColorAttribute(Enum):
     Border = (8, lambda: QCoreApplication.translate("ColorAttribute", "Border Color", None))
     Frame = (9, lambda: QCoreApplication.translate("ColorAttribute", "Frame Color", None))
     TextColor = (10, lambda: QCoreApplication.translate("ColorAttribute", "Text Color", None))
+    Disabled = (11, lambda: QCoreApplication.translate("ColorAttribute", "Disabled Color", None))
+    DisabledBackground = (12, lambda: QCoreApplication.translate("ColorAttribute", "Disabled Background Color", None))
+    DisabledTextColor = (13, lambda: QCoreApplication.translate("ColorAttribute", "Disabled Text Color", None))
 
 class ColorOption:
     attribute: ColorAttribute
@@ -177,12 +219,47 @@ class ColorOption:
         self.color = color
 
 class ColorOptionEnum(Enum):
-    MainWindow = (0, lambda: QCoreApplication.translate("ColorOptionEnum", "Main Window", None), [ColorOption(ColorAttribute.Background, QColor(32, 35, 38)), ColorOption(ColorAttribute.AlternateBackground, QColor(41, 44, 48)), ColorOption(ColorAttribute.Frame, QColor(239, 240, 241)), ColorOption(ColorAttribute.TextColor, QColorConstants.White)], ColorOptionEnumImpl.create_main_window)
-    Splitter = (1, lambda: QCoreApplication.translate("ColorOptionEnum", "Splitter", None), [ColorOption(ColorAttribute.Color, QColor(8, 56, 56))], ColorOptionEnumImpl.create_splitter)
-    MenuItem = (2, lambda: QCoreApplication.translate("ColorOptionEnum", "Menu Item", None), [ColorOption(ColorAttribute.SelectedBackground, QColor(136, 136, 136)), ColorOption(ColorAttribute.HoveredBackground, QColor(168, 168, 168)), ColorOption(ColorAttribute.TextColor, QColorConstants.White)], ColorOptionEnumImpl.create_menu_item)
-    Button = (3, lambda: QCoreApplication.translate("ColorOptionEnum", "Button", None), [ColorOption(ColorAttribute.Color, QColor(239, 240, 241)), ColorOption(ColorAttribute.Background, QColor(45, 48, 51)), ColorOption(ColorAttribute.Selected, QColor(239, 240, 241)), ColorOption(ColorAttribute.SelectedBackground, QColor(67, 72, 76)), ColorOption(ColorAttribute.Hovered, QColor(239, 240, 241)), ColorOption(ColorAttribute.HoveredBackground, QColor(67, 72, 76))], ColorOptionEnumImpl.create_button)
-    ComboBox = (4, lambda: QCoreApplication.translate("ColorOptionEnum", "Combo Box", None), [ColorOption(ColorAttribute.Color, QColor(239, 240, 241)), ColorOption(ColorAttribute.Background, QColor(45, 48, 51))], ColorOptionEnumImpl.create_combobox)
-    TextBox = (5, lambda: QCoreApplication.translate("ColorOptionEnum", "Text Box", None), [ColorOption(ColorAttribute.Border, QColor(45, 45, 45)), ColorOption(ColorAttribute.TextColor, QColorConstants.White), ColorOption(ColorAttribute.SelectedBackground, QColor(169, 169, 169)), ColorOption(ColorAttribute.Background, QColor(45, 45, 45))], ColorOptionEnumImpl.create_textbox)
+    MainWindow = (0, lambda: QCoreApplication.translate("ColorOptionEnum", "Main Window", None),
+                  [ColorOption(ColorAttribute.Background, QColor(32, 35, 38)),
+                   ColorOption(ColorAttribute.AlternateBackground, QColor(41, 44, 48)),
+                   ColorOption(ColorAttribute.Frame, QColor(239, 240, 241)),
+                   ColorOption(ColorAttribute.TextColor, QColorConstants.White),
+                   ColorOption(ColorAttribute.DisabledTextColor, QColor(128, 128, 128))],
+                  ColorOptionEnumImpl.create_main_window)
+    Splitter = (1, lambda: QCoreApplication.translate("ColorOptionEnum", "Splitter", None),
+                [ColorOption(ColorAttribute.Color, QColor(8, 56, 56))],
+                ColorOptionEnumImpl.create_splitter)
+    MenuItem = (2, lambda: QCoreApplication.translate("ColorOptionEnum", "Menu Item", None),
+                [ColorOption(ColorAttribute.SelectedBackground, QColor(136, 136, 136)),
+                 ColorOption(ColorAttribute.HoveredBackground, QColor(168, 168, 168)),
+                 ColorOption(ColorAttribute.TextColor, QColorConstants.White),
+                 ColorOption(ColorAttribute.Disabled, QColor(128, 128, 128)),
+                 ColorOption(ColorAttribute.DisabledBackground, QColor(29, 34, 38))],
+                ColorOptionEnumImpl.create_menu_item)
+    Button = (3, lambda: QCoreApplication.translate("ColorOptionEnum", "Button", None),
+              [ColorOption(ColorAttribute.Color, QColor(239, 240, 241)),
+               ColorOption(ColorAttribute.Background, QColor(45, 48, 51)),
+               ColorOption(ColorAttribute.Selected, QColor(239, 240, 241)),
+               ColorOption(ColorAttribute.SelectedBackground, QColor(67, 72, 76)),
+               ColorOption(ColorAttribute.Hovered, QColor(239, 240, 241)),
+               ColorOption(ColorAttribute.HoveredBackground, QColor(67, 72, 76)),
+               ColorOption(ColorAttribute.Disabled, QColor(128, 128, 128)),
+               ColorOption(ColorAttribute.DisabledBackground, QColor(45, 48, 51))],
+              ColorOptionEnumImpl.create_button)
+    ComboBox = (4, lambda: QCoreApplication.translate("ColorOptionEnum", "Combo Box", None),
+                [ColorOption(ColorAttribute.Color, QColor(239, 240, 241)),
+                 ColorOption(ColorAttribute.Background, QColor(45, 48, 51)),
+                 ColorOption(ColorAttribute.Disabled, QColor(128, 128, 128)),
+                 ColorOption(ColorAttribute.DisabledBackground, QColor(45, 48, 51))],
+                ColorOptionEnumImpl.create_combobox)
+    TextBox = (5, lambda: QCoreApplication.translate("ColorOptionEnum", "Text Box", None),
+               [ColorOption(ColorAttribute.Border, QColor(45, 45, 45)),
+                ColorOption(ColorAttribute.TextColor, QColorConstants.White),
+                ColorOption(ColorAttribute.SelectedBackground, QColor(169, 169, 169)),
+                ColorOption(ColorAttribute.Background, QColor(45, 45, 45)),
+                ColorOption(ColorAttribute.Disabled, QColor(128, 128, 128)),
+                ColorOption(ColorAttribute.DisabledBackground, QColor(45, 45, 45))],
+               ColorOptionEnumImpl.create_textbox)
 
 class ColorOptions:
     config: dict[ColorOptionEnum, dict[ColorAttribute, QColor]]

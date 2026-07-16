@@ -643,8 +643,6 @@ class MainWindow(QMainWindow):
         self.ui.actionChange_Input_Mapping.triggered.connect(self.__open_input_map_config_dialog)
         self.ui.kamikaze_latitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
         self.ui.kamikaze_longitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
-        self.ui.kamikaze_latitude.setText("39.90445947062722")
-        self.ui.kamikaze_longitude.setText("41.236949005794656")
 
     def setup_colors(self):
         self.setStyleSheet(ColorSelectorInterface.create_stylesheet(self.color_options))
@@ -1324,6 +1322,7 @@ class MainWindow(QMainWindow):
     def on_kamikaze_end(self, qr_text: str) -> None:
         kamikaze_end = self.next_telemetry.gps_saati
         send_kamikaze(self.server_connection.get_address(), self.kamikaze_start, kamikaze_end, qr_text)
+        qInfo("Kamikaze information sent with start: %s, end: %s, text: %s" % (self.kamikaze_start, kamikaze_end, qr_text))
 
     def __get_kamikaze_coords(self):
         if self.server_connection.ip is None:
@@ -1463,7 +1462,7 @@ class MainWindow(QMainWindow):
             self.uav_connection.ip = self.uav_connection_dialog.ui.ip_address.text()
 
         if self.connection_wait_wrapper is not None:
-            qDebug("Tried to press connect when trying to connect")
+            qWarning("Tried to press connect when trying to connect, ignoring")
             return
         self.uav_connection.connection_type = self.uav_connection_dialog.connection_type
         self.connection_wait_wrapper = ConnectionWaitWrapper(self, self.uav_connection)
@@ -1519,6 +1518,7 @@ class MainWindow(QMainWindow):
                                                             e.value[3],
                                                             0, 0, 0, 0, 0)
         self._enable_fence()
+        self._update_time_with_mavlink()
         self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
         self.__set_param(b'LIM_ROLL_CD', 4500.0)
 
@@ -1538,6 +1538,11 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
         self.enableFeaturesAfterUAVConnected()
+
+    def _update_time_with_mavlink(self):
+        time_ns = QDateTime.currentDateTime().currentMSecsSinceEpoch() * 1000000
+        time_ns += 1234 # Copied from mavproxy
+        self.mavlink_connection.mav.timesync_send(0, time_ns)
 
     def _apply_watch_update(self, row: int, value: str):
         self.ui.watch_list.setItem(row, 3, QTableWidgetItem(value))
@@ -1600,6 +1605,7 @@ class MainWindow(QMainWindow):
             self.next_telemetry.takim_numarasi = self.server_connection.team_no
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Server Connected :)", None))
             self.ui.server_connection_warning.hide()
+            qInfo("Connected to server with ip: %s, username: %s" % (self.server_connection.get_address(), self.server_connection.username))
         except Exception as e:
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Can't Connect To Server :(", None))
             qWarning("Can not connect to server: %s" % e)
@@ -1624,8 +1630,8 @@ class MainWindow(QMainWindow):
         global SERVER_IS_UNREACHABLE_COUNTER
         if SERVER_IS_UNREACHABLE_COUNTER > 100:
             SERVER_IS_UNREACHABLE_COUNTER = 0
-            self._server_disconnect()
             qWarning("Server connection is not possible for 100 time, disconnecting")
+            self._server_disconnect()
             return
         self.last_server_telemetry_response = send_telemetry(self.server_connection.get_address(), self.next_telemetry)
         self.ui.map_view.update_plane_data(self.next_telemetry.takim_numarasi, self.last_server_telemetry_response)
@@ -1633,6 +1639,7 @@ class MainWindow(QMainWindow):
     def _server_disconnect(self):
         self.server_connection.telemetry_timer.stop()
         self.server_connection.ip = None
+        qInfo("Disconnected from server")
 
     @staticmethod
     def is_ip_address_valid(ip_address: str, must_have_port: bool) -> bool:
