@@ -31,11 +31,11 @@ from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 from src.AddADSInterface import AddADSInterface
 from src.CameraServerConnectionInterface import CameraServerConnectionInterface
 from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions
-from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData
+from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData, CRUISE_THR_MAX
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
-    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze
+    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze, SERVER_IS_UNREACHABLE_COUNTER
 from src.ServerConnectionInterface import ServerConnectionInterface
 from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
@@ -131,14 +131,9 @@ class TrackableDataUpdate:
                     mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
                 if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set and not mainwindow.ui.map_view.reposition_timer.isActive():
                     mainwindow.ui.map_view.target_coord.remove_position()
-                    if mainwindow.mavlink_connection is not None:
-                        mainwindow.mavlink_connection.mav.param_set_send(
-                            mainwindow.mavlink_connection.target_system,
-                            mainwindow.mavlink_connection.target_component,
-                            b'THR_MAX',
-                            100.0,
-                            9
-                        )
+                    if mainwindow.mavlink_connection is not None and mainwindow.kamikaze_state == KamikazeState.IDLE:
+                        mainwindow.ui.map_view.mouse_input_handler._set_thr_max(CRUISE_THR_MAX)
+                        mainwindow.ui.map_view.mouse_input_handler._set_roll_limit(55.0)
             else:
                 qWarning("Don't know how to handle this custom mode data")
         else:
@@ -357,6 +352,7 @@ class MavlinkWorker(QObject):
     running: bool
     update_watch_list = Signal(int, str)
     create_warning = Signal(str)
+    connection_lost = Signal(str)
     fence_mission_count: int
     waypoint_mission_count: int
     mission_fence_item_received = Signal(int, float, float, int, float, int)
@@ -387,7 +383,18 @@ class MavlinkWorker(QObject):
 
     def run(self):
         while self.running:
-            packet: MAVLink_message = self.mavlink_connection.recv_match(blocking=True, timeout=1.0)
+            try:
+                packet: MAVLink_message = self.mavlink_connection.recv_match(blocking=True, timeout=1.0)
+            except OSError as e:
+                # Serial port died (USB glitch, EMI, unplug); the handle is
+                # invalid from here on, so stop reading and tell the GUI.
+                if self.running:
+                    qWarning("MAVLink connection I/O error: %s" % e)
+                    self.connection_lost.emit(str(e))
+                break
+            except Exception as e:
+                qWarning("Error while reading MAVLink packet: %s" % e)
+                continue
             if not self.running:
                 break
             if packet is None:
@@ -537,8 +544,6 @@ class NoAccentStyle(QProxyStyle):
         super().drawPrimitive(element, option, painter, widget)
 
 
-SERVER_IS_UNREACHABLE_COUNTER = 0
-
 class MainWindow(QMainWindow):
     ui: Ui_MainWindow
     uav_connection: UavConnection = UavConnection()
@@ -615,6 +620,7 @@ class MainWindow(QMainWindow):
         self.ui.fly_mode_combobox.activated.connect(self._change_index)
         self.ui.get_kamikaze_coords_from_server.clicked.connect(self.__get_kamikaze_coords)
         self.ui.start_kamikaze.clicked.connect(self.__start_kamikaze)
+        self.ui.force_end_task.clicked.connect(self.__force_end_task)
         self.ui.set_fence.clicked.connect(self.__set_fence_clicked)
         self.server_connection.telemetry_timer = QTimer()
         self.server_connection.telemetry_timer.setInterval(500)
@@ -1200,19 +1206,28 @@ class MainWindow(QMainWindow):
         if self.kamikaze_original_alt <= 0:
             qWarning("No Valid UAV Info Found, Cancelling Kamikaze")
             return
+        if not self.ui.arm_mode.currentIndex() == 1:
+            self._create_warning("UAV is not armed, refusing to start kamikaze")
+            return
+        if self.kamikaze_original_alt < 80.0:
+            self._create_warning("Altitude %.1fm is below the 80m kamikaze minimum, refusing to start" % self.kamikaze_original_alt)
+            return
 
         self.kamikaze_start = self.next_telemetry.gps_saati
         self.kamikaze_previous_mode = self.ui.fly_mode_combobox.currentIndex()
         self.kamikaze_state = KamikazeState.APPROACHING
         self.kamikaze_timer.start()
 
-        # Dive pitch limit -45deg and turn/roll limit 60deg. Set both the old
+        # Dive pitch limit -45deg and turn/roll limit 55deg. Set both the old
         # (centidegree: LIM_*) and new (degree: *_DEG) ArduPlane parameter names so
         # this works regardless of firmware version (4.1+ renamed these params).
+        # THR_MAX must be 100 here: FBWA clamps even RC-override throttle to it,
+        # and a still-active reposition may have left it at 60.
+        self.__set_param(b'THR_MAX', 100.0)
         self.__set_param(b'PTCH_LIM_MIN_DEG', -45.0)
         self.__set_param(b'LIM_PITCH_MIN', -4500.0)
-        self.__set_param(b'ROLL_LIMIT_DEG', 60.0)
-        self.__set_param(b'LIM_ROLL_CD', 6000.0)
+        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
+        self.__set_param(b'LIM_ROLL_CD', 5500.0)
         self.mavlink_connection.set_mode_apm(5)
         qDebug("Kamikaze Started")
 
@@ -1235,20 +1250,27 @@ class MainWindow(QMainWindow):
             pitch_offset: int = int(alt_error * 5)
             pitch_ch: int = 1500 + max(-200, min(200, pitch_offset))
             self.__send_rc_override(roll_ch, pitch_ch, 1550)
-            if distance <= 140.0:
+            if distance <= 105.0:
                 qDebug(f"Remaining Distance is {distance:.1f}m, entering dive state")
                 self.mavlink_connection.set_mode_apm(5)
                 self.kamikaze_state = KamikazeState.DIVING
 
         elif self.kamikaze_state == KamikazeState.DIVING:
-            self.__send_rc_override(1500, 1000, 1150)
-            if current_alt <= 60.0:
+            self.__send_rc_override(1500, 1000, 1000)
+            if current_alt <= 70.0:
                 qDebug("Achieved target altitude, entering recovering state")
                 self.mavlink_connection.set_mode_apm(5)
                 self.kamikaze_state = KamikazeState.RECOVERING
 
         elif self.kamikaze_state == KamikazeState.RECOVERING:
-            self.__send_rc_override(1500, 1900, 1950)
+            # Pitch is stored wrapped to [0, 360) by to_degree; unwrap so a
+            # nose-down attitude compares as negative. Hold throttle at idle
+            # until the nose passes the horizon, then apply climb power.
+            pitch: float = self.next_telemetry.iha_yonelme
+            if pitch > 180.0:
+                pitch = pitch - 360.0
+            throttle_ch: int = 1950 if pitch > 0.0 else 1000
+            self.__send_rc_override(1500, 1900, throttle_ch)
             if current_alt >= 100.0:
                 qDebug("Recovering complete, returning to last mode")
                 self.kamikaze_state = KamikazeState.RESUMING
@@ -1310,24 +1332,50 @@ class MainWindow(QMainWindow):
             )
             self.__set_param(b'PTCH_LIM_MIN_DEG', -25.0)
             self.__set_param(b'LIM_PITCH_MIN', -2500.0)
-            self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
-            self.__set_param(b'LIM_ROLL_CD', 4500.0)
-        if self.kamikaze_previous_mode is not None and self.mavlink_connection is not None:
-            prev_mode = self.kamikaze_previous_mode
-            self.mavlink_connection.set_mode_apm(prev_mode)
+            self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
+            self.__set_param(b'LIM_ROLL_CD', 5500.0)
+            # Kamikaze start raised THR_MAX to 100 for the recovery burst;
+            # bring the cruise ceiling back once the run is over.
+            self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
+        if self.kamikaze_previous_mode is not None and self.kamikaze_previous_mode >= 0 and self.mavlink_connection is not None:
+            self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
         if self.server_connection.ip is not None:
             self.on_kamikaze_end("")
         qDebug("Kamikaze Completed")
 
     def on_kamikaze_end(self, qr_text: str) -> None:
         kamikaze_end = self.next_telemetry.gps_saati
-        send_kamikaze(self.server_connection.get_address(), self.kamikaze_start, kamikaze_end, qr_text)
-        qInfo("Kamikaze information sent with start: %s, end: %s, text: %s" % (self.kamikaze_start, kamikaze_end, qr_text))
+        try:
+            send_kamikaze(self.server_connection.get_address(), self.kamikaze_start, kamikaze_end, qr_text)
+            qInfo("Kamikaze information sent with start: %s, end: %s, text: %s" % (self.kamikaze_start, kamikaze_end, qr_text))
+        except Exception as e:
+            self._create_warning("Could not send kamikaze info to server: %s" % e)
+
+    def __force_end_task(self):
+        if self.mavlink_connection is None:
+            return
+        qInfo("Force End Task requested by user")
+        if self.ui.map_view.target_coord.is_set:
+            self.ui.map_view.target_coord.remove_position()
+        self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
+        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
+        self.__set_param(b'LIM_ROLL_CD', 5500.0)
+        if self.kamikaze_state != KamikazeState.IDLE:
+            self.kamikaze_previous_mode = 10  # resume the AUTO mission route
+            self.__finish_kamikaze()
+        else:
+            self.mavlink_connection.set_mode_apm(10)
+            self.next_telemetry.iha_otonom = 1
+        self._create_warning("Task force-ended, returning to AUTO mission")
 
     def __get_kamikaze_coords(self):
         if self.server_connection.ip is None:
             return
-        qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.get_address())
+        try:
+            qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.get_address())
+        except Exception as e:
+            self._create_warning("Could not get kamikaze coords from server: %s" % e)
+            return
         self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
         self.ui.kamikaze_latitude.setText(str(qr_coords.qrEnlem))
 
@@ -1519,8 +1567,12 @@ class MainWindow(QMainWindow):
                                                             0, 0, 0, 0, 0)
         self._enable_fence()
         self._update_time_with_mavlink()
-        self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
-        self.__set_param(b'LIM_ROLL_CD', 4500.0)
+        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
+        self.__set_param(b'LIM_ROLL_CD', 5500.0)
+        # Full power only while the NAV_TAKEOFF item is active; TECS is capped
+        # at CRUISE_THR_MAX for the rest of the flight.
+        self.__set_param(b'TKOFF_THR_MAX', 100.0)
+        self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)
@@ -1529,6 +1581,7 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.running = True
         self.mavlink_worker.update_watch_list.connect(self._apply_watch_update)
         self.mavlink_worker.create_warning.connect(self._create_warning)
+        self.mavlink_worker.connection_lost.connect(self.__on_connection_lost)
         self.mavlink_worker.mission_fence_item_received.connect(self.mission_fence_item_received)
         self.mavlink_worker.mission_fence_item_int_received.connect(self.mission_fence_item_int_received)
         self.mavlink_worker.mission_waypoint_item_received.connect(self.mission_waypoint_item_received)
@@ -1566,13 +1619,25 @@ class MainWindow(QMainWindow):
             self.plane_on_map_update_timer.stop()
 
 
+    def __on_connection_lost(self, reason: str):
+        self._create_warning("UAV connection lost: %s" % reason)
+        if self.kamikaze_state != KamikazeState.IDLE:
+            self.kamikaze_timer.stop()
+            self.kamikaze_state = KamikazeState.IDLE
+        self._uav_disconnect()
+
     def _uav_disconnect(self):
         if self.mavlink_connection is None:
             return
         self.mavlink_worker.running = False
         self.mavlink_thread.quit()
         self.mavlink_thread.wait()
-        self.mavlink_connection.close()
+        try:
+            self.mavlink_connection.close()
+        except Exception as e:
+            qWarning("Error while closing MAVLink connection: %s" % e)
+        self.mavlink_connection = None
+        self.ui.map_view.mavlink_connection = None
         self.uav_connection.reset_connection_properties()
         self.disableFeaturesAfterUAVDisconnected()
         self.next_telemetry = TelemetryData()

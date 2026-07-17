@@ -200,19 +200,29 @@ class MouseInputHandler(QObject):
                 # qDebug("Can not match with any input key currently: %s" % e)
                 pass
 
-    def _set_thr_max(self, value: float):
+    def _set_param(self, name: bytes, value: float):
         self.parent.mavlink_connection.mav.param_set_send(
             self.parent.mavlink_connection.target_system,
             self.parent.mavlink_connection.target_component,
-            b'THR_MAX',
+            name,
             value,
             9
         )
 
+    def _set_thr_max(self, value: float):
+        self._set_param(b'THR_MAX', value)
+
+    def _set_roll_limit(self, degrees: float):
+        # Set both the new (degree) and old (centidegree) ArduPlane parameter
+        # names so this works regardless of firmware version.
+        self._set_param(b'ROLL_LIMIT_DEG', degrees)
+        self._set_param(b'LIM_ROLL_CD', degrees * 100.0)
+
     def remove_reposition(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
         if not self.parent.target_coord.is_set or self.parent.mavlink_connection is None:
             return
-        self._set_thr_max(100.0)
+        self._set_thr_max(CRUISE_THR_MAX)
+        self._set_roll_limit(55.0)
         self.parent.mavlink_connection.set_mode_apm(PLANE_MODE_AUTO)
         self.parent.target_coord.remove_position()
 
@@ -248,7 +258,8 @@ class MouseInputHandler(QObject):
             self.parent.reposition_yaw = float(self.ard_dialog.ui.yaw.text())
 
     def ard_ok(self):
-        self._set_thr_max(80.0)
+        self._set_thr_max(60.0)
+        self._set_roll_limit(55.0)
         self.parent.target_coord.set_position(QGeoCoordinate(float(self.ard_dialog.ui.latitude.text()), float(self.ard_dialog.ui.longitude.text())))
         speed: float = self.return_non_null(self.ard_dialog.ui.speed.text(), self.parent.reposition_speed)
         yaw: float = self.return_non_null(self.ard_dialog.ui.yaw.text(), self.parent.reposition_yaw)
@@ -336,7 +347,8 @@ class MouseInputHandler(QObject):
         if not coordinate.isValid():
             qWarning("Invalid input, repositioning needs a coordinate")
             return
-        self._set_thr_max(80.0)
+        self._set_thr_max(60.0)
+        self._set_roll_limit(55.0)
         self.parent.target_coord.set_position(coordinate)
         self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                             self.parent.mavlink_connection.target_component,
@@ -389,6 +401,11 @@ class MouseInputHandler(QObject):
         self.parent.coord_data_model.layoutChanged.emit()
 
 ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
+
+# Throttle ceiling (%) outside takeoff and kamikaze. The airframe has ~1.7
+# thrust-to-weight, so full power is only needed during the takeoff climb;
+# TKOFF_THR_MAX stays at 100 and covers that phase on its own.
+CRUISE_THR_MAX: float = 70.0
 
 class GeofenceData(QObject):
     gc1_v: QGeoCoordinate = ZERO_GEO_COORDS
