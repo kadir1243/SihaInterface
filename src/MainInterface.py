@@ -1,3 +1,4 @@
+import copy
 import math
 import os
 import re
@@ -7,8 +8,8 @@ from functools import partial
 os.environ['MAVLINK20'] = '1'
 
 from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, QLocale, \
-    QTranslator, QCoreApplication, QRegularExpression
-from PySide6.QtGui import QAction, QRegularExpressionValidator
+    QTranslator, QCoreApplication
+from PySide6.QtGui import QAction, QDoubleValidator, Qt
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
 from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication, QMessageBox, QStyle, QProxyStyle
@@ -53,95 +54,102 @@ class KamikazeState(Enum):
     RECOVERING = 3
     RESUMING = 4
 
+class MavlinkWorkerSignals(QObject):
+    set_fly_mode = Signal(int)
+    set_arm_mode = Signal(int)
+    should_reposition_removed = Signal()
+    change_autopilot = Signal(int)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+
 class TrackableDataUpdate:
     @staticmethod
-    def update_ground_speed(mainwindow:MainWindow, packet: MAVLink_vfr_hud_message) -> str:
-        mainwindow.next_telemetry.iha_hiz = packet.groundspeed
+    def update_ground_speed(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_vfr_hud_message) -> str:
+        telemetry.iha_hiz = packet.groundspeed
         return str(packet.groundspeed)
     @staticmethod
-    def update_air_speed(mainwindow:MainWindow, packet: MAVLink_vfr_hud_message) -> str:
+    def update_air_speed(packet: MAVLink_vfr_hud_message) -> str:
         return str(packet.airspeed)
     @staticmethod
-    def update_velocity(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
+    def update_velocity(packet: MAVLink_gps_raw_int_message) -> str:
         return str(packet.vel)
     @staticmethod
-    def update_relative_altitude(mainwindow:MainWindow, packet: MAVLink_global_position_int_message) -> str:
-        mainwindow.next_telemetry.iha_irtifa = packet.relative_alt / 1000
+    def update_relative_altitude(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_global_position_int_message) -> str:
+        telemetry.iha_irtifa = packet.relative_alt / 1000
         return str(packet.relative_alt / 1000)
     @staticmethod
-    def update_altitude(mainwindow:MainWindow, packet: MAVLink_global_position_int_message) -> str:
+    def update_altitude(packet: MAVLink_global_position_int_message) -> str:
         return str(packet.alt / 1000)
     @staticmethod
-    def update_longitude(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
-        mainwindow.next_telemetry.iha_boylam = packet.lon / 1e7
+    def update_longitude(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_gps_raw_int_message) -> str:
+        telemetry.iha_boylam = packet.lon / 1e7
         return str(packet.lon / 1e7)
     @staticmethod
-    def update_latitude(mainwindow:MainWindow, packet: MAVLink_gps_raw_int_message) -> str:
-        mainwindow.next_telemetry.iha_enlem = packet.lat / 1e7
+    def update_latitude(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_gps_raw_int_message) -> str:
+        telemetry.iha_enlem = packet.lat / 1e7
         return str(packet.lat / 1e7)
     @staticmethod
-    def update_yaw(mainwindow:MainWindow, packet: MAVLink_attitude_message) -> str:
+    def update_yaw(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
         yaw = to_degree(packet.yaw)
-        mainwindow.next_telemetry.iha_yatis = (yaw - 180) / 4
+        telemetry.iha_yatis = (yaw - 180) / 4
         return str(yaw)
     @staticmethod
-    def update_pitch(mainwindow:MainWindow, packet: MAVLink_attitude_message) -> str:
+    def update_pitch(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
         pitch = to_degree(packet.pitch)
-        mainwindow.next_telemetry.iha_yonelme = pitch
+        telemetry.iha_yonelme = pitch
         return str(pitch)
     @staticmethod
-    def update_roll(mainwindow:MainWindow, packet: MAVLink_attitude_message) -> str:
+    def update_roll(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
         roll = to_degree(packet.roll)
-        mainwindow.next_telemetry.iha_dikilme = (roll - 180) / 4
+        telemetry.iha_dikilme = (roll - 180) / 4
         return str(roll)
     @staticmethod
-    def update_gps_time(mainwindow:MainWindow, packet: MAVLink_system_time_message) -> str:
+    def update_gps_time(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_system_time_message) -> str:
         datetime = QDateTime.fromMSecsSinceEpoch(int(packet.time_unix_usec / 1000))
-        mainwindow.next_telemetry.gps_saati = GpsSaati(datetime.time())
+        telemetry.gps_saati = GpsSaati(datetime.time())
         return datetime.toString()
     @staticmethod
-    def update_battery_percentage(mainwindow:MainWindow, packet: MAVLink_battery_status_message) -> str:
-        mainwindow.next_telemetry.iha_batarya = packet.battery_remaining
+    def update_battery_percentage(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_battery_status_message) -> str:
+        telemetry.iha_batarya = packet.battery_remaining
         return str(packet.battery_remaining) + "%"
     @staticmethod
-    def update_arm_status(mainwindow:MainWindow, packet: MAVLink_heartbeat_message):
+    def update_arm_status(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_heartbeat_message) -> str:
         arm: int = 1 if (packet.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0 else 0
-        if mainwindow.ui.arm_mode.currentIndex() != arm:
-            mainwindow.ui.arm_mode.setCurrentIndex(arm)
-        if mainwindow.current_pilot != packet.autopilot:
-            mainwindow.change_autopilot(packet.autopilot)
-        mainwindow.next_telemetry.iha_otonom = 1 if (packet.base_mode & MAV_MODE_FLAG_AUTO_ENABLED) != 0 else 0
+        worker_signals.set_arm_mode.emit(arm)
+        return str(arm != 0)
 
-        if mainwindow.current_pilot == MAV_AUTOPILOT_PX4:
+    @staticmethod
+    def update_fly_mode(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_heartbeat_message) -> str:
+        telemetry.iha_otonom = 1 if (packet.base_mode & MAV_MODE_FLAG_AUTO_ENABLED) != 0 else 0
+        worker_signals.change_autopilot.emit(packet.autopilot)
+        if packet.autopilot == MAV_AUTOPILOT_PX4:
             sub_mod = packet.custom_mode >> 24
             base_mod = (packet.custom_mode >> 16) - (sub_mod << 8)
-            px4mode = main_and_sub_mode_to_px4_uav_mode[base_mod]
+            px4mode = main_and_sub_mode_to_px4_uav_mode.get(base_mod)
             if px4mode:
                 sub = px4mode.get(sub_mod)
                 if sub:
-                    mainwindow.ui.fly_mode_combobox.setCurrentIndex(sub.value[0])
+                    index: int = sub.value[0]
+                    worker_signals.set_fly_mode.emit(index)
                 else:
                     qWarning("Can not handle px4 sub mode %s %s %s" % (packet.custom_mode, base_mod, sub_mod))
             else:
                 qWarning("Can not handle px4 mode %s %s" % (packet.custom_mode, base_mod))
-        elif mainwindow.current_pilot == MAV_AUTOPILOT_ARDUPILOTMEGA:
+        elif packet.autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA:
             index: int = packet.custom_mode
             if 27 > index >= 0:
-                if mainwindow.ui.fly_mode_combobox.currentIndex() != index:
-                    mainwindow.ui.fly_mode_combobox.setCurrentIndex(index)
-                if packet.custom_mode != 15 and mainwindow.ui.map_view.target_coord.is_set and not mainwindow.ui.map_view.reposition_timer.isActive():
-                    mainwindow.ui.map_view.target_coord.remove_position()
-                    if mainwindow.mavlink_connection is not None and mainwindow.kamikaze_state == KamikazeState.IDLE:
-                        mainwindow.ui.map_view.mouse_input_handler._set_thr_max(CRUISE_THR_MAX)
-                        mainwindow.ui.map_view.mouse_input_handler._set_roll_limit(55.0)
+                worker_signals.set_fly_mode.emit(index)
+                if packet.custom_mode != 15:
+                    worker_signals.should_reposition_removed.emit()
             else:
                 qWarning("Don't know how to handle this custom mode data")
         else:
             qWarning("Unknown pilot type, fly mode unsupported")
-        return str(arm != 0)
+        return ""
 
     @staticmethod
-    def update_breach_status(mainwindow:MainWindow, packet: MAVLink_fence_status_message) -> str:
+    def update_breach_status(packet: MAVLink_fence_status_message) -> str:
         text = "Breached"
         if packet.breach_status == 0:
             text = "Not " + text
@@ -149,39 +157,39 @@ class TrackableDataUpdate:
 
 TRACKABLE_DATA_ENUM_ACTIONS: dict[int, QAction] = {}
 
-MSG_ID_2_TRACKABLE_DATA_TYPE: dict[int, TrackableDataPacketTimer] = {}
-KAMIKAZE_REGEX: QRegularExpression = QRegularExpression("[\\d. -]+")
-
 class TrackableDataPacketTimer(Enum):
     # (msg id, msg name, type, update interval (microsecond), watch value ids that uses this packet)
     BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 1000000, [10])
     ATTITUDE = (30, "ATTITUDE", MAVLink_attitude_message, 100000, [3, 4, 5])
     GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 100000, [1, 8, 9])
     VFR_HUD = (74, "VFR_HUD", MAVLink_vfr_hud_message, 100000, [0, 6])
-    HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 100000, [11])
+    HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 100000, [11, 14])
     GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 100000, [2, 12])
     SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 1000000, [7])
     FENCE_STATUS = (162, "FENCE_STATUS", MAVLink_fence_status_message, 1000000, [13])
+
+MSG_ID_2_TRACKABLE_DATA_TYPE: dict[int, TrackableDataPacketTimer] = {}
 
 for ____trackable_data_packet_timer in TrackableDataPacketTimer:
     MSG_ID_2_TRACKABLE_DATA_TYPE[____trackable_data_packet_timer.value[0]] = ____trackable_data_packet_timer
 
 class TrackableDataEnum(Enum):
-    # (id, name, update function, updater packet, should be updated on background (telemetry etc), is it in watch_list widget)
-    GROUND_SPEED = (0, lambda: QCoreApplication.translate("TrackableDataEnum", "Ground Speed", None), TrackableDataUpdate.update_ground_speed, TrackableDataPacketTimer.VFR_HUD, False, True)
+    # (id, name, update function, updater packet, should be updated on background (telemetry etc.), is it in watch_list widget)
+    GROUND_SPEED = (0, lambda: QCoreApplication.translate("TrackableDataEnum", "Ground Speed", None), TrackableDataUpdate.update_ground_speed, TrackableDataPacketTimer.VFR_HUD, True, True)
     VELOCITY = (1, lambda: QCoreApplication.translate("TrackableDataEnum", "Velocity", None), TrackableDataUpdate.update_velocity, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
     ALTITUDE = (2, lambda: QCoreApplication.translate("TrackableDataEnum", "Altitude", None), TrackableDataUpdate.update_altitude, TrackableDataPacketTimer.GLOBAL_POSITION_INT, False, False)
     YAW = (3, lambda: QCoreApplication.translate("TrackableDataEnum", "Yaw", None), TrackableDataUpdate.update_yaw, TrackableDataPacketTimer.ATTITUDE, True, True)
     PITCH = (4, lambda: QCoreApplication.translate("TrackableDataEnum", "Pitch", None), TrackableDataUpdate.update_pitch, TrackableDataPacketTimer.ATTITUDE, True, True)
     ROLL = (5, lambda: QCoreApplication.translate("TrackableDataEnum", "Roll", None), TrackableDataUpdate.update_roll, TrackableDataPacketTimer.ATTITUDE, True, True)
-    AIR_SPEED = (6, lambda: QCoreApplication.translate("TrackableDataEnum", "Air Speed", None), TrackableDataUpdate.update_air_speed, TrackableDataPacketTimer.VFR_HUD, True, True)
+    AIR_SPEED = (6, lambda: QCoreApplication.translate("TrackableDataEnum", "Air Speed", None), TrackableDataUpdate.update_air_speed, TrackableDataPacketTimer.VFR_HUD, False, True)
     GPS_TIME = (7, lambda: QCoreApplication.translate("TrackableDataEnum", "GPS Time", None), TrackableDataUpdate.update_gps_time, TrackableDataPacketTimer.SYSTEM_TIME, True, True)
-    LONGITUDE = (8, lambda: QCoreApplication.translate("TrackableDataEnum", "Longitude", None), TrackableDataUpdate.update_longitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
-    LATITUDE = (9, lambda: QCoreApplication.translate("TrackableDataEnum", "Latitude", None), TrackableDataUpdate.update_latitude, TrackableDataPacketTimer.GPS_RAW_INT, False, True)
+    LONGITUDE = (8, lambda: QCoreApplication.translate("TrackableDataEnum", "Longitude", None), TrackableDataUpdate.update_longitude, TrackableDataPacketTimer.GPS_RAW_INT, True, True)
+    LATITUDE = (9, lambda: QCoreApplication.translate("TrackableDataEnum", "Latitude", None), TrackableDataUpdate.update_latitude, TrackableDataPacketTimer.GPS_RAW_INT, True, True)
     BATTERY_PERCENTAGE = (10, lambda: QCoreApplication.translate("TrackableDataEnum", "Battery Percentage", None), TrackableDataUpdate.update_battery_percentage, TrackableDataPacketTimer.BATTERY_STATUS, True, True)
     ARM_STATUS = (11, lambda: QCoreApplication.translate("TrackableDataEnum", "Arm Status", None), TrackableDataUpdate.update_arm_status, TrackableDataPacketTimer.HEARTBEAT, True, False)
-    RELATIVE_ALTITUDE = (12, lambda: QCoreApplication.translate("TrackableDataEnum", "Relative Altitude", None), TrackableDataUpdate.update_relative_altitude, TrackableDataPacketTimer.GLOBAL_POSITION_INT, False, True)
+    RELATIVE_ALTITUDE = (12, lambda: QCoreApplication.translate("TrackableDataEnum", "Relative Altitude", None), TrackableDataUpdate.update_relative_altitude, TrackableDataPacketTimer.GLOBAL_POSITION_INT, True, True)
     BREACH_STATUS = (13, lambda: QCoreApplication.translate("TrackableDataEnum", "Fence Breach Status", None), TrackableDataUpdate.update_breach_status, TrackableDataPacketTimer.FENCE_STATUS, False, False)
+    FLY_MODE = (14, lambda: QCoreApplication.translate("TrackableDataEnum", "Fly Mode", None), TrackableDataUpdate.update_fly_mode, TrackableDataPacketTimer.HEARTBEAT, True, False)
 
     @staticmethod
     def from_id(i: int) -> TrackableDataEnum:
@@ -343,6 +351,7 @@ class ServerConnection:
     password: str
     team_no: int
     telemetry_timer: QTimer
+    telemetry_thread: QThread = None
 
     def get_address(self) -> str:
         return f"{self.ip}:{self.port}"
@@ -360,6 +369,8 @@ class MavlinkWorker(QObject):
     mission_waypoint_item_received = Signal(int, float, float, int, int)
     mission_waypoint_item_int_received = Signal(int, float, float, int, int)
     send_fence_mission_data = Signal(int, bool)
+    remove_reposition_location = Signal()
+    worker_signals: MavlinkWorkerSignals
     def __init__(self, mavlink_connection: mavfile, parent: MainWindow):
         super().__init__()
         self.mavlink_connection = mavlink_connection
@@ -368,16 +379,21 @@ class MavlinkWorker(QObject):
         self.running = False
         self.fence_mission_count = 0
         self.waypoint_mission_count = 0
+        self.worker_signals = MavlinkWorkerSignals(self)
 
     def trigger_update_value(self, e: TrackableDataEnum, packet: MAVLink_message):
         length: int = self.watch_list.rowCount()
         new_val: str | None = None
         if e.value[4]:
-            new_val = e.value[2](self.parent, packet)  # Update if it is telemetry without caring it is in watch list or not
+            self.parent.next_telemetry.lock.lockForWrite()
+            try:
+                new_val = e.value[2](self.worker_signals, self.parent.next_telemetry, packet)  # Update if it is telemetry without caring it is in watch list or not
+            finally:
+                self.parent.next_telemetry.lock.unlock()
         for i in range(length):
             if self.watch_list.item(i, 0).text() == str(e.value[0]):
                 if new_val is None:
-                    new_val = e.value[2](self.parent, packet)
+                    new_val = e.value[2](packet)
                 self.update_watch_list.emit(i, new_val)
                 break
 
@@ -450,7 +466,7 @@ class MavlinkWorker(QObject):
                         qDebug("Reposition command successfully executed")
                     elif result == MAV_RESULT_DENIED:
                         self.create_warning.emit("Reposition command denied by vehicle")
-                        self.parent.ui.map_view.target_coord.remove_position()
+                        self.remove_reposition_location.emit()
                     else:
                         qDebug("Reposition result: %s" % result)
                 elif command == MAV_CMD_DO_SET_MODE:
@@ -469,9 +485,14 @@ class MavlinkWorker(QObject):
                         qDebug("Set message interval result: %s" % result)
                 elif command == MAV_CMD_REQUEST_MESSAGE:
                     if result == MAV_RESULT_ACCEPTED:
-                        qDebug("Message request successful")
+                        qDebug("Message request accepted")
                     else:
                         qDebug("Message request result: %s" % result)
+                elif command == MAV_CMD_DO_FENCE_ENABLE:
+                    if result == MAV_RESULT_ACCEPTED:
+                        qDebug("Fence enable command accepted")
+                    else:
+                        qDebug("Fence enable command result: %s" % result)
                 else:
                     qDebug("CommandACK received for command %s and result %s" % (command, result))
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
@@ -597,7 +618,8 @@ class MainWindow(QMainWindow):
             action.setObjectName(str(e.value[0]))
             action.triggered.connect(partial(self.add_to_watch_list, e))
             TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]] = action
-            add_to_watch_menu.addAction(action)
+            if e.value[5]:
+                add_to_watch_menu.addAction(action)
 
         self.ui.add_to_watch.setMenu(add_to_watch_menu)
 
@@ -622,9 +644,6 @@ class MainWindow(QMainWindow):
         self.ui.start_kamikaze.clicked.connect(self.__start_kamikaze)
         self.ui.force_end_task.clicked.connect(self.__force_end_task)
         self.ui.set_fence.clicked.connect(self.__set_fence_clicked)
-        self.server_connection.telemetry_timer = QTimer()
-        self.server_connection.telemetry_timer.setInterval(500)
-        self.server_connection.telemetry_timer.timeout.connect(self.__send_telemetry)
         self.ui.arm_mode.activated.connect(self.__setArmStatus)
         self.ui.refresh_ads.clicked.connect(self.__refresh_ads)
         self.ui.add_ads.clicked.connect(self.__add_ads_button_clicked)
@@ -647,13 +666,17 @@ class MainWindow(QMainWindow):
         self.input_config = KeybindingConfigInterface.initialize_mappings()
         self.ui.map_view.set_input_config_reference(lambda: self.input_config)
         self.ui.actionChange_Input_Mapping.triggered.connect(self.__open_input_map_config_dialog)
-        self.ui.kamikaze_latitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
-        self.ui.kamikaze_longitude.setValidator(QRegularExpressionValidator(KAMIKAZE_REGEX))
+        floatValidator: QDoubleValidator = QDoubleValidator(parent=self)
+        floatValidator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        self.ui.kamikaze_latitude.setValidator(floatValidator)
+        self.ui.kamikaze_longitude.setValidator(floatValidator)
 
     def setup_colors(self):
         self.setStyleSheet(ColorSelectorInterface.create_stylesheet(self.color_options))
 
     def change_autopilot(self, new_autopilot: int):
+        if self.current_pilot == new_autopilot:
+            return
         self.current_pilot = new_autopilot
         if new_autopilot == MAV_AUTOPILOT_PX4:
             self.ui.fly_mode_combobox.clear()
@@ -1137,6 +1160,9 @@ class MainWindow(QMainWindow):
     ads_list_cache: list[AdsData] = []
 
     def update_geofence_data(self, ads_list: list[AdsData]):
+        if self.mavlink_connection is None:
+            qWarning("Tried to sent geofence data when there is no mavlink connection")
+            return
         has_a_fence = self.ui.map_view.coords_for_geofence.is_set
         self.mavlink_connection.mav.mission_clear_all_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_FENCE)
         fence_count: int = len(ads_list)
@@ -1202,7 +1228,10 @@ class MainWindow(QMainWindow):
         self.kamikaze_target_lat = latitude
         self.kamikaze_target_lon = longitude
 
+        self.next_telemetry.lock.lockForRead()
+        self.kamikaze_start = self.next_telemetry.gps_saati
         self.kamikaze_original_alt = self.next_telemetry.iha_irtifa
+        self.next_telemetry.lock.unlock()
         if self.kamikaze_original_alt <= 0:
             qWarning("No Valid UAV Info Found, Cancelling Kamikaze")
             return
@@ -1213,7 +1242,6 @@ class MainWindow(QMainWindow):
             self._create_warning("Altitude %.1fm is below the 80m kamikaze minimum, refusing to start" % self.kamikaze_original_alt)
             return
 
-        self.kamikaze_start = self.next_telemetry.gps_saati
         self.kamikaze_previous_mode = self.ui.fly_mode_combobox.currentIndex()
         self.kamikaze_state = KamikazeState.APPROACHING
         self.kamikaze_timer.start()
@@ -1235,9 +1263,12 @@ class MainWindow(QMainWindow):
         if self.kamikaze_state == KamikazeState.IDLE:
             return
 
+        self.next_telemetry.lock.lockForRead()
         current_lat: float = self.next_telemetry.iha_enlem
         current_lon: float = self.next_telemetry.iha_boylam
         current_alt: float = self.next_telemetry.iha_irtifa
+        current_pitch: float = self.next_telemetry.iha_yonelme
+        self.next_telemetry.lock.unlock()
 
         if current_lat == 0 and current_lon == 0:
             return
@@ -1266,10 +1297,9 @@ class MainWindow(QMainWindow):
             # Pitch is stored wrapped to [0, 360) by to_degree; unwrap so a
             # nose-down attitude compares as negative. Hold throttle at idle
             # until the nose passes the horizon, then apply climb power.
-            pitch: float = self.next_telemetry.iha_yonelme
-            if pitch > 180.0:
-                pitch = pitch - 360.0
-            throttle_ch: int = 1950 if pitch > 0.0 else 1000
+            if current_pitch > 180.0:
+                current_pitch = current_pitch - 360.0
+            throttle_ch: int = 1950 if current_pitch > 0.0 else 1000
             self.__send_rc_override(1500, 1900, throttle_ch)
             if current_alt >= 100.0:
                 qDebug("Recovering complete, returning to last mode")
@@ -1297,11 +1327,16 @@ class MainWindow(QMainWindow):
         return math.atan2(x, y)
 
     def __heading_error_to_roll_channel(self) -> int:
+        self.next_telemetry.lock.lockForRead()
+        enlem: float = self.next_telemetry.iha_enlem
+        boylam: float = self.next_telemetry.iha_boylam
+        yatis: float = self.next_telemetry.iha_yatis
+        self.next_telemetry.lock.unlock()
         bearing: float = MainWindow.__bearing_to(
-            self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam,
+            enlem, boylam,
             self.kamikaze_target_lat, self.kamikaze_target_lon
         )
-        current_heading: float = math.radians(self.next_telemetry.iha_yatis * 4 + 180)
+        current_heading: float = math.radians(yatis * 4 + 180)
         heading_error: float = math.atan2(math.sin(bearing - current_heading), math.cos(bearing - current_heading))
         steer: float = max(-1.0, min(1.0, heading_error * 0.8))
         roll_ch: int = 1500 + int(steer * 500)
@@ -1323,7 +1358,6 @@ class MainWindow(QMainWindow):
     def __finish_kamikaze(self):
         self.kamikaze_timer.stop()
         self.kamikaze_state = KamikazeState.IDLE
-        self.next_telemetry.iha_otonom = 1
         if self.mavlink_connection is not None:
             self.mavlink_connection.mav.rc_channels_override_send(
                 self.mavlink_connection.target_system,
@@ -1344,7 +1378,9 @@ class MainWindow(QMainWindow):
         qDebug("Kamikaze Completed")
 
     def on_kamikaze_end(self, qr_text: str) -> None:
+        self.next_telemetry.lock.lockForRead()
         kamikaze_end = self.next_telemetry.gps_saati
+        self.next_telemetry.lock.unlock()
         try:
             send_kamikaze(self.server_connection.get_address(), self.kamikaze_start, kamikaze_end, qr_text)
             qInfo("Kamikaze information sent with start: %s, end: %s, text: %s" % (self.kamikaze_start, kamikaze_end, qr_text))
@@ -1365,7 +1401,6 @@ class MainWindow(QMainWindow):
             self.__finish_kamikaze()
         else:
             self.mavlink_connection.set_mode_apm(10)
-            self.next_telemetry.iha_otonom = 1
         self._create_warning("Task force-ended, returning to AUTO mission")
 
     def __get_kamikaze_coords(self):
@@ -1587,10 +1622,34 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.mission_waypoint_item_received.connect(self.mission_waypoint_item_received)
         self.mavlink_worker.mission_waypoint_item_int_received.connect(self.mission_waypoint_item_int_received)
         self.mavlink_worker.send_fence_mission_data.connect(self.send_fence_mission_data)
-        self.mavlink_thread.started.connect(self.mavlink_worker.run)
+        self.mavlink_worker.remove_reposition_location.connect(self.remove_reposition_location)
+        self.mavlink_worker.worker_signals.set_arm_mode.connect(self.set_arm_mode)
+        self.mavlink_worker.worker_signals.set_fly_mode.connect(self.set_fly_mode)
+        self.mavlink_worker.worker_signals.change_autopilot.connect(self.change_autopilot)
+        self.mavlink_worker.worker_signals.should_reposition_removed.connect(self.should_reposition_removed)
+        self.mavlink_thread.started.connect(self.mavlink_worker.run, Qt.ConnectionType.DirectConnection)
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
         self.enableFeaturesAfterUAVConnected()
+
+    def remove_reposition_location(self):
+        if self.ui.map_view.target_coord.is_set:
+            self.ui.map_view.target_coord.remove_position()
+
+    def should_reposition_removed(self):
+        if self.ui.map_view.target_coord.is_set and not self.ui.map_view.reposition_timer.isActive():
+            self.ui.map_view.target_coord.remove_position()
+            if self.mavlink_connection is not None and self.kamikaze_state == KamikazeState.IDLE:
+                self.ui.map_view.mouse_input_handler._set_thr_max(CRUISE_THR_MAX)
+                self.ui.map_view.mouse_input_handler._set_roll_limit(55.0)
+
+    def set_arm_mode(self, index: int):
+        if self.ui.arm_mode.currentIndex() != index:
+            self.ui.arm_mode.setCurrentIndex(index)
+
+    def set_fly_mode(self, index: int):
+        if self.ui.fly_mode_combobox.currentIndex() != index:
+            self.ui.fly_mode_combobox.setCurrentIndex(index)
 
     def _update_time_with_mavlink(self):
         time_ns = QDateTime.currentDateTime().currentMSecsSinceEpoch() * 1000000
@@ -1667,7 +1726,9 @@ class MainWindow(QMainWindow):
         try:
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Trying to connect to server :O", None))
             self.server_connection.team_no = login_to_server(self.server_connection.get_address(), self.server_connection.username, self.server_connection.password)
+            self.next_telemetry.lock.lockForWrite()
             self.next_telemetry.takim_numarasi = self.server_connection.team_no
+            self.next_telemetry.lock.unlock()
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Server Connected :)", None))
             self.ui.server_connection_warning.hide()
             qInfo("Connected to server with ip: %s, username: %s" % (self.server_connection.get_address(), self.server_connection.username))
@@ -1680,13 +1741,25 @@ class MainWindow(QMainWindow):
             return
         if self.plane_on_map_update_timer.isActive():
             self.plane_on_map_update_timer.stop()
-        self.server_connection.telemetry_timer.start()
+        self.server_connection.telemetry_timer = QTimer()
+        self.server_connection.telemetry_timer.setInterval(500)
+        self.server_connection.telemetry_timer.timeout.connect(self.__send_telemetry)
+        self.server_connection.telemetry_thread = QThread(self)
+        self.server_connection.telemetry_thread.setObjectName("Telemetry Thread")
+        self.server_connection.telemetry_timer.moveToThread(self.server_connection.telemetry_thread)
+        self.server_connection.telemetry_thread.started.connect(self.server_connection.telemetry_timer.start, type=Qt.ConnectionType.DirectConnection)
+        self.server_connection.telemetry_thread.start()
 
     def __update_plane_on_map_without_server(self):
         if self.mavlink_connection is None or self.server_connection.ip is not None:
             self.plane_on_map_update_timer.stop()
             return
-        self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(self.next_telemetry.iha_enlem, self.next_telemetry.iha_boylam), (self.next_telemetry.iha_yatis * 4) + 180)
+        self.next_telemetry.lock.lockForRead()
+        enlem: float = self.next_telemetry.iha_enlem
+        boylam: float = self.next_telemetry.iha_boylam
+        yatis: float = self.next_telemetry.iha_yatis
+        self.next_telemetry.lock.unlock()
+        self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(enlem, boylam), (yatis * 4) + 180)
 
     def __send_telemetry(self):
         if self.mavlink_connection is None:
@@ -1698,11 +1771,20 @@ class MainWindow(QMainWindow):
             qWarning("Server connection is not possible for 100 time, disconnecting")
             self._server_disconnect()
             return
-        self.last_server_telemetry_response = send_telemetry(self.server_connection.get_address(), self.next_telemetry)
-        self.ui.map_view.update_plane_data(self.next_telemetry.takim_numarasi, self.last_server_telemetry_response)
+        self.next_telemetry.lock.lockForRead()
+        try:
+            telemetry_snapshot = copy.copy(self.next_telemetry)
+        finally:
+            self.next_telemetry.lock.unlock()
+        self.last_server_telemetry_response = send_telemetry(self.server_connection.get_address(), telemetry_snapshot)
+        self.ui.map_view.update_plane_data(telemetry_snapshot.takim_numarasi, self.last_server_telemetry_response)
 
     def _server_disconnect(self):
-        self.server_connection.telemetry_timer.stop()
+        if self.server_connection.telemetry_thread:
+            self.server_connection.telemetry_thread.quit()
+            self.server_connection.telemetry_thread.wait(5)
+            self.server_connection.telemetry_thread.deleteLater()
+            self.server_connection.telemetry_thread = None
         self.server_connection.ip = None
         qInfo("Disconnected from server")
 

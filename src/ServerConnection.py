@@ -1,5 +1,5 @@
 import requests
-from PySide6.QtCore import qDebug, QTime
+from PySide6.QtCore import qDebug, QTime, QReadWriteLock
 from requests import Response
 
 # FIXME: This should be set to false
@@ -49,6 +49,7 @@ class TelemetryData:
     hedef_genislik: int
     hedef_yukseklik: int
     gps_saati: GpsSaati
+    lock: QReadWriteLock
 
     def __init__(self):
         self.takim_numarasi = -1
@@ -66,7 +67,8 @@ class TelemetryData:
         self.hedef_merkez_Y = 0
         self.hedef_genislik = 0
         self.hedef_yukseklik = 0
-        self.gps_saati = GpsSaati(QTime())
+        self.gps_saati = GpsSaati(QTime.currentTime())
+        self.lock = QReadWriteLock()
 
 class TelemetryResponseUavData:
     takim_numarasi: int
@@ -134,6 +136,7 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
     except ConnectionError as e:
         global SERVER_IS_UNREACHABLE_COUNTER
         SERVER_IS_UNREACHABLE_COUNTER += 1
+        qDebug("Can not connect to server, unreachable counter: %s" % SERVER_IS_UNREACHABLE_COUNTER)
 
         return None
 

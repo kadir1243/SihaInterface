@@ -1,6 +1,6 @@
 import sys
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, qSetMessagePattern
 from PySide6.QtQml import QQmlDebuggingEnabler
 from PySide6.QtWidgets import QApplication
 
@@ -13,6 +13,7 @@ def start_ui():
     QCoreApplication.setOrganizationName("ARES")
     app = QApplication(sys.argv)
     QQmlDebuggingEnabler.enableDebugging(True)
+    qSetMessagePattern("[%{time yyyy/MM/dd h:mm:ss}] [%{type}] %{if-category}[%{category}] %{endif}%{message}")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
