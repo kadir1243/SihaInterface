@@ -537,7 +537,7 @@ class MapWidget(QQuickWidget):
                 plane_type = 2
             else:
                 plane_type = 1
-            self.plane_data_model.m_datas.append(PlaneData(uav.takim_numarasi, QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, (uav.iha_yatis * 4) + 180))
+            self.plane_data_model.m_datas.append(PlaneData(uav.takim_numarasi, QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, uav.iha_yonelme))
         self.plane_data_model.layoutChanged.emit()
 
     def update_plane_data_without_server(self, pos: QGeoCoordinate, rotation: float):

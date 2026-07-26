@@ -91,18 +91,18 @@ class TrackableDataUpdate:
         return str(packet.lat / 1e7)
     @staticmethod
     def update_yaw(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
-        yaw = to_degree(packet.yaw)
-        telemetry.iha_yatis = (yaw - 180) / 4
+        yaw: float = to_degree(packet.yaw)
+        telemetry.iha_yonelme = yaw
         return str(yaw)
     @staticmethod
     def update_pitch(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
-        pitch = to_degree(packet.pitch)
-        telemetry.iha_yonelme = pitch
+        pitch: float = math.degrees(packet.pitch)
+        telemetry.iha_dikilme = pitch
         return str(pitch)
     @staticmethod
     def update_roll(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
-        roll = to_degree(packet.roll)
-        telemetry.iha_dikilme = (roll - 180) / 4
+        roll: float = math.degrees(packet.roll)
+        telemetry.iha_yatis = roll
         return str(roll)
     @staticmethod
     def update_gps_time(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_system_time_message) -> str:
@@ -1271,7 +1271,7 @@ class MainWindow(QMainWindow):
         current_lat: float = self.next_telemetry.iha_enlem
         current_lon: float = self.next_telemetry.iha_boylam
         current_alt: float = self.next_telemetry.iha_irtifa
-        current_pitch: float = self.next_telemetry.iha_yonelme
+        current_pitch: float = self.next_telemetry.iha_dikilme
         self.next_telemetry.lock.unlock()
 
         if current_lat == 0 and current_lon == 0:
@@ -1298,11 +1298,6 @@ class MainWindow(QMainWindow):
                 self.kamikaze_state = KamikazeState.RECOVERING
 
         elif self.kamikaze_state == KamikazeState.RECOVERING:
-            # Pitch is stored wrapped to [0, 360) by to_degree; unwrap so a
-            # nose-down attitude compares as negative. Hold throttle at idle
-            # until the nose passes the horizon, then apply climb power.
-            if current_pitch > 180.0:
-                current_pitch = current_pitch - 360.0
             throttle_ch: int = 1950 if current_pitch > 0.0 else 1000
             self.__send_rc_override(1500, 1900, throttle_ch)
             if current_alt >= 100.0:
@@ -1334,13 +1329,13 @@ class MainWindow(QMainWindow):
         self.next_telemetry.lock.lockForRead()
         enlem: float = self.next_telemetry.iha_enlem
         boylam: float = self.next_telemetry.iha_boylam
-        yatis: float = self.next_telemetry.iha_yatis
+        yaw: float = self.next_telemetry.iha_yonelme
         self.next_telemetry.lock.unlock()
         bearing: float = MainWindow.__bearing_to(
             enlem, boylam,
             self.kamikaze_target_lat, self.kamikaze_target_lon
         )
-        current_heading: float = math.radians(yatis * 4 + 180)
+        current_heading: float = math.radians(yaw)
         heading_error: float = math.atan2(math.sin(bearing - current_heading), math.cos(bearing - current_heading))
         steer: float = max(-1.0, min(1.0, heading_error * 0.8))
         roll_ch: int = 1500 + int(steer * 500)
@@ -1764,9 +1759,9 @@ class MainWindow(QMainWindow):
         self.next_telemetry.lock.lockForRead()
         enlem: float = self.next_telemetry.iha_enlem
         boylam: float = self.next_telemetry.iha_boylam
-        yatis: float = self.next_telemetry.iha_yatis
+        yaw: float = self.next_telemetry.iha_yonelme
         self.next_telemetry.lock.unlock()
-        self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(enlem, boylam), (yatis * 4) + 180)
+        self.ui.map_view.update_plane_data_without_server(QGeoCoordinate(enlem, boylam), yaw)
 
     def __send_telemetry(self):
         if self.mavlink_connection is None:
@@ -1783,8 +1778,12 @@ class MainWindow(QMainWindow):
             telemetry_snapshot = copy.copy(self.next_telemetry)
         finally:
             self.next_telemetry.lock.unlock()
-        self.last_server_telemetry_response = send_telemetry(self.server_connection.get_address(), telemetry_snapshot)
-        self.ui.map_view.update_plane_data(telemetry_snapshot.takim_numarasi, self.last_server_telemetry_response)
+        response = send_telemetry(self.server_connection.get_address(), telemetry_snapshot)
+        if response:
+            self.last_server_telemetry_response = response
+            self.ui.map_view.update_plane_data(telemetry_snapshot.takim_numarasi, response)
+        else:
+            qWarning("Could not process telemetry response info")
 
     def _server_disconnect(self):
         if self.server_connection.telemetry_thread:

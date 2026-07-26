@@ -1,5 +1,5 @@
 import requests
-from PySide6.QtCore import qDebug, QTime, QReadWriteLock
+from PySide6.QtCore import qDebug, QTime, QReadWriteLock, qWarning
 from requests import Response
 
 # FIXME: This should be set to false
@@ -11,7 +11,7 @@ def login_to_server(target_address: str, username: str, password: str) -> int:
         requests.post(target_address + "/internal/add_new_user", json={"username": username, "password": password}, headers={"Content-Type": "application/json"})
     login = requests.post(target_address + "/api/giris", data=f'{{\"kadi\": \"{username}\",\"sifre\":\"{password}\"}}', headers={'Content-Type': 'application/json'})
     login.raise_for_status()
-    if login.headers["uuid-token"]:
+    if "uuid-token" in login.headers.keys():
         global AUTH_UUID_TOKEN
         AUTH_UUID_TOKEN = login.headers["uuid-token"]
     else:
@@ -30,7 +30,7 @@ class GpsSaati:
         self.dakika = time.minute()
         self.saat = time.hour()
     def __str__(self) -> str:
-        return "%s:%s:%s.%s" % (self.saat, self.dakika, self.dakika, self.milisaniye)
+        return "%s:%s:%s.%s" % (self.saat, self.dakika, self.saniye, self.milisaniye)
 
 class TelemetryData:
     takim_numarasi: int
@@ -119,6 +119,9 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
             }
         }, headers=headers, timeout=100)
         r.raise_for_status()
+        if r.status_code == 204:
+            qWarning("Wtf")
+            return None
         data = r.json()
         d: TelemetryResponseData = TelemetryResponseData()
         d.sunucusaati = data.get("sunucusaati")
@@ -129,6 +132,9 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
             data.iha_enlem = s["iha_enlem"]
             data.iha_boylam = s["iha_boylam"]
             data.iha_yatis = s["iha_yatis"]
+            data.iha_yonelme = s["iha_yonelme"]
+            data.iha_dikilme = s["iha_dikilme"]
+            data.iha_irtifa = s["iha_irtifa"]
             uav_s.append(data)
         d.konumBilgileri = uav_s
         # FIXME: I don't need any other data for now, i will add it when i needed
