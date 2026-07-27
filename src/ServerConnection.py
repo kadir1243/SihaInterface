@@ -1,21 +1,22 @@
 import requests
 from PySide6.QtCore import qDebug, QTime, QReadWriteLock, qWarning
-from requests import Response
+from requests import Response, Session
 
 # FIXME: This should be set to false
-INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST = True
-AUTH_UUID_TOKEN: str | None = None
+INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST = False
+SESSION: Session = None
+
+def get_session() -> Session:
+    global SESSION
+    if not SESSION:
+        SESSION = Session()
+    return SESSION
 
 def login_to_server(target_address: str, username: str, password: str) -> int:
     if INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST:
         requests.post(target_address + "/internal/add_new_user", json={"username": username, "password": password}, headers={"Content-Type": "application/json"})
-    login = requests.post(target_address + "/api/giris", data=f'{{\"kadi\": \"{username}\",\"sifre\":\"{password}\"}}', headers={'Content-Type': 'application/json'})
+    login = get_session().post(target_address + "/api/giris", data=f'{{\"kadi\": \"{username}\",\"sifre\":\"{password}\"}}', headers={'Content-Type': 'application/json'})
     login.raise_for_status()
-    if "uuid-token" in login.headers.keys():
-        global AUTH_UUID_TOKEN
-        AUTH_UUID_TOKEN = login.headers["uuid-token"]
-    else:
-        AUTH_UUID_TOKEN = None
     return int(login.text)
 
 class GpsSaati:
@@ -93,9 +94,7 @@ SERVER_IS_UNREACHABLE_COUNTER: int = 0 # When this hits 100, disconnect from ser
 def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> TelemetryResponseData:
     try:
         headers = {"Content-Type": "application/json"}
-        if AUTH_UUID_TOKEN:
-            headers["uuid-token"] = AUTH_UUID_TOKEN
-        r: Response = requests.post(target_address + "/api/telemetri_gonder", json={
+        json = {
             "takim_numarasi": telemetry_data.takim_numarasi,
             "iha_enlem": telemetry_data.iha_enlem,
             "iha_boylam": telemetry_data.iha_boylam,
@@ -117,7 +116,12 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
                 "saniye": telemetry_data.gps_saati.saniye,
                 "milisaniye": telemetry_data.gps_saati.milisaniye
             }
-        }, headers=headers, timeout=100)
+        }
+        r: Response = get_session().post(target_address + "/api/telemetri_gonder", json=json, headers=headers, timeout=100)
+        if r.status_code == 400:
+            qWarning("Can not send telemetry %s" % json)
+            qWarning(r.text)
+            return None
         r.raise_for_status()
         if r.status_code == 204:
             qWarning("Wtf")
@@ -137,6 +141,7 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
             data.iha_irtifa = s["iha_irtifa"]
             uav_s.append(data)
         d.konumBilgileri = uav_s
+        qDebug("Processed telemetry response %s" % r.json())
         # FIXME: I don't need any other data for now, i will add it when i needed
         return d
     except ConnectionError as e:
@@ -152,8 +157,6 @@ class QrCoords:
 
 def get_kamikaze_coords(target_address: str) -> QrCoords:
     headers = {"Content-Type": "application/json"}
-    if AUTH_UUID_TOKEN:
-        headers["uuid-token"] = AUTH_UUID_TOKEN
     r: Response = requests.get(target_address + "/api/qr_koordinati", headers=headers)
     r.raise_for_status()
     data = r.json()
@@ -170,27 +173,24 @@ class ServerAdsData:
 
 def get_ads(target_address: str) -> list[ServerAdsData]:
     headers = {"Content-Type": "application/json"}
-    if AUTH_UUID_TOKEN:
-        headers["uuid-token"] = AUTH_UUID_TOKEN
     r: Response = requests.get(target_address + "/api/hss_koordinatlari", headers=headers)
     r.raise_for_status()
     data = r.json()
+    qDebug("Received ads list: %s" % data)
 
     ads_list: list[ServerAdsData] = list()
     for d in data["hss_koordinat_bilgileri"]:
         data: ServerAdsData = ServerAdsData()
-        data.id = d["id"]
-        data.hssEnlem = d["hssEnlem"]
-        data.hssBoylam = d["hssBoylam"]
-        data.hssYariCap = d["hssYaricap"]
+        data.id = int(d["id"])
+        data.hssEnlem = float(d["hssEnlem"])
+        data.hssBoylam = float(d["hssBoylam"])
+        data.hssYariCap = float(d["hssYaricap"])
         ads_list.append(data)
     return ads_list
 
 def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: str) -> None:
     headers = {"Content-Type": "application/json"}
-    if AUTH_UUID_TOKEN:
-        headers["uuid-token"] = AUTH_UUID_TOKEN
-    r: Response = requests.post(target_address + "/api/kamikaze_bilgisi", json={
+    r: Response = get_session().post(target_address + "/api/kamikaze_bilgisi", json={
         "kamikazeBaslangicZamani": {
                 "saat": start.saat,
                 "dakika": start.dakika,
@@ -209,9 +209,7 @@ def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: 
 
 def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None:
     headers = {"Content-Type": "application/json"}
-    if AUTH_UUID_TOKEN:
-        headers["uuid-token"] = AUTH_UUID_TOKEN
-    r: Response = requests.post(target_address + "/api/kilitlenme_bilgisi", json={
+    r: Response = get_session().post(target_address + "/api/kilitlenme_bilgisi", json={
         "kilitlenmeBitisZamani": {
                 "saat": end.saat,
                 "dakika": end.dakika,

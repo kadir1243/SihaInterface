@@ -354,6 +354,8 @@ class ServerConnection:
     telemetry_thread: QThread = None
 
     def get_address(self) -> str:
+        if not MainWindow.is_ip_address_valid(self.ip, False):
+            return self.ip
         return f"{self.ip}:{self.port}"
 
 class MavlinkWorker(QObject):
@@ -1804,8 +1806,11 @@ class MainWindow(QMainWindow):
             split: list[str] = ip_with_port.split(':')
             ip: str = split[0]
             if len(split) > 1:
-                port: int = int(split[1])
-                if port < 0 or port > 65535:
+                try:
+                    port: int = int(split[1])
+                    if port < 0 or port > 65535:
+                        return False
+                except:
                     return False
             elif must_have_port:
                 return False # Must have port, yes that's the comment :3
@@ -1813,8 +1818,11 @@ class MainWindow(QMainWindow):
             if len(ip_array) != 4:
                 return False
             for e in ip_array:
-                e: int = int(e)
-                if e < 0 or e > 255:
+                try:
+                    e: int = int(e)
+                    if e < 0 or e > 255:
+                        return False
+                except:
                     return False
             return True
         return False
