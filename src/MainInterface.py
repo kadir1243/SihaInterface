@@ -672,6 +672,7 @@ class MainWindow(QMainWindow):
         floatValidator.setNotation(QDoubleValidator.Notation.StandardNotation)
         self.ui.kamikaze_latitude.setValidator(floatValidator)
         self.ui.kamikaze_longitude.setValidator(floatValidator)
+        self.update_plane_data_signal.connect(self.__update_plane_data)
 
     def setup_colors(self):
         self.setStyleSheet(ColorSelectorInterface.create_stylesheet(self.color_options))
@@ -1653,7 +1654,7 @@ class MainWindow(QMainWindow):
             self.ui.fly_mode_combobox.setCurrentIndex(index)
 
     def _update_time_with_mavlink(self):
-        time_ns = QDateTime.currentDateTime().currentMSecsSinceEpoch() * 1000000
+        time_ns = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() * 1000000
         time_ns += 1234 # Copied from mavproxy
         self.mavlink_connection.mav.timesync_send(0, time_ns)
 
@@ -1746,8 +1747,8 @@ class MainWindow(QMainWindow):
         if self.plane_on_map_update_timer.isActive():
             self.plane_on_map_update_timer.stop()
         self.server_connection.telemetry_timer = QTimer()
-        self.server_connection.telemetry_timer.setInterval(500)
-        self.server_connection.telemetry_timer.timeout.connect(self.__send_telemetry)
+        self.server_connection.telemetry_timer.setInterval(700)
+        self.server_connection.telemetry_timer.timeout.connect(self.__send_telemetry, type=Qt.ConnectionType.DirectConnection)
         self.server_connection.telemetry_thread = QThread(self)
         self.server_connection.telemetry_thread.setObjectName("Telemetry Thread")
         self.server_connection.telemetry_timer.moveToThread(self.server_connection.telemetry_thread)
@@ -1780,12 +1781,23 @@ class MainWindow(QMainWindow):
             telemetry_snapshot = copy.copy(self.next_telemetry)
         finally:
             self.next_telemetry.lock.unlock()
+        qDebug("Sending telemetry at %s" % QDateTime.currentDateTime().toString())
         response = send_telemetry(self.server_connection.get_address(), telemetry_snapshot)
         if response:
             self.last_server_telemetry_response = response
-            self.ui.map_view.update_plane_data(telemetry_snapshot.takim_numarasi, response)
+            self.update_plane_data_signal.emit(telemetry_snapshot.takim_numarasi, response)
         else:
             qWarning("Could not process telemetry response info")
+    update_plane_data_signal = Signal(int, TelemetryResponseData)
+    is_processing_plane_data = False
+    def __update_plane_data(self, team_no: int, telemetry_response: TelemetryResponseData):
+        if self.is_processing_plane_data:
+            return
+        self.is_processing_plane_data = True
+        try:
+            self.ui.map_view.update_plane_data(team_no, telemetry_response)
+        finally:
+            self.is_processing_plane_data = False
 
     def _server_disconnect(self):
         if self.server_connection.telemetry_thread:

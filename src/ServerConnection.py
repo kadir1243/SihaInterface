@@ -15,7 +15,7 @@ def get_session() -> Session:
 def login_to_server(target_address: str, username: str, password: str) -> int:
     if INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST:
         requests.post(target_address + "/internal/add_new_user", json={"username": username, "password": password}, headers={"Content-Type": "application/json"})
-    login = get_session().post(target_address + "/api/giris", data=f'{{\"kadi\": \"{username}\",\"sifre\":\"{password}\"}}', headers={'Content-Type': 'application/json'})
+    login = get_session().post(target_address + "/api/giris", json={"kadi": username, "sifre": password}, headers={'Content-Type': 'application/json'})
     login.raise_for_status()
     return int(login.text)
 
@@ -83,10 +83,8 @@ class TelemetryResponseUavData:
     zaman_farki: int
 
 class TelemetryResponseData:
-    sunucusaati: GpsSaati # I don't really care 'gun' field in response
     konumBilgileri: list[TelemetryResponseUavData]
     def __init__(self):
-        self.sunucusaati = GpsSaati(QTime())
         self.konumBilgileri = []
 
 SERVER_IS_UNREACHABLE_COUNTER: int = 0 # When this hits 100, disconnect from server
@@ -126,11 +124,10 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
         if r.status_code == 204:
             qWarning("Wtf")
             return None
-        data = r.json()
+        jdata = r.json()
         d: TelemetryResponseData = TelemetryResponseData()
-        d.sunucusaati = data.get("sunucusaati")
         uav_s = list()
-        for s in data["konumBilgileri"]:
+        for s in jdata["konumBilgileri"]:
             data: TelemetryResponseUavData = TelemetryResponseUavData()
             data.takim_numarasi = s["takim_numarasi"]
             data.iha_enlem = s["iha_enlem"]
@@ -175,11 +172,11 @@ def get_ads(target_address: str) -> list[ServerAdsData]:
     headers = {"Content-Type": "application/json"}
     r: Response = requests.get(target_address + "/api/hss_koordinatlari", headers=headers)
     r.raise_for_status()
-    data = r.json()
-    qDebug("Received ads list: %s" % data)
+    jdata = r.json()
+    qDebug("Received ads list: %s" % jdata)
 
     ads_list: list[ServerAdsData] = list()
-    for d in data["hss_koordinat_bilgileri"]:
+    for d in jdata["hss_koordinat_bilgileri"]:
         data: ServerAdsData = ServerAdsData()
         data.id = int(d["id"])
         data.hssEnlem = float(d["hssEnlem"])
