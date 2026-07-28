@@ -13,7 +13,7 @@ from pymavlink.mavutil import mavfile
 
 from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
     DEFAULT_SPEED, DEFAULT_YAW
-from src.ServerConnection import TelemetryResponseData, ServerAdsData
+from src.ServerConnection import TelemetryResponseData, ServerAdsData, TelemetryData
 from src.input_types import InputMapping, KeybindingsEnum
 
 class PlaneData:
@@ -21,11 +21,13 @@ class PlaneData:
     plane_type: int # 0 for green, 1 for red, 2 for blue, 3 for yellow
     rotation: float
     team_no: int
-    def __init__(self, team_no: int, position: QGeoCoordinate, plane_type: int, rotation: float):
+    is_stale: bool
+    def __init__(self, team_no: int, position: QGeoCoordinate, plane_type: int, rotation: float, is_stale: bool):
         self.team_no = team_no
         self.position = position
         self.plane_type = plane_type
         self.rotation = rotation
+        self.is_stale = is_stale
 
 class PlaneDataModel(QAbstractListModel):
     m_datas: list[PlaneData]
@@ -46,6 +48,8 @@ class PlaneDataModel(QAbstractListModel):
             return data.rotation
         if role == Qt.ItemDataRole.UserRole + 4: # team_no
             return data.team_no
+        if role == Qt.ItemDataRole.UserRole + 5: # is_stale
+            return data.is_stale
         return None
 
     def rowCount(self, /, parent=...):
@@ -58,7 +62,8 @@ class PlaneDataModel(QAbstractListModel):
         plane_type: int = Qt.ItemDataRole.UserRole + 2
         rotation: int = Qt.ItemDataRole.UserRole + 3
         team_no: int = Qt.ItemDataRole.UserRole + 4
-        return {position: QByteArray(b"position"), plane_type: QByteArray(b"plane_type"), rotation: QByteArray(b"rotation"), team_no: QByteArray(b"team_no")}
+        is_stale: int = Qt.ItemDataRole.UserRole + 5
+        return {position: QByteArray(b"position"), plane_type: QByteArray(b"plane_type"), rotation: QByteArray(b"rotation"), team_no: QByteArray(b"team_no"), is_stale: QByteArray(b"is_stale")}
 
 class SpecialCoordsData:
     position: QGeoCoordinate
@@ -523,13 +528,13 @@ class MapWidget(QQuickWidget):
         self.setSource("qml/map_widget.qml")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 
-    def update_plane_data(self, our_telemetry, last_server_response: TelemetryResponseData):
+    def update_plane_data(self, our_telemetry: TelemetryData, last_server_response: TelemetryResponseData):
         if last_server_response is None:
             qWarning("Can not update plane coords, server connection error")
             return
         self.plane_data_model.m_datas.clear()
         self.plane_data_model.m_datas.append(
-            PlaneData(our_telemetry.takim_numarasi, QGeoCoordinate(our_telemetry.iha_enlem, our_telemetry.iha_boylam), 2 if self.selected_plane_team_no == our_telemetry.takim_numarasi else 0, our_telemetry.iha_yonelme))
+            PlaneData(our_telemetry.takim_numarasi, QGeoCoordinate(our_telemetry.iha_enlem, our_telemetry.iha_boylam), 2 if self.selected_plane_team_no == our_telemetry.takim_numarasi else 0, our_telemetry.iha_yonelme, False))
         for uav in last_server_response.konumBilgileri:
             # TODO: Add types to uav
             plane_type: int
@@ -539,12 +544,13 @@ class MapWidget(QQuickWidget):
                 plane_type = 2
             else:
                 plane_type = 1
-            self.plane_data_model.m_datas.append(PlaneData(uav.takim_numarasi, QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, uav.iha_yonelme))
+            is_stale: bool = uav.zaman_farki > (3600000 * 3) # An hour * 3
+            self.plane_data_model.m_datas.append(PlaneData(uav.takim_numarasi, QGeoCoordinate(uav.iha_enlem, uav.iha_boylam), plane_type, uav.iha_yonelme, is_stale))
         self.plane_data_model.layoutChanged.emit()
 
     def update_plane_data_without_server(self, pos: QGeoCoordinate, rotation: float):
         self.plane_data_model.m_datas.clear()
-        self.plane_data_model.m_datas.append(PlaneData(-1, pos, 2 if self.selected_plane_team_no == -1 else 0, rotation)) # TODO: Only for test
+        self.plane_data_model.m_datas.append(PlaneData(-1, pos, 2 if self.selected_plane_team_no == -1 else 0, rotation, False))
         self.plane_data_model.layoutChanged.emit()
 
     def update_server_ads_data(self, ads_list: list[ServerAdsData]):

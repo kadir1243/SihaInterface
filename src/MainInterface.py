@@ -1756,6 +1756,7 @@ class MainWindow(QMainWindow):
         self.server_connection.telemetry_thread.setObjectName("Telemetry Thread")
         self.server_connection.telemetry_timer.moveToThread(self.server_connection.telemetry_thread)
         self.server_connection.telemetry_thread.started.connect(self.server_connection.telemetry_timer.start, type=Qt.ConnectionType.DirectConnection)
+        self.server_connection.telemetry_thread.finished.connect(self.server_connection.telemetry_timer.stop, type=Qt.ConnectionType.DirectConnection)
         self.server_connection.telemetry_thread.start()
 
     def __update_plane_on_map_without_server(self):
@@ -1805,7 +1806,7 @@ class MainWindow(QMainWindow):
     def _server_disconnect(self):
         if self.server_connection.telemetry_thread:
             self.server_connection.telemetry_thread.quit()
-            self.server_connection.telemetry_thread.wait(5)
+            self.server_connection.telemetry_thread.wait()
             self.server_connection.telemetry_thread.deleteLater()
             self.server_connection.telemetry_thread = None
         if self.server_connection.ip is None:

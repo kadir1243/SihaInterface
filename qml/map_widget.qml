@@ -74,6 +74,7 @@ Item {
                 property var position: model.position
                 property var plane_type: model.plane_type
                 property var rotation_: model.rotation // rotation is a member after qt 6.11
+                property var is_stale: model.is_stale
                 coordinate: position;
                 // end of configuration
                 anchorPoint.x: plane_image.width/2
@@ -82,6 +83,9 @@ Item {
                 sourceItem: Image {
                     id: plane_image
                     function getImage() {
+                        if (is_stale === true) {
+                            return "../ui_files/gray_plane.svg"
+                        }
                         if (plane_type === 2) {
                             return "../ui_files/blue_plane.svg"
                         } else if (plane_type === 1) {

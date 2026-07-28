@@ -137,6 +137,7 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
             data.iha_yonelme = s["iha_yonelme"]
             data.iha_dikilme = s["iha_dikilme"]
             data.iha_irtifa = s["iha_irtifa"]
+            data.zaman_farki = int(s["zaman_farki"])
             uav_s.append(data)
         d.konumBilgileri = uav_s
         qDebug("Received telemetry response %s" % r.json())
