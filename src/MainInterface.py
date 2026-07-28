@@ -8,7 +8,7 @@ from functools import partial
 os.environ['MAVLINK20'] = '1'
 
 from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, QLocale, \
-    QTranslator, QCoreApplication
+    QTranslator, QCoreApplication, QRegularExpression
 from PySide6.QtGui import QAction, QDoubleValidator, Qt
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
@@ -349,7 +349,7 @@ class UavConnection:
 
 class ServerConnection:
     ip: str | None = None
-    port: int
+    port: int = None
     username: str
     password: str
     team_no: int
@@ -1474,7 +1474,8 @@ class MainWindow(QMainWindow):
         if self.server_connection.ip is not None:
             self.server_connection_dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Server Connected :)", None))
             self.server_connection_dialog.ui.server_ip_input.setText(self.server_connection.ip)
-            self.server_connection_dialog.ui.server_port_input.setText(str(self.server_connection.port))
+            if self.server_connection.port:
+                self.server_connection_dialog.ui.server_port_input.setText(str(self.server_connection.port))
             self.server_connection_dialog.ui.server_login_username_input.setText(str(self.server_connection.username))
             self.server_connection_dialog.ui.server_login_password_input.setText(str(self.server_connection.password))
         self.server_connection_dialog.ui.connect.clicked.connect(lambda: self._server_connect(self.server_connection_dialog))
@@ -1716,7 +1717,8 @@ class MainWindow(QMainWindow):
         # TODO: Test connection
         if not dialog.ui.server_ip_input.text():
             dialog.ui.server_ip_input.setText(dialog.ui.server_ip_input.placeholderText())
-        if not dialog.ui.server_port_input.text():
+        is_it_direct_address: bool = QRegularExpression("[\\w]+").match(dialog.ui.server_ip_input.text()).hasMatch()
+        if not is_it_direct_address and not dialog.ui.server_port_input.text():
             dialog.ui.server_port_input.setText(dialog.ui.server_port_input.placeholderText())
         if not dialog.ui.server_login_username_input.text():
             dialog.ui.server_login_username_input.setText(dialog.ui.server_login_username_input.placeholderText())
@@ -1724,10 +1726,11 @@ class MainWindow(QMainWindow):
             dialog.ui.invalid_input_error_label.show()
             return
         dialog.ui.invalid_input_error_label.hide()
+        if not is_it_direct_address:
+            self.server_connection.port = int(dialog.ui.server_port_input.text())
         self.server_connection.ip = dialog.ui.server_ip_input.text()
         if not ("://" in self.server_connection.ip):
             self.server_connection.ip = "http://"+self.server_connection.ip
-        self.server_connection.port = int(dialog.ui.server_port_input.text())
         self.server_connection.username = dialog.ui.server_login_username_input.text()
         self.server_connection.password = dialog.ui.server_login_password_input.text()
 
@@ -1746,6 +1749,7 @@ class MainWindow(QMainWindow):
             dialog.ui.invalid_input_error_label.show()
             self.ui.server_connection_warning.show()
             self.server_connection.ip = None
+            self.server_connection.port = None
             return
         if self.plane_on_map_update_timer.isActive():
             self.plane_on_map_update_timer.stop()
