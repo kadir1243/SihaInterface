@@ -1,5 +1,5 @@
 import requests
-from PySide6.QtCore import qDebug, QTime, QReadWriteLock, qWarning
+from PySide6.QtCore import qDebug, QReadWriteLock, qWarning, QDateTime
 from requests import Response, Session
 
 # FIXME: This should be set to false
@@ -25,7 +25,8 @@ class GpsSaati:
     saniye: int
     milisaniye: int
 
-    def __init__(self, time: QTime):
+    def __init__(self, datetime: QDateTime):
+        time = datetime.toUTC().time()
         self.milisaniye = time.msec()
         self.saniye = time.second()
         self.dakika = time.minute()
@@ -68,7 +69,7 @@ class TelemetryData:
         self.hedef_merkez_Y = 0
         self.hedef_genislik = 0
         self.hedef_yukseklik = 0
-        self.gps_saati = GpsSaati(QTime.currentTime())
+        self.gps_saati = GpsSaati(QDateTime.currentDateTimeUtc())
         self.lock = QReadWriteLock()
 
 class TelemetryResponseUavData:
@@ -115,10 +116,10 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
                 "milisaniye": telemetry_data.gps_saati.milisaniye
             }
         }
-        r: Response = get_session().post(target_address + "/api/telemetri_gonder", json=json, headers=headers, timeout=100)
+        r: Response = get_session().post(target_address + "/api/telemetri_gonder", json=json, headers=headers, timeout=1)
         if r.status_code == 400:
-            qWarning("Can not send telemetry %s" % json)
-            qWarning(r.text)
+            qWarning("Can not send telemetry: %s" % json)
+            qWarning("Server returned error text: %s" % r.text)
             return None
         r.raise_for_status()
         if r.status_code == 204:

@@ -47,6 +47,9 @@ def to_degree(x: float) -> float:
         x = x + 2 * math.pi
     return x * (180 / math.pi)
 
+def clamp(val: float, minv: float, maxv: float):
+    return max(minv, min(maxv, val))
+
 class KamikazeState(Enum):
     IDLE = 0
     APPROACHING = 1
@@ -96,18 +99,18 @@ class TrackableDataUpdate:
         return str(yaw)
     @staticmethod
     def update_pitch(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
-        pitch: float = math.degrees(packet.pitch)
+        pitch: float = clamp(math.degrees(packet.pitch), -90, 90)
         telemetry.iha_dikilme = pitch
         return str(pitch)
     @staticmethod
     def update_roll(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_attitude_message) -> str:
-        roll: float = math.degrees(packet.roll)
+        roll: float = clamp(math.degrees(packet.roll), -90, 90)
         telemetry.iha_yatis = roll
         return str(roll)
     @staticmethod
     def update_gps_time(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_system_time_message) -> str:
         datetime = QDateTime.fromMSecsSinceEpoch(int(packet.time_unix_usec / 1000))
-        telemetry.gps_saati = GpsSaati(datetime.time())
+        telemetry.gps_saati = GpsSaati(datetime)
         return datetime.toString()
     @staticmethod
     def update_battery_percentage(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_battery_status_message) -> str:
