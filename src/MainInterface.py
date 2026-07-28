@@ -1788,17 +1788,17 @@ class MainWindow(QMainWindow):
         response = send_telemetry(self.server_connection.get_address(), telemetry_snapshot)
         if response:
             self.last_server_telemetry_response = response
-            self.update_plane_data_signal.emit(telemetry_snapshot.takim_numarasi, response)
+            self.update_plane_data_signal.emit(telemetry_snapshot, response)
         else:
             qWarning("Could not process telemetry response info")
-    update_plane_data_signal = Signal(int, TelemetryResponseData)
+    update_plane_data_signal = Signal(TelemetryData, TelemetryResponseData)
     is_processing_plane_data = False
-    def __update_plane_data(self, team_no: int, telemetry_response: TelemetryResponseData):
+    def __update_plane_data(self, our_data: TelemetryData, telemetry_response: TelemetryResponseData):
         if self.is_processing_plane_data:
             return
         self.is_processing_plane_data = True
         try:
-            self.ui.map_view.update_plane_data(team_no, telemetry_response)
+            self.ui.map_view.update_plane_data(our_data, telemetry_response)
         finally:
             self.is_processing_plane_data = False
 

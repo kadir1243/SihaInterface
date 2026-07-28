@@ -139,7 +139,7 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
             data.iha_irtifa = s["iha_irtifa"]
             uav_s.append(data)
         d.konumBilgileri = uav_s
-        qDebug("Processed telemetry response %s" % r.json())
+        qDebug("Received telemetry response %s" % r.json())
         # FIXME: I don't need any other data for now, i will add it when i needed
         return d
     except ConnectionError as e:

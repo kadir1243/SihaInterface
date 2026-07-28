@@ -523,16 +523,18 @@ class MapWidget(QQuickWidget):
         self.setSource("qml/map_widget.qml")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 
-    def update_plane_data(self, our_team_number: int, last_server_response: TelemetryResponseData):
+    def update_plane_data(self, our_telemetry, last_server_response: TelemetryResponseData):
         if last_server_response is None:
             qWarning("Can not update plane coords, server connection error")
             return
         self.plane_data_model.m_datas.clear()
+        self.plane_data_model.m_datas.append(
+            PlaneData(our_telemetry.takim_numarasi, QGeoCoordinate(our_telemetry.iha_enlem, our_telemetry.iha_boylam), 2 if self.selected_plane_team_no == our_telemetry.takim_numarasi else 0, our_telemetry.iha_yonelme))
         for uav in last_server_response.konumBilgileri:
             # TODO: Add types to uav
             plane_type: int
-            if our_team_number == uav.takim_numarasi:
-                plane_type = 0
+            if our_telemetry.takim_numarasi == uav.takim_numarasi: # This is impossible from my testings, but it is better to be safe than sorry :D
+                continue
             elif self.selected_plane_team_no == uav.takim_numarasi:
                 plane_type = 2
             else:
