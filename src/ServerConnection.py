@@ -1,6 +1,6 @@
 import requests
 from PySide6.QtCore import qDebug, QReadWriteLock, qWarning, QDateTime
-from requests import Response, Session
+from requests import Response, Session, RequestException
 
 # FIXME: This should be set to false
 INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST = False
@@ -143,7 +143,7 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
         qDebug("Received telemetry response %s" % r.json())
         # FIXME: I don't need any other data for now, i will add it when i needed
         return d
-    except ConnectionError as e:
+    except RequestException:
         global SERVER_IS_UNREACHABLE_COUNTER
         SERVER_IS_UNREACHABLE_COUNTER += 1
         qDebug("Can not connect to server, unreachable counter: %s" % SERVER_IS_UNREACHABLE_COUNTER)
