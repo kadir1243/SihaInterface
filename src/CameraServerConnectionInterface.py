@@ -16,5 +16,6 @@ class CameraServerConnectionInterface(QDialog):
         self.ui.setupUi(self)
         self.ui.invalid_input_error_label.hide()
 
-        self.ui.server_port_input.setValidator(QRegularExpressionValidator(self._port_regex))
+        self.ui.camera_width.setValidator(QRegularExpressionValidator(self._port_regex))
+        self.ui.camera_height.setValidator(QRegularExpressionValidator(self._port_regex))
 

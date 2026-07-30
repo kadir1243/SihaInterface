@@ -5,6 +5,8 @@ import re
 from enum import Enum, IntEnum
 from functools import partial
 
+from src.CameraWidget import CameraServerProtocol
+
 os.environ['MAVLINK20'] = '1'
 
 from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, QLocale, \
@@ -874,11 +876,14 @@ class MainWindow(QMainWindow):
         if self.camera_server_connection_dialog is not None:
             return
         self.camera_server_connection_dialog = CameraServerConnectionInterface(self)
+        for protocol in CameraServerProtocol:
+            self.camera_server_connection_dialog.ui.server_protocol_type.insertItem(protocol.value[0], protocol.value[1])
         self.camera_server_connection_dialog.show()
         if self.ui.camera_view.camera_server_info.ip is not None:
             self.camera_server_connection_dialog.ui.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", "Camera Connected :)", None))
             self.camera_server_connection_dialog.ui.server_ip_input.setText(self.ui.camera_view.camera_server_info.ip)
-            self.camera_server_connection_dialog.ui.server_port_input.setText(str(self.ui.camera_view.camera_server_info.port))
+            self.camera_server_connection_dialog.ui.camera_width.setText(str(self.ui.camera_view.camera_server_info.width))
+            self.camera_server_connection_dialog.ui.camera_height.setText(str(self.ui.camera_view.camera_server_info.height))
             self.camera_server_connection_dialog.ui.server_protocol_type.setCurrentIndex(self.ui.camera_view.camera_server_info.protocol.value[0])
         self.camera_server_connection_dialog.ui.connect.clicked.connect(self.connect_to_cam_server)
         self.camera_server_connection_dialog.ui.disconnect.clicked.connect(self.disconnect_from_cam_server)
@@ -887,8 +892,29 @@ class MainWindow(QMainWindow):
     def connect_to_cam_server(self):
         if self.ui.camera_view.camera_server_info.ip is not None:
             self.ui.camera_view.disconnect_from_server()
-        self.ui.camera_view.camera_server_info.ip = self.camera_server_connection_dialog.ui.server_ip_input.text()
-        self.ui.camera_view.camera_server_info.port = int(self.camera_server_connection_dialog.ui.server_port_input.text())
+        if not self.camera_server_connection_dialog.ui.camera_height.text():
+            self.camera_server_connection_dialog.ui.camera_height.setText(self.camera_server_connection_dialog.ui.camera_height.placeholderText())
+        if not self.camera_server_connection_dialog.ui.camera_width.text():
+            self.camera_server_connection_dialog.ui.camera_width.setText(self.camera_server_connection_dialog.ui.camera_width.placeholderText())
+        ip_and_port = self.camera_server_connection_dialog.ui.server_ip_input.text()
+        if ":" in ip_and_port:
+            ip_and_port = ip_and_port.split(":")
+            if len(ip_and_port) != 2:
+                self.camera_server_connection_dialog.ui.invalid_input_error_label.setEnabled(True)
+                return
+            else:
+                ip: str = ip_and_port[0]
+                port: int
+                try:
+                    port = int(ip_and_port[1])
+                except ValueError:
+                    self.camera_server_connection_dialog.ui.invalid_input_error_label.setEnabled(True)
+                    return
+                self.ui.camera_view.camera_server_info.ip = ip
+                self.ui.camera_view.camera_server_info.port = port
+        self.ui.camera_view.camera_server_info.width = int(self.camera_server_connection_dialog.ui.camera_width.text())
+        self.ui.camera_view.camera_server_info.height = int(self.camera_server_connection_dialog.ui.camera_height.text())
+        self.ui.camera_view.camera_server_info.recalculate_frame_size()
         self.ui.camera_view.set_protocol(self.camera_server_connection_dialog.ui.server_protocol_type.currentIndex())
         if self.ui.camera_view.connect_to_server():
             self.camera_server_connection_dialog.ui.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", "Camera Connected :)", None))

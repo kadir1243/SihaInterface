@@ -23,7 +23,7 @@ class Ui_CameraConfig(object):
     def setupUi(self, CameraConfig):
         if not CameraConfig.objectName():
             CameraConfig.setObjectName(u"CameraConfig")
-        CameraConfig.resize(308, 258)
+        CameraConfig.resize(321, 298)
         self.verticalLayout = QVBoxLayout(CameraConfig)
         self.verticalLayout.setObjectName(u"verticalLayout")
         self.camera_server_protocol_layout = QHBoxLayout()
@@ -34,8 +34,6 @@ class Ui_CameraConfig(object):
         self.camera_server_protocol_layout.addWidget(self.camera_server_protocol)
 
         self.server_protocol_type = QComboBox(CameraConfig)
-        self.server_protocol_type.addItem(u"Osman")
-        self.server_protocol_type.addItem(u"Kadir")
         self.server_protocol_type.setObjectName(u"server_protocol_type")
 
         self.camera_server_protocol_layout.addWidget(self.server_protocol_type)
@@ -52,29 +50,46 @@ class Ui_CameraConfig(object):
 
         self.server_ip_input = QLineEdit(CameraConfig)
         self.server_ip_input.setObjectName(u"server_ip_input")
-        self.server_ip_input.setPlaceholderText(u"192.168.1.25")
+        self.server_ip_input.setPlaceholderText(u"192.168.1.25:8000")
 
         self.server_ip_layout.addWidget(self.server_ip_input)
 
 
         self.verticalLayout.addLayout(self.server_ip_layout)
 
-        self.server_port_layout = QHBoxLayout()
-        self.server_port_layout.setObjectName(u"server_port_layout")
-        self.server_port_label = QLabel(CameraConfig)
-        self.server_port_label.setObjectName(u"server_port_label")
+        self.camera_width_layout = QHBoxLayout()
+        self.camera_width_layout.setObjectName(u"camera_width_layout")
+        self.camera_width_label = QLabel(CameraConfig)
+        self.camera_width_label.setObjectName(u"camera_width_label")
 
-        self.server_port_layout.addWidget(self.server_port_label)
+        self.camera_width_layout.addWidget(self.camera_width_label)
 
-        self.server_port_input = QLineEdit(CameraConfig)
-        self.server_port_input.setObjectName(u"server_port_input")
-        self.server_port_input.setMaxLength(5)
-        self.server_port_input.setPlaceholderText(u"9999")
+        self.camera_width = QLineEdit(CameraConfig)
+        self.camera_width.setObjectName(u"camera_width")
+        self.camera_width.setMaxLength(5)
+        self.camera_width.setPlaceholderText(u"640")
 
-        self.server_port_layout.addWidget(self.server_port_input)
+        self.camera_width_layout.addWidget(self.camera_width)
 
 
-        self.verticalLayout.addLayout(self.server_port_layout)
+        self.verticalLayout.addLayout(self.camera_width_layout)
+
+        self.camera_height_layout = QHBoxLayout()
+        self.camera_height_layout.setObjectName(u"camera_height_layout")
+        self.camera_height_label = QLabel(CameraConfig)
+        self.camera_height_label.setObjectName(u"camera_height_label")
+
+        self.camera_height_layout.addWidget(self.camera_height_label)
+
+        self.camera_height = QLineEdit(CameraConfig)
+        self.camera_height.setObjectName(u"camera_height")
+        self.camera_height.setMaxLength(5)
+        self.camera_height.setPlaceholderText(u"480")
+
+        self.camera_height_layout.addWidget(self.camera_height)
+
+
+        self.verticalLayout.addLayout(self.camera_height_layout)
 
         self.information_layout = QVBoxLayout()
         self.information_layout.setObjectName(u"information_layout")
@@ -115,7 +130,8 @@ class Ui_CameraConfig(object):
 #if QT_CONFIG(shortcut)
         self.camera_server_protocol.setBuddy(self.server_protocol_type)
         self.server_ip_label.setBuddy(self.server_ip_input)
-        self.server_port_label.setBuddy(self.server_port_input)
+        self.camera_width_label.setBuddy(self.camera_width)
+        self.camera_height_label.setBuddy(self.camera_height)
 #endif // QT_CONFIG(shortcut)
 
         self.retranslateUi(CameraConfig)
@@ -126,7 +142,6 @@ class Ui_CameraConfig(object):
     def retranslateUi(self, CameraConfig):
         CameraConfig.setWindowTitle(QCoreApplication.translate("CameraConfig", u"Camera Server Configuration", None))
         self.camera_server_protocol.setText(QCoreApplication.translate("CameraConfig", u"Camera Server Protocol", None))
-
 #if QT_CONFIG(tooltip)
         self.server_protocol_type.setToolTip(QCoreApplication.translate("CameraConfig", u"The Protocol Of Camera Server", None))
 #endif // QT_CONFIG(tooltip)
@@ -134,9 +149,13 @@ class Ui_CameraConfig(object):
 #if QT_CONFIG(tooltip)
         self.server_ip_input.setToolTip(QCoreApplication.translate("CameraConfig", u"The IP of the Camera Server", None))
 #endif // QT_CONFIG(tooltip)
-        self.server_port_label.setText(QCoreApplication.translate("CameraConfig", u"Camera Server Port", None))
+        self.camera_width_label.setText(QCoreApplication.translate("CameraConfig", u"Camera Width", None))
 #if QT_CONFIG(tooltip)
-        self.server_port_input.setToolTip(QCoreApplication.translate("CameraConfig", u"The port of the Camera Server", None))
+        self.camera_width.setToolTip(QCoreApplication.translate("CameraConfig", u"The width of the Camera", None))
+#endif // QT_CONFIG(tooltip)
+        self.camera_height_label.setText(QCoreApplication.translate("CameraConfig", u"Camera Height", None))
+#if QT_CONFIG(tooltip)
+        self.camera_height.setToolTip(QCoreApplication.translate("CameraConfig", u"The height of the Camera", None))
 #endif // QT_CONFIG(tooltip)
         self.invalid_input_error_label.setText(QCoreApplication.translate("CameraConfig", u"<font color='red'>Invalid Input Specified<color>", None))
         self.camera_connection_text.setText(QCoreApplication.translate("CameraConfig", u"Camera Not Connected :(", None))
