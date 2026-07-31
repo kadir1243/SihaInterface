@@ -145,6 +145,8 @@ class ProtocolOsmanSocketWrapper(AbstractProtocolWrapper):
         self.ffmpeg_process = QProcess(self)
         self.ffmpeg_process.setProgram("ffmpeg")
         self.ffmpeg_process.setArguments([
+            "-hide_banner",
+            "-loglevel", "warning",
             "-fflags", "nobuffer",
             "-flags", "low_delay",
             "-i", "pipe:0",
@@ -197,12 +199,18 @@ class ProtocolBerkeSocketWrapper(AbstractProtocolWrapper):
         self.ffmpeg_process = QProcess(self)
         self.ffmpeg_process.setProgram("ffmpeg")
         self.ffmpeg_process.setArguments([
-            "-fflags", "nobuffer",
-            "-flags", "low_delay",
-            "-i", f"udp://{self.parentWidget.camera_server_info.ip}:{self.parentWidget.camera_server_info.port}?timeout=1000000&reuse=1",
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-fflags", "nobuffer+discardcorrupt+genpts",
+            "-avioflags", "direct",
+            "-err_detect", "ignore_err",
+            "-probesize", "32",
+            "-analyzeduration", "0",
+            "-i", f"udp://{self.parentWidget.camera_server_info.ip}:{self.parentWidget.camera_server_info.port}?timeout=2000000&reuse=1&buffer_size=65536",
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
             "-s", f"{self.parentWidget.camera_server_info.width}x{self.parentWidget.camera_server_info.height}",
+            "-fps_mode", "passthrough",
             "pipe:1",
         ])
         self.ffmpeg_process.setReadChannel(QProcess.ProcessChannel.StandardOutput)
@@ -216,7 +224,7 @@ class ProtocolBerkeSocketWrapper(AbstractProtocolWrapper):
     def _on_ready_standard_error_read(self) -> None:
         if not self.ffmpeg_process or self.ffmpeg_process.state() != QProcess.ProcessState.Running:
             return
-        qWarning("ffmpeg error: %s" % self.ffmpeg_process.readAllStandardError())
+        qWarning("ffmpeg error: %s" % self.ffmpeg_process.readAllStandardError().toStdString())
 
     def process_error(self, error: QProcess.ProcessError):
         qWarning("ffmpeg process failed with error: %s" % error)
