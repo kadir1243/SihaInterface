@@ -1,22 +1,28 @@
 import struct
 from enum import Enum
 
+import cv2
 import lz4.block
+import numpy
 from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal, QSize, QPointF, \
     QPoint, QProcess, QByteArray
 from PySide6.QtGui import QImage, QPixmap, QPaintEvent, QPainterPath, QPainter, QPen
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket, QTcpSocket
 from PySide6.QtWidgets import QWidget, QLabel, QGridLayout
 
+from src.CommonUtils import KamikazeState
+from src.barcode import RobustDetector, resolve_engine, draw_results
 
 class AbstractProtocolWrapper(QObject):
     socket: QAbstractSocket | None
     parentWidget: CameraWidget
-    update_camera_in_ui: Signal = Signal(QPixmap)
+    update_camera_in_ui: Signal = Signal(bytes)
     def __init__(self, parentWidget: CameraWidget):
         super().__init__()
         self.parentWidget = parentWidget
         self.socket = None
+        self._qr_engine = resolve_engine()
+        self._qr_detector = RobustDetector(self._qr_engine)
 
     def bindSocket(self) -> None:
         pass
@@ -28,6 +34,19 @@ class AbstractProtocolWrapper(QObject):
     def close(self) -> None:
         if self.socket:
             self.socket.close()
+
+    def emit_camera_data(self, raw_image: bytes):
+        width = self.parentWidget.camera_server_info.width
+        height = self.parentWidget.camera_server_info.height
+
+        frame = numpy.frombuffer(raw_image, dtype=numpy.uint8).copy().reshape((height, width, 3))
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+
+        results = self._qr_detector.detect(gray)
+        if results:
+            draw_results(frame, results)
+
+        self.update_camera_in_ui.emit(frame.tobytes())
 
 class ProtocolKadirSocketWrapper(AbstractProtocolWrapper):
     def __init__(self, parentWidget: CameraWidget):
@@ -122,8 +141,7 @@ class ProtocolKadirSocketWrapper(AbstractProtocolWrapper):
                     self.frame_data_map.clear()
                     self.amount_of_parts_received = 0
                     continue
-                img = QImage(lz4.block.decompress(blob), self.parentWidget.camera_server_info.width, self.parentWidget.camera_server_info.height, QImage.Format.Format_RGB888)
-                self.update_camera_in_ui.emit(QPixmap.fromImageInPlace(img))
+                self.emit_camera_data(lz4.block.decompress(blob))
                 self.frame_data_map.clear()
                 self.amount_of_parts_received = 0
 
@@ -169,8 +187,7 @@ class ProtocolOsmanSocketWrapper(AbstractProtocolWrapper):
         while len(self.__frame_buffer) >= self.frame_byte_size:
             raw = self.__frame_buffer[:self.frame_byte_size]
             self.__frame_buffer = self.__frame_buffer[self.frame_byte_size:]
-            img: QImage = QImage(raw, self.parentWidget.camera_server_info.width, self.parentWidget.camera_server_info.height, QImage.Format.Format_RGB888).copy()
-            self.update_camera_in_ui.emit(QPixmap.fromImage(img))
+            self.emit_camera_data(raw)
 
     def _on_ready_read(self) -> None:
         if not self.ffmpeg_process or self.ffmpeg_process.state() != QProcess.ProcessState.Running:
@@ -233,8 +250,7 @@ class ProtocolBerkeSocketWrapper(AbstractProtocolWrapper):
         while len(self.__frame_buffer) >= self.frame_byte_size:
             raw = self.__frame_buffer[:self.frame_byte_size]
             self.__frame_buffer = self.__frame_buffer[self.frame_byte_size:]
-            img: QImage = QImage(raw, self.parentWidget.camera_server_info.width, self.parentWidget.camera_server_info.height, QImage.Format.Format_RGB888).copy()
-            self.update_camera_in_ui.emit(QPixmap.fromImage(img))
+            self.emit_camera_data(raw)
 
     def close(self) -> None:
         if self.ffmpeg_process:
@@ -317,6 +333,12 @@ class CameraWidget(QWidget):
         self.reconnect_timer = QTimer(parent=self, singleShot=True, interval=15000)
         self.reconnect_timer.timeout.connect(self.__fire_reconnect)
 
+    def parent_is_lock_enabled(self) -> bool:
+        return self.parentWidget().ui.disable_enable_locking.isChecked()
+
+    def parent_is_kamikaze(self) -> bool:
+        return self.parentWidget().kamikaze_state == KamikazeState.IDLE
+
     def __fire_reconnect(self):
         self.closeSocket()
         self.bindSocket()
@@ -367,9 +389,9 @@ class CameraWidget(QWidget):
         self.connection_thread.start()
         self.start_reconnect_timer()
 
-    def update_camera_img(self, img: QImage) -> None:
+    def update_camera_img(self, img: bytes) -> None:
         self.start_reconnect_timer()
-        self.label.setPixmap(img.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio))
+        self.label.setPixmap(QPixmap.fromImage(QImage(img, self.camera_server_info.width, self.camera_server_info.height, QImage.Format.Format_RGB888).scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)))
 
     def closeSocket(self):
         if not self.connection_thread or not self.connection_thread.isRunning():
