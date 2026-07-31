@@ -169,8 +169,8 @@ class ProtocolOsmanSocketWrapper(AbstractProtocolWrapper):
         while len(self.__frame_buffer) >= self.frame_byte_size:
             raw = self.__frame_buffer[:self.frame_byte_size]
             self.__frame_buffer = self.__frame_buffer[self.frame_byte_size:]
-            img: QImage = QImage(raw, self.parentWidget.camera_server_info.width, self.parentWidget.camera_server_info.height, QImage.Format.Format_RGB888)
-            self.update_camera_in_ui.emit(QPixmap.fromImageInPlace(img))
+            img: QImage = QImage(raw, self.parentWidget.camera_server_info.width, self.parentWidget.camera_server_info.height, QImage.Format.Format_RGB888).copy()
+            self.update_camera_in_ui.emit(QPixmap.fromImage(img))
 
     def _on_ready_read(self) -> None:
         if not self.ffmpeg_process or self.ffmpeg_process.state() != QProcess.ProcessState.Running:
@@ -204,8 +204,6 @@ class ProtocolBerkeSocketWrapper(AbstractProtocolWrapper):
             "-fflags", "nobuffer+discardcorrupt+genpts",
             "-avioflags", "direct",
             "-err_detect", "ignore_err",
-            "-probesize", "32",
-            "-analyzeduration", "0",
             "-i", f"udp://{self.parentWidget.camera_server_info.ip}:{self.parentWidget.camera_server_info.port}?timeout=2000000&reuse=1&buffer_size=65536",
             "-f", "rawvideo",
             "-pix_fmt", "rgb24",
@@ -235,8 +233,8 @@ class ProtocolBerkeSocketWrapper(AbstractProtocolWrapper):
         while len(self.__frame_buffer) >= self.frame_byte_size:
             raw = self.__frame_buffer[:self.frame_byte_size]
             self.__frame_buffer = self.__frame_buffer[self.frame_byte_size:]
-            img: QImage = QImage(raw, self.parentWidget.camera_server_info.width, self.parentWidget.camera_server_info.height, QImage.Format.Format_RGB888)
-            self.update_camera_in_ui.emit(QPixmap.fromImageInPlace(img))
+            img: QImage = QImage(raw, self.parentWidget.camera_server_info.width, self.parentWidget.camera_server_info.height, QImage.Format.Format_RGB888).copy()
+            self.update_camera_in_ui.emit(QPixmap.fromImage(img))
 
     def close(self) -> None:
         if self.ffmpeg_process:
@@ -316,7 +314,7 @@ class CameraWidget(QWidget):
         self.label.show()
         self.gridLayout.addWidget(self.label)
 
-        self.reconnect_timer = QTimer(parent=self, singleShot=True, interval=5000)
+        self.reconnect_timer = QTimer(parent=self, singleShot=True, interval=15000)
         self.reconnect_timer.timeout.connect(self.__fire_reconnect)
 
     def __fire_reconnect(self):
@@ -378,13 +376,13 @@ class CameraWidget(QWidget):
             self.connection_thread = None
             qDebug("Camera Connection Thread already closed")
             return
+        self.stop_reconnect_timer()
         self.connection_thread.quit()
-        if self.connection_thread.wait(2000):
+        if not self.connection_thread.wait(2000):
             self.connection_thread.terminate()
         self.connection_thread = None
         self.socketWorker = None
         qDebug("Closed Camera Connection Thread")
-        self.stop_reconnect_timer()
 
     def start_reconnect_timer(self):
         self.reconnect_timer.start()
