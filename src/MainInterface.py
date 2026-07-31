@@ -465,6 +465,7 @@ class MainWindow(QMainWindow):
         self.kamikaze_timer = QTimer(self)
         self.kamikaze_timer.setInterval(100)
         self.kamikaze_timer.timeout.connect(self.__kamikaze_loop)
+        self.waits_for_qr = False
 
         self.current_pilot = MAV_AUTOPILOT_INVALID
 
@@ -533,6 +534,8 @@ class MainWindow(QMainWindow):
         self.ui.kamikaze_longitude.setValidator(floatValidator)
         self.update_plane_data_signal.connect(self.__update_plane_data)
         self.ui.camera_view.qr_successfully_readed.connect(self.on_qr_found)
+        self.ui.disable_enable_locking.toggled.emit(self.ui.camera_view.change_lock_state)
+        self.ui.camera_view.set_mainwindow_reference(self)
 
     def setup_colors(self):
         self.setStyleSheet(ColorSelectorInterface.create_stylesheet(self.color_options))
@@ -1088,6 +1091,7 @@ class MainWindow(QMainWindow):
     kamikaze_target_lon: float
     kamikaze_previous_mode: int | None
     kamikaze_timer: QTimer
+    waits_for_qr: bool
 
     def __set_param(self, name: bytes, value: float):
         if self.mavlink_connection is None:
@@ -1148,6 +1152,7 @@ class MainWindow(QMainWindow):
         self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
         self.__set_param(b'LIM_ROLL_CD', 5500.0)
         self.mavlink_connection.set_mode_apm(5)
+        self.waits_for_qr = True
         qDebug("Kamikaze Started")
 
     def __kamikaze_loop(self):
@@ -1261,10 +1266,11 @@ class MainWindow(QMainWindow):
             self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
         if self.server_connection.ip is not None:
             self.on_kamikaze_end("")
+        self.waits_for_qr = False
         qDebug("Kamikaze Completed")
 
     def on_qr_found(self, qr_text: str):
-        pass
+        self.waits_for_qr = False
 
     def on_kamikaze_end(self, qr_text: str) -> None:
         self.next_telemetry.lock.lockForRead()
@@ -1573,6 +1579,7 @@ class MainWindow(QMainWindow):
         if self.kamikaze_state != KamikazeState.IDLE:
             self.kamikaze_timer.stop()
             self.kamikaze_state = KamikazeState.IDLE
+            self.waits_for_qr = False
         self._uav_disconnect()
 
     def _uav_disconnect(self):

@@ -17,12 +17,15 @@ class AbstractProtocolWrapper(QObject):
     socket: QAbstractSocket | None
     parentWidget: CameraWidget
     update_camera_in_ui: Signal = Signal(bytes)
+    qr_read_timer: QTimer
+
     def __init__(self, parentWidget: CameraWidget):
         super().__init__()
         self.parentWidget = parentWidget
         self.socket = None
         self._qr_engine = resolve_engine()
         self._qr_detector = RobustDetector(self._qr_engine)
+        self.qr_read_timer = QTimer(self, singleShot=True, interval=2000)
 
     def bindSocket(self) -> None:
         pass
@@ -36,19 +39,27 @@ class AbstractProtocolWrapper(QObject):
             self.socket.close()
 
     def emit_camera_data(self, raw_image: bytes):
-        width = self.parentWidget.camera_server_info.width
-        height = self.parentWidget.camera_server_info.height
+        waits_qr: bool = self.parentWidget.waits_qr()
+        lock_enabled: bool = self.parentWidget.lock_enabled
+        if waits_qr or lock_enabled:
+            width = self.parentWidget.camera_server_info.width
+            height = self.parentWidget.camera_server_info.height
 
-        frame = numpy.frombuffer(raw_image, dtype=numpy.uint8).copy().reshape((height, width, 3))
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            frame = numpy.frombuffer(raw_image, dtype=numpy.uint8).copy().reshape((height, width, 3))
+            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
-        results = self._qr_detector.detect(gray)
-        if results:
-            draw_results(frame, results)
-            for data, sym_type, pts in results:
-                self.parentWidget.qr_successfully_readed.emit(data)
+            if waits_qr:
+                results = self._qr_detector.detect(gray)
+                if results:
+                    draw_results(frame, results)
+                    for data, sym_type, pts in results:
+                        if not self.qr_read_timer.isActive():
+                            self.parentWidget.qr_successfully_readed.emit(data)
+                            self.qr_read_timer.start()
 
-        self.update_camera_in_ui.emit(frame.tobytes())
+            self.update_camera_in_ui.emit(frame.tobytes())
+        else:
+            self.update_camera_in_ui.emit(raw_image)
 
 class ProtocolKadirSocketWrapper(AbstractProtocolWrapper):
     def __init__(self, parentWidget: CameraWidget):
@@ -321,6 +332,7 @@ class CameraWidget(QWidget):
     camera_server_info: CameraServerInfo = CameraServerInfo()
     qr_successfully_readed: Signal = Signal(str)
     label: LabelWithRectangle
+    lock_enabled: bool
 
     def __init__(self, parent: QWidget | None = None):
         QWidget.__init__(self, parent=parent)
@@ -335,12 +347,16 @@ class CameraWidget(QWidget):
 
         self.reconnect_timer = QTimer(parent=self, singleShot=True, interval=15000)
         self.reconnect_timer.timeout.connect(self.__fire_reconnect)
+        self.lock_enabled = False
 
-    def parent_is_lock_enabled(self) -> bool:
-        return self.parentWidget().ui.disable_enable_locking.isChecked()
+    def change_lock_state(self, lock_state: bool):
+        self.lock_enabled = lock_state
 
-    def parent_is_kamikaze(self) -> bool:
-        return self.parentWidget().kamikaze_state == KamikazeState.IDLE
+    def set_mainwindow_reference(self, widget):
+        self.mainwindow = widget
+
+    def waits_qr(self) -> bool:
+        return self.mainwindow.waits_for_qr
 
     def __fire_reconnect(self):
         self.closeSocket()

@@ -313,6 +313,7 @@ class Ui_MainWindow(object):
         icon4 = QIcon()
         icon4.addFile(u"ui_files/lock_to_target.png", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         self.disable_enable_locking.setIcon(icon4)
+        self.disable_enable_locking.setCheckable(True)
 
         self.camera_buttons.addWidget(self.disable_enable_locking)
 
@@ -325,6 +326,7 @@ class Ui_MainWindow(object):
         icon5.addFile(u"ui_files/record_button_offline.svg", QSize(), QIcon.Mode.Normal, QIcon.State.Off)
         icon5.addFile(u"ui_files/record_button_online.svg", QSize(), QIcon.Mode.Normal, QIcon.State.On)
         self.record_button.setIcon(icon5)
+        self.record_button.setCheckable(True)
 
         self.camera_buttons.addWidget(self.record_button)
 
