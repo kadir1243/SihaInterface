@@ -45,6 +45,8 @@ class AbstractProtocolWrapper(QObject):
         results = self._qr_detector.detect(gray)
         if results:
             draw_results(frame, results)
+            for data, sym_type, pts in results:
+                self.parentWidget.qr_successfully_readed.emit(data)
 
         self.update_camera_in_ui.emit(frame.tobytes())
 
@@ -317,6 +319,7 @@ class CameraWidget(QWidget):
     connection_thread: QThread | None = None
     socketWorker: AbstractProtocolWrapper | None = None
     camera_server_info: CameraServerInfo = CameraServerInfo()
+    qr_successfully_readed: Signal = Signal(str)
     label: LabelWithRectangle
 
     def __init__(self, parent: QWidget | None = None):

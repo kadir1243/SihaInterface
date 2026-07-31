@@ -532,6 +532,7 @@ class MainWindow(QMainWindow):
         self.ui.kamikaze_latitude.setValidator(floatValidator)
         self.ui.kamikaze_longitude.setValidator(floatValidator)
         self.update_plane_data_signal.connect(self.__update_plane_data)
+        self.ui.camera_view.qr_successfully_readed.connect(self.on_qr_found)
 
     def setup_colors(self):
         self.setStyleSheet(ColorSelectorInterface.create_stylesheet(self.color_options))
@@ -1261,6 +1262,9 @@ class MainWindow(QMainWindow):
         if self.server_connection.ip is not None:
             self.on_kamikaze_end("")
         qDebug("Kamikaze Completed")
+
+    def on_qr_found(self, qr_text: str):
+        pass
 
     def on_kamikaze_end(self, qr_text: str) -> None:
         self.next_telemetry.lock.lockForRead()
