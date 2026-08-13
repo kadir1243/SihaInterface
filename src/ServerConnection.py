@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import requests
 from PySide6.QtCore import qDebug, QReadWriteLock, qWarning, QDateTime
 from requests import Response, Session, RequestException
@@ -154,38 +156,54 @@ class QrCoords:
     qrEnlem: float
     qrBoylam: float
 
-def get_kamikaze_coords(target_address: str) -> QrCoords:
-    headers = {"Content-Type": "application/json"}
-    r: Response = requests.get(target_address + "/api/qr_koordinati", headers=headers)
-    r.raise_for_status()
-    data = r.json()
-    d: QrCoords = QrCoords()
-    d.qrEnlem = data.get("qrEnlem")
-    d.qrBoylam = data.get("qrBoylam")
-    return d
+def get_kamikaze_coords(target_address: str) -> QrCoords | None:
+    try:
+        headers = {"Content-Type": "application/json"}
+        r: Response = get_session().get(target_address + "/api/qr_koordinati", headers=headers)
+        if 400 <= r.status_code < 500 or 500 <= r.status_code < 600:
+            return None
+        data = r.json()
+        try:
+            d: QrCoords = QrCoords()
+            d.qrEnlem = float(data.get("qrEnlem"))
+            d.qrBoylam = float(data.get("qrBoylam"))
+            return d
+        except ValueError:
+            return None
+    except RequestException:
+        return None
 
+@dataclass(frozen=True, slots=True)
 class ServerAdsData:
     id: int
-    hssEnlem: float
-    hssBoylam: float
-    hssYariCap: float
+    lat: float
+    lon: float
+    radius_m: float
 
-def get_ads(target_address: str) -> list[ServerAdsData]:
+def get_ads(target_address: str) -> list[ServerAdsData] | None:
     headers = {"Content-Type": "application/json"}
-    r: Response = requests.get(target_address + "/api/hss_koordinatlari", headers=headers)
-    r.raise_for_status()
-    jdata = r.json()
-    qDebug("Received ads list: %s" % jdata)
+    try:
+        r: Response = get_session().get(target_address + "/api/hss_koordinatlari", headers=headers)
+        if 400 <= r.status_code < 500 or 500 <= r.status_code < 600:
+            return None
+        jdata = r.json()
 
-    ads_list: list[ServerAdsData] = list()
-    for d in jdata["hss_koordinat_bilgileri"]:
-        data: ServerAdsData = ServerAdsData()
-        data.id = int(d["id"])
-        data.hssEnlem = float(d["hssEnlem"])
-        data.hssBoylam = float(d["hssBoylam"])
-        data.hssYariCap = float(d["hssYaricap"])
-        ads_list.append(data)
-    return ads_list
+        ads_list: list[ServerAdsData] = list()
+        for d in jdata["hss_koordinat_bilgileri"]:
+            try:
+                data: ServerAdsData = ServerAdsData(
+                    id = int(d["id"]),
+                    lat = float(d["hssEnlem"]),
+                    lon = float(d["hssBoylam"]),
+                    radius_m = float(d["hssYaricap"])
+                )
+                ads_list.append(data)
+            except ValueError:
+                qWarning("Ads list from server contains invalid data")
+                continue
+        return ads_list
+    except RequestException:
+        return None
 
 def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: str) -> None:
     headers = {"Content-Type": "application/json"}

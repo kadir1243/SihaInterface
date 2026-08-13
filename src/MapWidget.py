@@ -493,6 +493,8 @@ class MapWidget(QQuickWidget):
     mavlink_connection: mavfile | None = None
     server_ads_data_model: AdsDataModel
     user_ads_data_model: AdsDataModel
+    buffer_zone_data_model: AdsDataModel
+    avoidance_route_geopath: MissionPathHolder
     upload_ads_data = Signal()
     selected_plane_team_no: int = -2
     target_coord: RepositionTargetHolder
@@ -516,6 +518,9 @@ class MapWidget(QQuickWidget):
         self.target_coord = RepositionTargetHolder(self)
         self.reposition_timer = QTimer(self, singleShot=True, interval=2000)
 
+        self.buffer_zone_data_model = AdsDataModel()
+        self.avoidance_route_geopath = MissionPathHolder(self)
+
         self.engine().rootContext().setContextProperty("plane_data_model", self.plane_data_model)
         self.engine().rootContext().setContextProperty("coord_data_model", self.coord_data_model)
         self.engine().rootContext().setContextProperty("mission_coords_data_model", self.mission_coords_data_model)
@@ -525,6 +530,10 @@ class MapWidget(QQuickWidget):
         self.engine().rootContext().setContextProperty("user_ads_data_model", self.user_ads_data_model)
         self.engine().rootContext().setContextProperty("mouseInputHandler", self.mouse_input_handler)
         self.engine().rootContext().setContextProperty("reposition_target_coord", self.target_coord)
+
+        self.engine().rootContext().setContextProperty("buffer_zone_data_model", self.buffer_zone_data_model)
+        self.engine().rootContext().setContextProperty("avoidance_route_geopath", self.avoidance_route_geopath)
+
         self.setSource("qml/map_widget.qml")
         self.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
 
@@ -557,8 +566,8 @@ class MapWidget(QQuickWidget):
         self.server_ads_data_model.m_datas.clear()
         for ads in ads_list:
             data: AdsData = AdsData()
-            data.position = QGeoCoordinate(ads.hssEnlem, ads.hssBoylam)
-            data.size = ads.hssYariCap
+            data.position = QGeoCoordinate(ads.lat, ads.lon)
+            data.size = ads.radius_m
             data.is_selected = False
             self.server_ads_data_model.m_datas.append(data)
         self.server_ads_data_model.layoutChanged.emit()

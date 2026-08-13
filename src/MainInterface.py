@@ -2,12 +2,13 @@ import copy
 import math
 import os
 import re
+import time
 from enum import Enum
 from functools import partial
 
 from src.CameraWidget import CameraServerProtocol
 from src.CommonUtils import TrackableDataPacketTimer, main_and_sub_mode_to_px4_uav_mode, MSG_ID_2_TRACKABLE_DATA_TYPE, \
-    PX4_UAV_Modes, KamikazeState, index_to_px4_uav_mode, SupportedLanguages, Ardupilot_UAV_Modes
+    PX4_UAV_Modes, KamikazeState, index_to_px4_uav_mode, SupportedLanguages, Ardupilot_UAV_Modes, HssSnapshot
 
 os.environ['MAVLINK20'] = '1'
 
@@ -30,7 +31,7 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAV_CMD_COMPONENT_ARM_DISARM, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
     MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION, MAV_RESULT_TEMPORARILY_REJECTED, MAV_CMD_DO_SET_MODE, \
     MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, \
-    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE
+    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -40,10 +41,13 @@ from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData, CRUISE_TH
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
-    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze
+    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze, \
+    SERVER_IS_UNREACHABLE_COUNTER, ServerAdsData
 from src.ServerConnectionInterface import ServerConnectionInterface
 from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
+from src.HSSPollingWorker import HSSPollingWorker
+from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -213,9 +217,9 @@ class ServerConnection:
     telemetry_thread: QThread = None
 
     def get_address(self) -> str:
-        if not MainWindow.is_ip_address_valid(self.ip, False):
-            return self.ip
-        return f"{self.ip}:{self.port}"
+        if self.port:
+            return f"{self.ip}:{self.port}"
+        return self.ip
 
 class MavlinkWorker(QObject):
     parent: MainWindow
@@ -227,11 +231,16 @@ class MavlinkWorker(QObject):
     waypoint_mission_count: int
     mission_fence_item_received = Signal(int, float, float, int, float, int)
     mission_fence_item_int_received = Signal(int, float, float, int, float, int)
-    mission_waypoint_item_received = Signal(int, float, float, int, int)
-    mission_waypoint_item_int_received = Signal(int, float, float, int, int)
+    mission_waypoint_item_received = Signal(int, float, float, float, int, int)
+    mission_waypoint_item_int_received = Signal(int, float, float, float, int, int)
     send_fence_mission_data = Signal(int, bool)
+    mission_upload_success = Signal(int)  # count
+    mission_upload_failed = Signal(str)
+    mission_current_changed = Signal(int)
     remove_reposition_location = Signal()
     worker_signals: MavlinkWorkerSignals
+    _mission_last_activity_time: float
+
     def __init__(self, mavlink_connection: mavfile, parent: MainWindow):
         super().__init__()
         self.mavlink_connection = mavlink_connection
@@ -241,6 +250,57 @@ class MavlinkWorker(QObject):
         self.fence_mission_count = 0
         self.waypoint_mission_count = 0
         self.worker_signals = MavlinkWorkerSignals(self)
+        
+        # Async Mission Upload State
+        self._mission_upload_items = []
+        self._mission_upload_state = 0 # 0: IDLE, 1: CLEARING, 2: COUNTING, 3: UPLOADING
+        self._start_mission_upload = False
+        self._mission_last_activity_time = 0.0
+        self._mission_upload_retry_count = 0
+        self._mission_upload_current_seq = 0
+
+    def _send_mission_clear_all(self) -> None:
+        self.mavlink_connection.mav.mission_clear_all_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            MAV_MISSION_TYPE_MISSION
+        )
+        qDebug("[MavlinkWorker] Sent MISSION_CLEAR_ALL")
+
+    def _send_mission_count(self) -> None:
+        self.mavlink_connection.mav.mission_count_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            len(self._mission_upload_items),
+            MAV_MISSION_TYPE_MISSION
+        )
+        qDebug(f"[MavlinkWorker] Sent MISSION_COUNT: {len(self._mission_upload_items)}")
+
+    def _send_mission_item_int(self, seq: int) -> None:
+        if seq >= len(self._mission_upload_items):
+            return
+        coord = self._mission_upload_items[seq]
+        alt = coord.altitude()
+        from pymavlink.dialects.v20.all import MAV_FRAME_GLOBAL_INT, MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, MAV_CMD_NAV_WAYPOINT
+        frame_int = MAV_FRAME_GLOBAL_INT if seq == 0 else MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+        self.mavlink_connection.mav.mission_item_int_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            seq,
+            frame_int,
+            MAV_CMD_NAV_WAYPOINT,
+            0,   # current
+            1,   # autocontinue
+            0,   # param1
+            5.0, # param2
+            0,   # param3
+            float('nan'), # param4
+            int(coord.latitude() * 1e7),
+            int(coord.longitude() * 1e7),
+            alt,
+            MAV_MISSION_TYPE_MISSION
+        )
+        qDebug(f"[MavlinkWorker] Sent MISSION_ITEM_INT for seq {seq}")
 
     def trigger_update_value(self, e: TrackableDataEnum, packet: MAVLink_message):
         length: int = self.watch_list.rowCount()
@@ -260,8 +320,35 @@ class MavlinkWorker(QObject):
 
     def run(self):
         while self.running:
+            if self._start_mission_upload:
+                self._start_mission_upload = False
+                self._mission_upload_state = 1 # CLEARING
+                self._mission_upload_retry_count = 0
+                self._mission_upload_current_seq = 0
+                self._send_mission_clear_all()
+                self._mission_last_activity_time = time.monotonic()
+
+            if self._mission_upload_state > 0:
+                if time.monotonic() - self._mission_last_activity_time > 2.0:
+                    if self._mission_upload_state <= 0:
+                        return
+                    self._mission_upload_retry_count += 1
+                    if self._mission_upload_retry_count > 3:
+                        self._mission_upload_state = 0
+                        self.mission_upload_failed.emit("Rota yükleme zaman aşımına uğradı (Otopilot cevap vermedi)")
+                    else:
+                        qWarning(
+                            f"[MavlinkWorker] Timeout at state {self._mission_upload_state}, retrying ({self._mission_upload_retry_count}/3)")
+                        if self._mission_upload_state == 1:
+                            self._send_mission_clear_all()
+                        elif self._mission_upload_state == 2:
+                            self._send_mission_count()
+                        elif self._mission_upload_state == 3:
+                            self._send_mission_item_int(self._mission_upload_current_seq)
+
+            timeout_val = 0.1 if self._mission_upload_state > 0 else 1.0
             try:
-                packet: MAVLink_message = self.mavlink_connection.recv_match(blocking=True, timeout=1.0)
+                packet: MAVLink_message = self.mavlink_connection.recv_match(blocking=True, timeout=timeout_val)
             except OSError as e:
                 # Serial port died (USB glitch, EMI, unplug); the handle is
                 # invalid from here on, so stop reading and tell the GUI.
@@ -282,16 +369,41 @@ class MavlinkWorker(QObject):
                     qWarning("Invalid data received: %s" % packet.data)
                 else:
                     qWarning("Invalid data received")
-            elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST_INT:
+            elif msgID in (MAVLINK_MSG_ID_MISSION_REQUEST_INT, MAVLINK_MSG_ID_MISSION_REQUEST):
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.send_fence_mission_data.emit(packet.seq, True)
-            elif msgID == MAVLINK_MSG_ID_MISSION_REQUEST: # Time to handle deprecated Legacy code
-                if packet.mission_type == MAV_MISSION_TYPE_FENCE:
-                    self.send_fence_mission_data.emit(packet.seq, False)
+                    self.send_fence_mission_data.emit(packet.seq, msgID == MAVLINK_MSG_ID_MISSION_REQUEST_INT)
+                elif packet.mission_type == MAV_MISSION_TYPE_MISSION and self._mission_upload_state > 0:
+                    if self._mission_upload_state == 1:
+                        # ArduPilot skipped CLEAR_ALL ack or we missed it, assume it proceeded
+                        self._mission_upload_state = 2
+                    if self._mission_upload_state == 2:
+                        self._mission_upload_state = 3 # Transition to UPLOADING
+                    self._mission_upload_retry_count = 0
+                    self._mission_last_activity_time = time.monotonic()
+                    self._mission_upload_current_seq = packet.seq
+                    self._send_mission_item_int(packet.seq)
             elif msgID == MAVLINK_MSG_ID_MISSION_ACK:
                 qDebug("MissionACK packet received with type %s and with mission_type %s" % (packet.type, packet.mission_type))
+                if packet.mission_type == MAV_MISSION_TYPE_MISSION:
+                    if self._mission_upload_state == 1:
+                        if packet.type == MAV_MISSION_ACCEPTED:
+                            self._mission_upload_state = 2 # Proceed to COUNTING
+                            self._mission_upload_retry_count = 0
+                            self._send_mission_count()
+                            self._mission_last_activity_time = time.monotonic()
+                        else:
+                            self._mission_upload_state = 0
+                            self.mission_upload_failed.emit(f"Görev temizleme reddedildi (ACK: {packet.type})")
+                    elif self._mission_upload_state == 3:
+                        self._mission_upload_state = 0 # Upload finished
+                        if packet.type == MAV_MISSION_ACCEPTED:
+                            self.mission_upload_success.emit(len(self._mission_upload_items))
+                        else:
+                            self.mission_upload_failed.emit(f"Otopilot rotayı reddetti (ACK: {packet.type})")
             elif msgID == MAVLINK_MSG_ID_MISSION_COUNT:
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
+                    if not self.parent.requested_to_get_fence:
+                        continue
                     self.fence_mission_count = packet.count
                     qDebug("Received %s fence point" % self.fence_mission_count)
                     if self.fence_mission_count > 0:
@@ -299,6 +411,8 @@ class MavlinkWorker(QObject):
                     else:
                         self.parent.requested_to_get_fence = False
                 elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
+                    if not self.parent.requested_to_get_mission:
+                        continue
                     self.waypoint_mission_count = packet.count
                     qDebug("Received %s mission waypoint" % self.waypoint_mission_count)
                     if self.waypoint_mission_count > 0:
@@ -311,13 +425,13 @@ class MavlinkWorker(QObject):
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
                     self.mission_fence_item_int_received.emit(packet.command, packet.x / 1e7, packet.y / 1e7, packet.seq, packet.param1, self.fence_mission_count)
                 elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
-                    self.mission_waypoint_item_int_received.emit(packet.command, packet.x / 1e7, packet.y / 1e7, packet.seq, self.waypoint_mission_count)
+                    self.mission_waypoint_item_int_received.emit(packet.command, packet.x / 1e7, packet.y / 1e7, packet.z, packet.seq, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM:
                 packet: MAVLink_mission_item_message = packet
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
                     self.mission_fence_item_received.emit(packet.command, packet.x, packet.y, packet.seq, packet.param1, self.fence_mission_count)
                 elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
-                    self.mission_waypoint_item_received.emit(packet.command, packet.x, packet.y, packet.seq, self.waypoint_mission_count)
+                    self.mission_waypoint_item_received.emit(packet.command, packet.x, packet.y, packet.z, packet.seq, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_COMMAND_ACK:
                 command: int = packet.command
                 result: int = packet.result
@@ -356,6 +470,8 @@ class MavlinkWorker(QObject):
                         qDebug("Fence enable command result: %s" % result)
                 else:
                     qDebug("CommandACK received for command %s and result %s" % (command, result))
+            elif msgID == MAVLINK_MSG_ID_MISSION_CURRENT:
+                self.mission_current_changed.emit(packet.seq)
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
                 e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
                 data_enum_values = e.value[4]
@@ -446,6 +562,12 @@ class MainWindow(QMainWindow):
     plane_on_map_update_timer: QTimer = QTimer(interval=500)
     current_lang: int
     current_pilot: int
+    _hss_polling_worker: HSSPollingWorker | None = None
+    _hss_polling_thread: QThread | None = None
+    _current_snapshot: HssSnapshot | None = None
+    _current_mission_waypoints: list = []
+    _pixhawk_current_seq: int = 0
+    _last_planned_hash = None
 
     def __init__(self):
         QMainWindow.__init__(self)
@@ -514,7 +636,7 @@ class MainWindow(QMainWindow):
         self.ui.actionConfigurate_Camera_Stream.triggered.connect(self._actionConfigurateCameraServer)
         self.ui.remove_ads.clicked.connect(self._remove_ads)
         self.ui.map_view.coords_for_geofence.upload_geofence_data.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
-        self.ui.map_view.upload_ads_data.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
+        self.ui.map_view.upload_ads_data.connect(self._on_manual_ads_changed)
         self.ui.actionAbout.triggered.connect(self._about)
         self.ui.actionAbout_Qt.triggered.connect(lambda: QMessageBox.aboutQt(self))
         self.fence_upload_timout = QTimer(self, singleShot=True, interval=10000)
@@ -534,7 +656,7 @@ class MainWindow(QMainWindow):
         self.ui.kamikaze_longitude.setValidator(floatValidator)
         self.update_plane_data_signal.connect(self.__update_plane_data)
         self.ui.camera_view.qr_successfully_readed.connect(self.on_qr_found)
-        self.ui.disable_enable_locking.toggled.emit(self.ui.camera_view.change_lock_state)
+        self.ui.disable_enable_locking.toggled.connect(self.ui.camera_view.change_lock_state)
         self.ui.camera_view.set_mainwindow_reference(self)
 
     def setup_colors(self):
@@ -633,12 +755,25 @@ class MainWindow(QMainWindow):
             self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
             self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
-    def mission_waypoint_item_received(self, command: int, x: float, y: float, seq: int, count: int):
-        coord: QGeoCoordinate = QGeoCoordinate(x, y)
+            # HSS entegrasyonu: indirilen mission kaydedilir, rota düzeltme tetiklenir
+            # Outlier filtreleme: (0.0, 0.0) koordinatlı noktaları rota planlamasından çıkar
+            all_positions = [d.position for d in self.ui.map_view.mission_coords_data_model.m_datas]
+            self._current_mission_waypoints = []
+            for i, pos in enumerate(all_positions):
+                if abs(pos.latitude()) < 0.01 and abs(pos.longitude()) < 0.01:
+                    qDebug("[Mission] Filtering outlier WP %d at (%.4f, %.4f)" % (i, pos.latitude(), pos.longitude()))
+                    continue
+                self._current_mission_waypoints.append(pos)
+            # Hash sıfırla — yeni mission'da HSS değişmemiş olsa bile rota yeniden hesaplansın
+            self._last_planned_hash = None
+            self._trigger_route_replanning()
+
+    def mission_waypoint_item_received(self, command: int, x: float, y: float, z: float, seq: int, count: int):
+        coord: QGeoCoordinate = QGeoCoordinate(x, y, z)
         self.mission_waypoint_received(coord, command, seq, False, count)
 
-    def mission_waypoint_item_int_received(self, command: int, x: float, y: float, seq: int, count: int):
-        coord: QGeoCoordinate = QGeoCoordinate(x, y)
+    def mission_waypoint_item_int_received(self, command: int, x: float, y: float, z: float, seq: int, count: int):
+        coord: QGeoCoordinate = QGeoCoordinate(x, y, z)
         self.mission_waypoint_received(coord, command, seq, True, count)
 
     def request_fence_data(self):
@@ -898,8 +1033,9 @@ class MainWindow(QMainWindow):
     def __refresh_ads(self):
         if not self.server_connection.ip:
             return
-
-        self.ui.map_view.update_server_ads_data(get_ads(self.server_connection.get_address()))
+        result = get_ads(self.server_connection.get_address())
+        if result is not None:
+            self.ui.map_view.update_server_ads_data(result)
 
     def __setArmStatus(self, is_arm: int):
         qDebug("Trying to send armed status: %s" % is_arm)
@@ -960,6 +1096,9 @@ class MainWindow(QMainWindow):
             )
 
     requested_to_send_fence_with_fence: bool = False
+
+    fence_upload_in_progress: bool = False           # FIX: race condition kilidi
+    pending_fence_ads_list: list = None              # FIX: yükleme sırasında gelen yeni istek kuyruğu
     def send_fence_mission_data(self, index: int, use_item_int: bool):
         ads_list_len = len(self.ads_list_cache)
         if ads_list_len == 0 and not self.requested_to_send_fence_with_fence:
@@ -1046,16 +1185,28 @@ class MainWindow(QMainWindow):
                     MAV_MISSION_TYPE_FENCE
                 )
         self.fence_upload_timout.start()
-        size: int = ads_list_len + 4 if self.requested_to_send_fence_with_fence else 0
+        size: int = ads_list_len + 4 if self.requested_to_send_fence_with_fence else ads_list_len
         if size == index + 1:
             self.fence_upload_timout.stop()
             self.ads_list_cache = []
             self.requested_to_send_fence_with_fence = False
+            self.fence_upload_in_progress = False   # FIX: kilit serbest
+            # FIX: yükleme biterken bekleyen istek varsa hemen işle
+            if self.pending_fence_ads_list is not None:
+                pending = self.pending_fence_ads_list
+                self.pending_fence_ads_list = None
+                self.update_geofence_data(pending)
+
     ads_list_cache: list[AdsData] = []
 
     def update_geofence_data(self, ads_list: list[AdsData]):
         if self.mavlink_connection is None:
             qWarning("Tried to sent geofence data when there is no mavlink connection")
+            return
+        # FIX: Fence yükleme devam ederken yeni istek gelirse kuyruğa al (race condition önleme)
+        if self.fence_upload_in_progress:
+            qDebug("Fence upload in progress, queuing new request")
+            self.pending_fence_ads_list = ads_list
             return
         has_a_fence = self.ui.map_view.coords_for_geofence.is_set
         self.mavlink_connection.mav.mission_clear_all_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_FENCE)
@@ -1068,6 +1219,7 @@ class MainWindow(QMainWindow):
             return
         qDebug("Sending mission count: %s" % fence_count)
         self.ads_list_cache = ads_list
+        self.fence_upload_in_progress = True         # FIX: kilidi aç
         self.mavlink_connection.mav.mission_count_send(
             self.mavlink_connection.target_system,
             self.mavlink_connection.target_component,
@@ -1080,6 +1232,9 @@ class MainWindow(QMainWindow):
         self._create_warning("Fence Upload taking really long, probably vehicle connection has been lost")
         self.ads_list_cache = []
         self.requested_to_send_fence_with_fence = False
+
+        self.fence_upload_in_progress = False        # FIX: timeout'da da kilidi serbest bırak
+        self.pending_fence_ads_list = None           # FIX: bekleyen istek de temizlenir
 
     def __reset_geofence_dialog(self):
         self.geofence_dialog = None
@@ -1306,6 +1461,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._create_warning("Could not get kamikaze coords from server: %s" % e)
             return
+        if qr_coords is None:
+            self._create_warning("Could not get kamikaze coords from server")
+            return
         self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
         self.ui.kamikaze_latitude.setText(str(qr_coords.qrEnlem))
 
@@ -1504,6 +1662,28 @@ class MainWindow(QMainWindow):
         # at CRUISE_THR_MAX for the rest of the flight.
         self.__set_param(b'TKOFF_THR_MAX', 100.0)
         self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
+        self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
+        self.__set_param(b'LIM_ROLL_CD', 4500.0)
+        # HSS Güvenlik Ağı + Rally Noktası Parametreleri
+        self.__set_param(b'FENCE_ACTION',  4.0)    # 4 = Rally/Loiter — HSS ihlaline karşı en yakın Rally noktasına git ve çember at
+        self.__set_param(b'FENCE_TYPE',    7.0)    # Bit0(1)+Bit1(2)+Bit2(4) = Altitude+Circle+Polygon çitlerinin hepsi aktif
+        self.__set_param(b'FENCE_OPTIONS', 0.0)    # Bit0=0: fence ihlali sonrası pilot mod değiştirebilir
+        self.__set_param(b'FENCE_MARGIN',  5.0)    # Fence sınırına yaklaşma marjı (metre)
+        self.__set_param(b'FENCE_RET_RALLY', 1.0)  # 1 = Fence ihlalinde Home yerine Rally noktasına git
+        self.__set_param(b'RALLY_LIMIT_KM', 0.0)   # 0 = Tüm rally noktaları geçerli (mesafe limiti yok)
+        self.__set_param(b'RALLY_INCL_HOME', 1.0)  # 1 = Home noktasını Rally olarak sayar 
+        self.__set_param(b'MIS_RESTART',   0.0)    # AUTO'ya dönüşte kaldığı yerden devam et
+        self.__set_param(b'WP_LOITER_RAD', 60.0)   # Rally/loiter çember yarıçapı (metre)
+        
+        # --- İRTİFA SINIRLARI (ALTITUDE FENCE) PARAMETRELERİ ---
+        self.__set_param(b'FENCE_ALT_MAX', 150.0)   # Maksimum yükseklik sınırı (metre) - 120 veya 150 yapılabilir
+        #min irtifa test edilecek,gerekirse fbwa modunda fence enable = 0 yapılabilir.
+        self.__set_param(b'FENCE_ALT_MIN', 30.0)    # Minimum yükseklik sınırı (metre) - Yarışma taban limiti tahmini olarak(30m)
+
+        # HSS Optimizasyon (Aşama 0) Parametreleri
+        self.__set_param(b'WP_MAX_RADIUS', 0.0)    # Finish-line sorununu önler
+        self.__set_param(b'WP_RADIUS',     30.0)   # Hıza ve L1 mantığına uygun
+        self.__set_param(b'NAVL1_PERIOD',  14.0)   # Sık WP'leri yumuşak takip
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)
@@ -1524,6 +1704,9 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.worker_signals.change_autopilot.connect(self.change_autopilot)
         self.mavlink_worker.worker_signals.should_reposition_removed.connect(self.should_reposition_removed)
         self.mavlink_thread.started.connect(self.mavlink_worker.run, Qt.ConnectionType.DirectConnection)
+        self.mavlink_worker.mission_upload_success.connect(self._on_mission_upload_success)
+        self.mavlink_worker.mission_upload_failed.connect(self._on_mission_upload_failed)
+        self.mavlink_worker.mission_current_changed.connect(self._on_mission_current_changed)
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
         self.enableFeaturesAfterUAVConnected()
@@ -1617,13 +1800,15 @@ class MainWindow(QMainWindow):
             dialog.ui.invalid_input_error_label.show()
             return
         dialog.ui.invalid_input_error_label.hide()
-        if not is_it_direct_address:
-            self.server_connection.port = int(dialog.ui.server_port_input.text())
         self.server_connection.ip = dialog.ui.server_ip_input.text()
         if not ("://" in self.server_connection.ip):
             self.server_connection.ip = "http://"+self.server_connection.ip
         self.server_connection.username = dialog.ui.server_login_username_input.text()
         self.server_connection.password = dialog.ui.server_login_password_input.text()
+        if len(dialog.ui.server_port_input.text()) != 0:
+            self.server_connection.port = int(dialog.ui.server_port_input.text())
+        else:
+            self.server_connection.port = None
 
         try:
             dialog.ui.server_connection_text.setText(QCoreApplication.translate("ServerConfig", "Trying to connect to server :O", None))
@@ -1653,6 +1838,136 @@ class MainWindow(QMainWindow):
         self.server_connection.telemetry_thread.started.connect(self.server_connection.telemetry_timer.start, type=Qt.ConnectionType.DirectConnection)
         self.server_connection.telemetry_thread.finished.connect(self.server_connection.telemetry_timer.stop, type=Qt.ConnectionType.DirectConnection)
         self.server_connection.telemetry_thread.start()
+
+        # HSS otomatik polling başlat
+        self._start_hss_polling()
+
+    def _start_hss_polling(self) -> None:
+        """Sunucu bağlantısı kurulduğunda HSS polling worker'ı başlat."""
+        if self._hss_polling_worker is not None:
+            return  # Zaten çalışıyor
+        worker = HSSPollingWorker(self.server_connection.get_address())
+        thread = QThread(self)
+        thread.setObjectName("HSS Polling Thread")
+        worker.moveToThread(thread)
+        worker.hss_updated.connect(self._on_hss_updated)
+        worker.hss_error.connect(lambda msg: qDebug("[HSS] %s" % msg))
+        thread.started.connect(worker.run)
+        thread.finished.connect(worker.stop)
+        self._hss_polling_worker = worker
+        self._hss_polling_thread = thread
+        thread.start()
+        qDebug("[HSS] Polling started")
+
+    def _stop_hss_polling(self) -> None:
+        if self._hss_polling_thread is not None:
+            self._hss_polling_thread.quit()
+            self._hss_polling_thread.wait()
+        self._hss_polling_worker = None
+        self._hss_polling_thread = None
+        qDebug("[HSS] Polling stopped")
+
+    def _on_hss_updated(self, snapshot: HssSnapshot) -> None:
+        """Yeni HSS listesi geldiğinde tetiklenir (HSS polling thread'den sinyal)."""
+        # Out-of-order koruması
+        if self._current_snapshot is not None and snapshot.seq <= self._current_snapshot.seq:
+            qDebug("[HSS] Stale snapshot (seq=%d <= %d), skipping" % (snapshot.seq, self._current_snapshot.seq))
+            return
+            
+        self._current_snapshot = snapshot
+        zones = list(snapshot.zones)
+        
+        # 1. Haritayı güncelle (kırmızı HSS çemberleri)
+        self.ui.map_view.update_server_ads_data(zones)
+        # 2. Tampon bölge çemberlerini güncelle (turuncu)
+        self._update_buffer_zones(zones)
+        # 3. Birleştirilmiş HSS (sunucu + manuel) ile fence yükle
+        self._auto_upload_hss_fences(zones)
+        # 4. Rota yeniden hesapla
+        self._trigger_route_replanning()
+
+    def _update_buffer_zones(self, zones: list[ServerAdsData]) -> None:
+        """Tampon bölge çemberlerini haritada güncelle (turuncu, R_hss + R_turn)."""
+        model = self.ui.map_view.buffer_zone_data_model
+        model.m_datas.clear()
+        for hss in zones:
+            ads = AdsData()
+            ads.position = QGeoCoordinate(hss.lat, hss.lon)
+            ads.size = fence_radius_for_hss(hss.radius_m)  # R_hss + R_turn
+            ads.is_selected = False
+            model.m_datas.append(ads)
+        model.layoutChanged.emit()
+
+    def _auto_upload_hss_fences(self, zones: list[ServerAdsData]) -> None:
+        """HSS listesini exclusion circle olarak ArduPilot'a yükler (R_hss + FENCE_BUFFER_M)."""
+        if self.mavlink_connection is None:
+            return
+        ads_with_buffer: list[AdsData] = []
+        for hss in zones:
+            ads = AdsData()
+            ads.position = QGeoCoordinate(hss.lat, hss.lon)
+            ads.size = fence_radius_for_hss(hss.radius_m)
+            ads.is_selected = False
+            ads_with_buffer.append(ads)
+        # Mevcut user_ads (manuel HSS) ile birleştirip yükle
+        all_ads = ads_with_buffer + self.ui.map_view.user_ads_data_model.m_datas
+        self.update_geofence_data(all_ads)
+        # Fence yüklendi — hemen aktif et
+        self._enable_fence()
+        qDebug("[Fence] HSS fence yüklendi ve aktif edildi")
+
+    def _trigger_route_replanning(self) -> None:
+        """Mission + HSS verisi mevcutsa rota yeniden hesapla ve haritada göster."""
+        if not self._current_mission_waypoints:
+            return
+
+        server_zones: list[ServerAdsData] = list(self._current_snapshot.zones) if self._current_snapshot else []
+        manual_as_hss: list[ServerAdsData] = []
+        for ads in self.ui.map_view.user_ads_data_model.m_datas:
+            manual_as_hss.append(ServerAdsData(
+                id=-1,
+                lat=ads.position.latitude(),
+                lon=ads.position.longitude(),
+                radius_m=ads.size
+            ))
+        combined_hss: list = server_zones + manual_as_hss
+
+        if not combined_hss:
+            return
+
+        # Zone hash değişmediyse yeniden planlamaya gerek yok
+        current_hash = hash(tuple(combined_hss))
+        if self._last_planned_hash == current_hash:
+            return
+        self._last_planned_hash = current_hash
+
+        result = compute_safe_route(self._current_mission_waypoints, list(combined_hss))
+        # Yeşil alternatif rotayı haritada güncelle
+        avoidance_geopath = self.ui.map_view.avoidance_route_geopath
+        avoidance_geopath.clear()
+        for rp in result.corrected_waypoints:
+            coord = QGeoCoordinate(rp.lat, rp.lon)
+            coord.setAltitude(rp.alt)
+            avoidance_geopath.add_pos(coord)
+        avoidance_geopath.mission_geopath_changed.emit()
+
+        # Çakışma uyarıları
+        if result.has_conflicts:
+            self._create_warning(
+                "HSS çakışması tespit edildi! Bölgeler: %s" % result.conflict_zone_ids
+            )
+        if result.waypoints_inside_zone:
+            self._create_warning(
+                "KRİTİK: WP #%s HSS bölgesi içinde — operatör müdahalesi gerekiyor!"
+                % result.waypoints_inside_zone
+            )
+        qDebug("[RoutePreplanner] Corrected route: %d waypoints, conflicts: %s"
+               % (len(result.corrected_waypoints), result.conflict_zone_ids))
+
+        # Otomatik yükleme: çakışma varsa direkt ArduPilot'a gönder
+        if result.has_conflicts and self.mavlink_connection is not None:
+            qDebug("[RoutePreplanner] Çakışma var, düzeltilmiş rota otomatik yükleniyor!")
+            self._upload_corrected_route()
 
     def __update_plane_on_map_without_server(self):
         if self.mavlink_connection is None or self.server_connection.ip is not None:
@@ -1707,7 +2022,22 @@ class MainWindow(QMainWindow):
         if self.server_connection.ip is None:
             return
         self.server_connection.ip = None
+        self.server_connection.port = None
         qInfo("Disconnected from server")
+        
+        self._stop_hss_polling()
+        self._reset_hss_state()
+
+    def _reset_hss_state(self) -> None:
+        """Tüm HSS durumunu sıfırla — tek yerde, ileride yeni katman eklenince buraya eklenir."""
+        self._current_snapshot = None
+        # Harita katmanlarını temizle
+        self.ui.map_view.server_ads_data_model.m_datas.clear()
+        self.ui.map_view.server_ads_data_model.layoutChanged.emit()
+        self.ui.map_view.buffer_zone_data_model.m_datas.clear()
+        self.ui.map_view.buffer_zone_data_model.layoutChanged.emit()
+        self.ui.map_view.avoidance_route_geopath.clear()
+        self.ui.map_view.avoidance_route_geopath.mission_geopath_changed.emit()
 
     @staticmethod
     def is_ip_address_valid(ip_address: str, must_have_port: bool) -> bool:
@@ -1737,4 +2067,148 @@ class MainWindow(QMainWindow):
                     return False
             return True
         return False
+
+    def _upload_corrected_route(self) -> None:
+        """Yeşil kaçınma rotasını MAVLink mission protokolü ile Pixhawk'a yükler."""
+        if self.mavlink_connection is None:
+            self._create_warning("UAV bağlı değil, rota yüklenemiyor")
+            return
+
+        self.__set_param(b'TRIM_ARSPD_CM', 1500.0)
+        qDebug("[MissionUpload] HSS Kaçış manevrası için TRIM_ARSPD_CM 1500 olarak ayarlandı.")
+
+        if self.mavlink_worker._mission_upload_state > 0:
+            self._create_warning("Rota yükleme devam ediyor, lütfen bekleyin")
+            return
+
+        # Yeşil rotanın waypoint'lerini al
+        corrected_coords = []
+        geopath = self.ui.map_view.avoidance_route_geopath.mission_geopath_v
+        for i in range(geopath.size()):
+            corrected_coords.append(geopath.coordinateAt(i))
+
+        if not corrected_coords:
+            self._create_warning("Düzeltilmiş rota bulunamadı, önce görev indirin ve HSS verisinin gelmesini bekleyin")
+            return
+
+        # İrtifa doğrulama — Home (0) ve son nokta (muhtemel iniş) haricindeki sıfır veya negatif irtifaları engelle
+        for i, p in enumerate(corrected_coords):
+            if p.altitude() <= 0:
+                if i == 0 or i == len(corrected_coords) - 1:
+                    continue
+                self._create_warning("HATA: Rotada (WP %d) irtifası 0 olan nokta var, yükleme iptal!" % i)
+                qWarning("[MissionUpload] Altitude validation failed at WP %d" % i)
+                return
+
+        self.mavlink_worker._mission_upload_items = corrected_coords
+        self.mavlink_worker._start_mission_upload = True
+
+        qDebug("[MissionUpload] Delegated corrected route upload to worker thread: %d waypoints" % len(corrected_coords))
+        self._create_warning("Düzeltilmiş rota arka planda yükleniyor (%d waypoint)..." % len(corrected_coords))
+
+    def _on_mission_upload_success(self, count: int) -> None:
+        """MavlinkWorker arka planda rota yüklemeyi bitirdiğinde çağrılır."""
+        self._create_warning(f"Düzeltilmiş rota başarıyla yüklendi! ({count} waypoint)")
+        qDebug(f"[MissionUpload] SUCCESS for {count} waypoints")
+
+        # Havadayken yeni rotanın sıradaki waypoint'inden devam et
+        if self._is_airborne():
+            resume_seq = self._find_resume_seq()
+            if resume_seq > 0:
+                self.mavlink_connection.mav.mission_set_current_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    resume_seq
+                )
+                qDebug("[MissionUpload] Airborne! SET_CURRENT to seq=%d" % resume_seq)
+                self._create_warning("Havada rota güncellendi — WP %d'den devam ediliyor" % resume_seq)
+        else:
+            qDebug("[MissionUpload] On ground — mission starts from seq=0")
+
+        self._verify_uploaded_mission()
+
+    def _on_mission_upload_failed(self, reason: str) -> None:
+        self._create_warning(f"Rota yükleme başarısız: {reason}")
+        qWarning(f"[MissionUpload] FAILED: {reason}")
+
+    def _on_mission_current_changed(self, seq: int) -> None:
+        self._pixhawk_current_seq = seq
+
+    def _is_airborne(self) -> bool:
+        if self.mavlink_connection is None:
+            return False
+        armed = self.ui.arm_mode.currentIndex() == 1
+        self.next_telemetry.lock.lockForRead()
+        try:
+            alt = self.next_telemetry.iha_irtifa
+        finally:
+            self.next_telemetry.lock.unlock()
+        return armed and alt > 5.0
+
+    def _find_resume_seq(self) -> int:
+        """
+        Yeni rotada uçağın devam etmesi gereken waypoint seq numarasını bul.
+        Eski rotadaki current_seq'in karşılığını yeni rotada origin_idx üzerinden eşleştir.
+        """
+        old_seq = self._pixhawk_current_seq
+        if old_seq <= 0:
+            return 1  # Fallback: ilk waypoint'ten başla
+
+        # Yeni rotadaki corrected_waypoints bilgisinden origin_idx eşleştirmesi yap
+        geopath = self.ui.map_view.avoidance_route_geopath.mission_geopath_v
+        new_count = geopath.size()
+
+        # origin_idx bilgisi RoutePoint'te tutuluyor, ama geopath'te sadece koordinat var.
+        # En güvenli yaklaşım: eski rotadaki WP koordinatını yeni rotada bul
+        # ve o noktanın seq'ine veya ondan önceki bypass noktasının seq'ine SET_CURRENT yap.
+
+        # Eski rotadaki current_seq'in koordinatını al
+        if old_seq < len(self._current_mission_waypoints):
+            target_coord = self._current_mission_waypoints[old_seq]
+        else:
+            return 1  # Fallback
+
+        # Yeni rotada bu koordinatla eşleşen (veya ondan önceki bypass) noktayı bul
+        best_seq = 1
+        for i in range(new_count):
+            coord = geopath.coordinateAt(i)
+            dist = target_coord.distanceTo(coord)
+            if dist < 50.0:  # 50m içinde eşleşme — bypass noktaları bu WP'den önce
+                # Bu WP'den önceki ilk bypass noktasını bul
+                best_seq = max(1, i)
+                # Önceki noktalardan bypass olanları da dahil etmek için geriye git
+                while best_seq > 1:
+                    prev_coord = geopath.coordinateAt(best_seq - 1)
+                    prev_dist = target_coord.distanceTo(prev_coord)
+                    if prev_dist < target_coord.distanceTo(geopath.coordinateAt(0)):
+                        best_seq -= 1
+                    else:
+                        break
+                break
+
+        qDebug("[MissionUpload] Resume: old_seq=%d -> new_seq=%d" % (old_seq, best_seq))
+        return best_seq
+
+    def _verify_uploaded_mission(self) -> None:
+        """Upload sonrası görevi geri indirip waypoint sayısı + koordinat doğrulaması yapar."""
+        if self.mavlink_connection is None:
+            return
+        from pymavlink.dialects.v20.all import MAV_MISSION_TYPE_MISSION
+        self.mavlink_connection.mav.mission_request_list_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            MAV_MISSION_TYPE_MISSION
+        )
+        qDebug("[MissionUpload] Verification download requested")
+
+    def _on_manual_ads_changed(self) -> None:
+        """Manuel ADS ekleme/silme — fence güncelle + rotayı yeniden hesapla."""
+        # Tüm ADS (server + kullanıcı) ile fence güncelle
+        all_ads = (self.ui.map_view.server_ads_data_model.m_datas +
+                   self.ui.map_view.user_ads_data_model.m_datas)
+        self.update_geofence_data(all_ads)
+
+        self._last_planned_hash = None
+
+        self._trigger_route_replanning()
 

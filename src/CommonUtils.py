@@ -1,9 +1,12 @@
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 
 from PySide6.QtCore import QCoreApplication, QLocale
 from pymavlink.dialects.v20.all import MAVLink_battery_status_message, MAVLink_gps_raw_int_message, \
     MAVLink_attitude_message, MAVLink_vfr_hud_message, MAVLink_heartbeat_message, MAVLink_global_position_int_message, \
     MAVLink_system_time_message, MAVLink_fence_status_message
+
+from src.ServerConnection import ServerAdsData
 
 
 class KamikazeState(Enum):
@@ -153,3 +156,8 @@ class SupportedLanguages(Enum):
             if e.value[0] == i:
                 return e
         return None
+
+@dataclass(frozen=True, slots=True)
+class HssSnapshot:
+    seq: int
+    zones: list[ServerAdsData]

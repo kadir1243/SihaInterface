@@ -66,6 +66,15 @@ Item {
                 setPath(lines)
             }
         }
+        MapPolyline {
+            property var lines: avoidance_route_geopath.mission_geopath
+            id: avoidance_route_line
+            line.width: 4
+            line.color: '#B200CC44'
+            onLinesChanged: {
+                setPath(lines)
+            }
+        }
         MapItemView {
             model: plane_data_model
             delegate: MapQuickItem{
@@ -208,6 +217,20 @@ Item {
                 opacity: 0.5
                 radius: size
                 color: getColor()
+            }
+        }
+        MapItemView {
+            model: buffer_zone_data_model
+            delegate: MapCircle {
+                id: buffer_circle
+                property var position: model.position
+                property var size: model.size
+                center: position
+                opacity: 0.25
+                radius: size
+                color: '#FF8C00'
+                border.width: 2
+                border.color: '#FF6600'
             }
         }
     }
