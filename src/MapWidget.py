@@ -410,7 +410,7 @@ ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
 # Throttle ceiling (%) outside takeoff and kamikaze. The airframe has ~1.7
 # thrust-to-weight, so full power is only needed during the takeoff climb;
 # TKOFF_THR_MAX stays at 100 and covers that phase on its own.
-CRUISE_THR_MAX: float = 70.0
+CRUISE_THR_MAX: float = 60.0
 
 class GeofenceData(QObject):
     gc1_v: QGeoCoordinate = ZERO_GEO_COORDS

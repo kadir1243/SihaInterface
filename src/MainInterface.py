@@ -25,13 +25,14 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION, MAV_FRAME_GLOBAL_INT, \
     MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, MAVLINK_MSG_ID_MISSION_REQUEST_INT, MAV_MISSION_TYPE_FENCE, \
     MAVLINK_MSG_ID_MISSION_ACK, MAVLINK_MSG_ID_MISSION_REQUEST, MAV_FRAME_GLOBAL, MAVLINK_MSG_ID_BAD_DATA, \
-    MAVLINK_MSG_ID_COMMAND_ACK, MAV_CMD_DO_REPOSITION, MAV_RESULT_DENIED, \
+    MAVLINK_MSG_ID_COMMAND_ACK, MAV_CMD_DO_REPOSITION, MAV_RESULT_DENIED, PLANE_MODE_GUIDED, \
+    MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, \
     MAVLINK_MSG_ID_MISSION_COUNT, MAVLINK_MSG_ID_MISSION_ITEM_INT, MAVLink_mission_item_int_message, \
     MAV_MISSION_ACCEPTED, MAVLINK_MSG_ID_MISSION_ITEM, MAVLink_mission_item_message, MAV_MODE_FLAG_SAFETY_ARMED, \
     MAV_CMD_COMPONENT_ARM_DISARM, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
     MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION, MAV_RESULT_TEMPORARILY_REJECTED, MAV_CMD_DO_SET_MODE, \
     MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, \
-    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT
+    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT, MAV_TYPE_GCS
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -40,6 +41,7 @@ from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions
 from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData, CRUISE_THR_MAX
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
+import src.ServerConnection as server_api
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
     get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze, \
     SERVER_IS_UNREACHABLE_COUNTER, ServerAdsData
@@ -57,6 +59,163 @@ def to_degree(x: float) -> float:
 
 def clamp(val: float, minv: float, maxv: float):
     return max(minv, min(maxv, val))
+
+# Seconds of forced full power at the start of the takeoff run (TKOFF_THR_MAX_T,
+# which ArduPlane caps at 10). The takeoff stage itself keeps running until
+# TKOFF_ALT is reached; only after it ends does CRUISE_THR_MAX take over.
+TAKEOFF_FULL_THROTTLE_TIME: float = 10.0
+
+# --- Kamikaze run ----------------------------------------------------------
+# The whole run is flown in GUIDED: the autopilot keeps navigating itself, so
+# the heartbeat keeps reporting MAV_MODE_FLAG_AUTO_ENABLED and the run counts
+# as autonomous. Altitude the run-in is flown at, and the distance to the
+# target the dive is started from.
+#
+# The approach altitude is not free: the pull-out at the bottom of a DIVE_ANGLE
+# dive costs (V^2/(g*(n-1)))*(1-cos(DIVE_ANGLE)) of altitude on its own, which
+# is around 30 m at the ~35 m/s a zero-throttle 45 degree dive builds up. So
+# APPROACH_ALT has to clear MIN_ALT by that pull-out plus however much dive is
+# actually wanted in between.
+KAMIKAZE_APPROACH_ALT: float = 150.0
+# How far below APPROACH_ALT the dive is still allowed to start from. Diving
+# from lower means less altitude to spend and less time to rotate into the
+# angle, which is what makes a run started right after a previous one come out
+# shallower. Below this the run-in simply carries on: the destination is
+# recomputed from the current bearing to the QR point every
+# KAMIKAZE_TARGET_REFRESH, so overflying the target turns the vehicle around
+# for another pass while it keeps climbing. Set it large to dive from whatever
+# altitude is available instead of going around.
+KAMIKAZE_APPROACH_ALT_TOLERANCE: float = 15.0
+# Closest the dive may ever start to the QR point. The dive actually starts at
+# whichever is further out, this or the distance that puts the QR straight
+# ahead on the nose: in a DIVE_ANGLE descent the nose points at a spot
+# altitude/tan(DIVE_ANGLE) ahead, so at 45 degrees the dive has to start as far
+# out as the vehicle is high or the camera never looks at the QR code.
+KAMIKAZE_DIVE_START_DISTANCE: float = 150.0
+# The destination handed to GUIDED is put this far past the QR point, along the
+# line the vehicle is already running in on. ModeGuided always navigates with
+# update_loiter() -- set_guided_WP() clears auto_state.crosstrack, so ArduPlane
+# never uses straight waypoint navigation in GUIDED. L1's circle capture term
+# is Kx*(distance-radius) - Kv*closing_speed, which goes negative roughly 100 m
+# outside the loiter circle and banks the vehicle away from it. Aiming well
+# beyond the target keeps that term positive, which is what makes L1 fall back
+# to its capture law and fly a straight line through the QR point instead.
+KAMIKAZE_AIM_OVERSHOOT: float = 500.0
+# Dive angle, the lowest altitude the vehicle may reach at the bottom of the
+# pull-out, and the altitude the recovery climb has to reach before the run is
+# over.
+KAMIKAZE_DIVE_ANGLE: float = 45.0
+KAMIKAZE_MIN_ALT: float = 70.0
+KAMIKAZE_RECOVER_ALT: float = 100.0
+# The dive is broken off early enough that MIN_ALT is where the vehicle bottoms
+# out, not where it starts pulling: how much further it sinks after the
+# recovery is commanded, as a time at the current sink rate.
+#
+# This was a circular pull-out arc, V^2/(g*(n-1))*(1-cos(angle)), which at any
+# sane load factor predicts 20-30 m. Measured in flight it is nothing like
+# that: clamping the pitch floor to level at recovery makes the pull so tight
+# that a 22 m/s dive only sank about 3 m more, so the arc term is dropped and
+# what is left is the response delay. Tune it against the altitude the run
+# reports bottoming out at when it ends -- below MIN_ALT means raise this,
+# well above it means the dive is still being cut short.
+KAMIKAZE_PULLOUT_TIME: float = 0.25
+# Pitch floor (deg) during the recovery. The dive opens the floor to -45, and
+# leaving it there lets TECS keep the nose down through the pull-out and eat
+# altitude it does not need to. Clamping it at level makes the recovery as
+# tight as the airframe allows, which is what keeps MIN_ALT honest.
+KAMIKAZE_RECOVER_PITCH_MIN: float = 0.0
+# Altitude samples averaged for the sink rate the pull-out is predicted from
+# (the loop runs at KAMIKAZE_TICK_INTERVAL, so 6 samples is half a second).
+KAMIKAZE_SINK_SAMPLES: int = 6
+KAMIKAZE_TICK_INTERVAL: int = 100
+# Motor power (%) during the run-in, the dive and the recovery climb.
+KAMIKAZE_APPROACH_THR_MAX: float = 60.0
+KAMIKAZE_DIVE_THR_MAX: float = 0.0
+KAMIKAZE_RECOVER_THR_MAX: float = 90.0
+# Bank limit (deg) while diving. L1 gets very twitchy about bearing as the
+# target gets close, and a wing drop points the camera off the QR code, so the
+# dive is flown with barely enough roll authority to hold the line.
+KAMIKAZE_DIVE_ROLL_LIMIT: float = 15.0
+# GUIDED flies on TECS, and TECS ignores a target slope it considers outside
+# its own envelope. Three separate limits have to be opened or the dive comes
+# out shallow and unsteady:
+#  - TECS_SINK_MAX caps the demanded descent rate, which caps the dive angle at
+#    asin(SINK_MAX/V): 20 m/s at 40 m/s airspeed is only 30 degrees.
+#  - ARSPD_FBW_MAX makes TECS raise the nose to bleed speed once passed, and a
+#    zero-throttle 45 degree dive builds up to roughly 35 m/s.
+#  - TECS_SPDWEIGHT splits pitch between holding the altitude demand and
+#    controlling airspeed. With the throttle at 0 TECS has no other way to
+#    control speed, so it fights its own descent demand with the elevator and
+#    the dive oscillates. 0 puts pitch fully on the altitude demand.
+# The CRUISE_ values below are put back when the run ends and are the ArduPlane
+# defaults, so adjust them if the airframe is tuned differently.
+KAMIKAZE_TECS_SINK_MAX: float = 30.0
+KAMIKAZE_TECS_CLMB_MAX: float = 15.0
+KAMIKAZE_ARSPD_FBW_MAX: float = 38.0
+KAMIKAZE_TECS_SPDWEIGHT: float = 0.0
+CRUISE_TECS_SINK_MAX: float = 5.0
+CRUISE_TECS_CLMB_MAX: float = 5.0
+CRUISE_ARSPD_FBW_MAX: float = 22.0
+CRUISE_TECS_SPDWEIGHT: float = 1.0
+# GLIDE_SLOPE_MIN at 0 turns off the glide slope entirely: ArduPlane stops
+# spreading an altitude change over the distance to the destination and demands
+# it right away, leaving TECS_SINK_MAX as the only thing shaping the descent.
+# That is what lets the destination sit 500 m past the target without dragging
+# the dive shallow -- the angle comes from the sink rate, not from where the
+# destination happens to be. 15 is the ArduPlane default.
+KAMIKAZE_GLIDE_SLOPE_MIN: float = 0.0
+CRUISE_GLIDE_SLOPE_MIN: float = 15.0
+# Ground speed below which telemetry is not trusted to slave the sink rate to,
+# and how much the slaved value has to move before it is worth a parameter
+# write.
+KAMIKAZE_MIN_VALID_SPEED: float = 5.0
+KAMIKAZE_SINK_STEP: float = 0.5
+# TECS_SINK_MAX is a ceiling, not a demand: TECS lags it by its own time
+# constant and settles a few degrees shallow of whatever is asked for. So the
+# angle actually being flown is measured and the ceiling is asked for the
+# shortfall on top, which both pushes the nose over harder at the entry and
+# trims the settled dive onto DIVE_ANGLE. TRIM_MAX and GAIN keep it from
+# chasing its own measurement lag.
+KAMIKAZE_DIVE_TRIM_MAX: float = 12.0
+KAMIKAZE_DIVE_TRIM_GAIN: float = 0.8
+# TECS_TIME_CONST is what sets how long the vehicle takes to settle onto a new
+# descent rate, and a dive only lasts a few seconds -- at the 5 s default most
+# of the dive is spent rotating into the angle rather than holding it. 3 is the
+# bottom of the documented range.
+KAMIKAZE_TECS_TIME_CONST: float = 3.0
+CRUISE_TECS_TIME_CONST: float = 5.0
+# Extra distance the dive starts ahead of the nose-on point. Rotating from
+# level to DIVE_ANGLE takes a second or two, and during it the vehicle is
+# shallower than the line to the QR point, so the QR sits below the nose. This
+# spends the rotation before the QR comes onto the nose instead of during it.
+KAMIKAZE_DIVE_ROTATION_LEAD: float = 40.0
+# Pitch floor headroom (deg) below the dive angle. Pinning the floor at exactly
+# DIVE_ANGLE leaves nothing for establishing the dive: the nose has to go past
+# the flight path angle for a moment to get there, and without that margin the
+# vehicle only ever creeps up on the angle.
+KAMIKAZE_DIVE_PITCH_MARGIN: float = 15.0
+# Loiter radius sent with the guided target. It has to stay well below
+# KAMIKAZE_DIVE_START_DISTANCE, otherwise the vehicle starts turning onto its
+# loiter circle around the target before the dive triggers and enters it while
+# banked away.
+KAMIKAZE_LOITER_RADIUS: float = 50.0
+# How often the guided destination is repeated during the run-in, purely so a
+# dropped command still gets through. It must never be used while diving: every
+# DO_REPOSITION makes ArduPlane rebuild its glide slope from the vehicle's
+# current position, which snaps the altitude demand back up to where the
+# vehicle already is. Repeating it mid-dive turns a steady descent demand into
+# a sawtooth and the vehicle porpoises down instead of tracking the slope.
+KAMIKAZE_TARGET_REFRESH: int = 2000
+# The recovery climb is flown towards a point this far ahead of the vehicle so
+# it pulls up wings level instead of turning back towards the target. Same
+# reasoning as KAMIKAZE_AIM_OVERSHOOT: far enough that L1 never starts the
+# circle capture.
+KAMIKAZE_RECOVER_LEAD: float = 500.0
+# Never ask the vehicle to fly to a target below this (relative) altitude.
+KAMIKAZE_MIN_AIM_ALT: float = 5.0
+# Warn the operator if the dive starts this far off the target bearing: the
+# camera needs the nose pointed at the QR code.
+KAMIKAZE_MAX_DIVE_HEADING_ERROR: float = 45.0
 
 class MavlinkWorkerSignals(QObject):
     set_fly_mode = Signal(int)
@@ -568,6 +727,11 @@ class MainWindow(QMainWindow):
     _current_mission_waypoints: list = []
     _pixhawk_current_seq: int = 0
     _last_planned_hash = None
+    uav_is_armed: bool = False
+    _mode_change_cooldown: QTimer
+    _arm_change_cooldown: QTimer
+    _gcs_heartbeat_timer: QTimer
+    _kamikaze_target_cooldown: QTimer
 
     def __init__(self):
         QMainWindow.__init__(self)
@@ -585,9 +749,19 @@ class MainWindow(QMainWindow):
         self.kamikaze_target_lon = 0.0
         self.kamikaze_previous_mode = None
         self.kamikaze_timer = QTimer(self)
-        self.kamikaze_timer.setInterval(100)
+        self.kamikaze_timer.setInterval(KAMIKAZE_TICK_INTERVAL)
         self.kamikaze_timer.timeout.connect(self.__kamikaze_loop)
+        self.kamikaze_recover_heading = 0.0
+        self.kamikaze_alt_history = []
+        self.kamikaze_dive_sink_max = 0.0
+        self.kamikaze_lowest_alt = math.inf
+        self._kamikaze_climb_warned = False
+        self._kamikaze_target_cooldown = QTimer(self, singleShot=True, interval=KAMIKAZE_TARGET_REFRESH)
         self.waits_for_qr = False
+        self._mode_change_cooldown = QTimer(self, singleShot=True, interval=2000)
+        self._arm_change_cooldown = QTimer(self, singleShot=True, interval=2000)
+        self._gcs_heartbeat_timer = QTimer(self, interval=1000)
+        self._gcs_heartbeat_timer.timeout.connect(self.__send_gcs_heartbeat)
 
         self.current_pilot = MAV_AUTOPILOT_INVALID
 
@@ -1033,11 +1207,16 @@ class MainWindow(QMainWindow):
     def __refresh_ads(self):
         if not self.server_connection.ip:
             return
-        result = get_ads(self.server_connection.get_address())
-        if result is not None:
-            self.ui.map_view.update_server_ads_data(result)
+        try:
+            ads_list = get_ads(self.server_connection.get_address())
+        except Exception as e:
+            self._create_warning("Could not get HSS coordinates from server: %s" % e)
+            return
+        if ads_list is not None:
+            self.ui.map_view.update_server_ads_data(ads_list)
 
     def __setArmStatus(self, is_arm: int):
+        self._arm_change_cooldown.start()
         qDebug("Trying to send armed status: %s" % is_arm)
 
         self.mavlink_connection.mav.command_long_send(
@@ -1246,7 +1425,12 @@ class MainWindow(QMainWindow):
     kamikaze_target_lon: float
     kamikaze_previous_mode: int | None
     kamikaze_timer: QTimer
+    kamikaze_recover_heading: float
+    kamikaze_alt_history: list[float]
+    kamikaze_dive_sink_max: float
+    kamikaze_lowest_alt: float
     waits_for_qr: bool
+    kamikaze_qr_text: str
 
     def __set_param(self, name: bytes, value: float):
         if self.mavlink_connection is None:
@@ -1281,11 +1465,16 @@ class MainWindow(QMainWindow):
         self.next_telemetry.lock.lockForRead()
         self.kamikaze_start = self.next_telemetry.gps_saati
         self.kamikaze_original_alt = self.next_telemetry.iha_irtifa
+        current_lat: float = self.next_telemetry.iha_enlem
+        current_lon: float = self.next_telemetry.iha_boylam
         self.next_telemetry.lock.unlock()
         if self.kamikaze_original_alt <= 0:
             qWarning("No Valid UAV Info Found, Cancelling Kamikaze")
             return
-        if not self.ui.arm_mode.currentIndex() == 1:
+        if current_lat == 0 and current_lon == 0:
+            self._create_warning("No valid UAV position yet, refusing to start kamikaze")
+            return
+        if not self.uav_is_armed:
             self._create_warning("UAV is not armed, refusing to start kamikaze")
             return
         if self.kamikaze_original_alt < 80.0:
@@ -1299,16 +1488,58 @@ class MainWindow(QMainWindow):
         # Dive pitch limit -45deg and turn/roll limit 55deg. Set both the old
         # (centidegree: LIM_*) and new (degree: *_DEG) ArduPlane parameter names so
         # this works regardless of firmware version (4.1+ renamed these params).
-        # THR_MAX must be 100 here: FBWA clamps even RC-override throttle to it,
-        # and a still-active reposition may have left it at 60.
-        self.__set_param(b'THR_MAX', 100.0)
-        self.__set_param(b'PTCH_LIM_MIN_DEG', -45.0)
-        self.__set_param(b'LIM_PITCH_MIN', -4500.0)
+        # TECS_PITCH_MIN is the limit TECS itself uses in autothrottle modes and
+        # it overrides LIM_PITCH_MIN unless it is left at 0, so it has to be set
+        # too or GUIDED will never let the nose past its cruise limit.
+        # THR_MAX is set explicitly for the run-in because a still-active
+        # reposition or an earlier phase may have left it somewhere else.
+        dive_pitch_min: float = -(KAMIKAZE_DIVE_ANGLE + KAMIKAZE_DIVE_PITCH_MARGIN)
+        self.__set_param(b'THR_MAX', KAMIKAZE_APPROACH_THR_MAX)
+        self.__set_param(b'PTCH_LIM_MIN_DEG', dive_pitch_min)
+        self.__set_param(b'LIM_PITCH_MIN', dive_pitch_min * 100.0)
+        # TECS applies its own floor on top of LIM_PITCH_MIN and the tighter of
+        # the two wins, so both have to be opened or the dive never gets past
+        # the cruise limit.
+        self.__set_param(b'TECS_PITCH_MIN', dive_pitch_min)
         self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
         self.__set_param(b'LIM_ROLL_CD', 5500.0)
-        self.mavlink_connection.set_mode_apm(5)
+        self.__set_param(b'TECS_CLMB_MAX', KAMIKAZE_TECS_CLMB_MAX)
+        self.__set_param(b'ARSPD_FBW_MAX', KAMIKAZE_ARSPD_FBW_MAX)
+        self.__set_param(b'GLIDE_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN)
+
+        self.mavlink_connection.set_mode_apm(PLANE_MODE_GUIDED)
+        self._mode_change_cooldown.start()
+        self.kamikaze_alt_history.clear()
+        self.kamikaze_dive_sink_max = 0.0
+        aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
+        self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_APPROACH_ALT)
+        self._kamikaze_target_cooldown.start()
         self.waits_for_qr = True
+        self.kamikaze_qr_text = ""
         qDebug("Kamikaze Started")
+
+    def __send_guided_target(self, latitude: float, longitude: float, altitude: float):
+        # Points the GUIDED destination at a coordinate. The command carries
+        # MAV_DO_REPOSITION_FLAGS_CHANGE_MODE so it is accepted (and switches to
+        # GUIDED) even if the mode change was missed. Sent once per phase: see
+        # KAMIKAZE_TARGET_REFRESH for why it must not be repeated mid-dive.
+        if self.mavlink_connection is None:
+            return
+        self.mavlink_connection.mav.command_int_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            MAV_CMD_DO_REPOSITION,
+            0,
+            0,
+            -1.0,  # ground speed, -1 keeps the current one
+            MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
+            KAMIKAZE_LOITER_RADIUS,
+            float('nan'),  # yaw, NaN keeps the current one
+            int(latitude * 10 ** 7),
+            int(longitude * 10 ** 7),
+            max(KAMIKAZE_MIN_AIM_ALT, altitude)
+        )
 
     def __kamikaze_loop(self):
         if self.kamikaze_state == KamikazeState.IDLE:
@@ -1318,39 +1549,146 @@ class MainWindow(QMainWindow):
         current_lat: float = self.next_telemetry.iha_enlem
         current_lon: float = self.next_telemetry.iha_boylam
         current_alt: float = self.next_telemetry.iha_irtifa
-        current_pitch: float = self.next_telemetry.iha_dikilme
+        ground_speed: float = self.next_telemetry.iha_hiz
         self.next_telemetry.lock.unlock()
 
         if current_lat == 0 and current_lon == 0:
             return
 
         distance: float = MainWindow.__calculate_distance(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon)
-        roll_ch: int = self.__heading_error_to_roll_channel()
+        sink_rate: float = self.__update_sink_rate(current_alt)
 
         if self.kamikaze_state == KamikazeState.APPROACHING:
-            alt_error: float = 120.0 - current_alt
-            pitch_offset: int = int(alt_error * 5)
-            pitch_ch: int = 1500 + max(-200, min(200, pitch_offset))
-            self.__send_rc_override(roll_ch, pitch_ch, 1550)
-            if distance <= 105.0:
-                qDebug(f"Remaining Distance is {distance:.1f}m, entering dive state")
-                self.mavlink_connection.set_mode_apm(5)
-                self.kamikaze_state = KamikazeState.DIVING
+            # GUIDED flies the run-in and the climb by itself; the destination
+            # is only repeated slowly so a dropped command still gets through,
+            # and it is recomputed each time because the line it has to sit on
+            # is the one the vehicle is currently running in along.
+            if not self._kamikaze_target_cooldown.isActive():
+                aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
+                self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_APPROACH_ALT)
+                self._kamikaze_target_cooldown.start()
+            # Dive from wherever the QR point is on the nose plus the rotation
+            # lead, but never closer than the configured minimum.
+            dive_at: float = max(KAMIKAZE_DIVE_START_DISTANCE,
+                                 current_alt / math.tan(math.radians(KAMIKAZE_DIVE_ANGLE)) + KAMIKAZE_DIVE_ROTATION_LEAD)
+            if distance <= dive_at:
+                if current_alt < KAMIKAZE_APPROACH_ALT - KAMIKAZE_APPROACH_ALT_TOLERANCE:
+                    if not self._kamikaze_climb_warned:
+                        self._kamikaze_climb_warned = True
+                        self._create_warning("Only at %.0fm of the %.0fm dive altitude, going around"
+                                             % (current_alt, KAMIKAZE_APPROACH_ALT))
+                else:
+                    qDebug(f"Remaining Distance is {distance:.1f}m of {dive_at:.1f}m, entering dive state")
+                    self.__enter_dive(current_lat, current_lon, current_alt, distance, ground_speed, sink_rate)
 
         elif self.kamikaze_state == KamikazeState.DIVING:
-            self.__send_rc_override(1500, 1000, 1000)
-            if current_alt <= 70.0:
-                qDebug("Achieved target altitude, entering recovering state")
-                self.mavlink_connection.set_mode_apm(5)
-                self.kamikaze_state = KamikazeState.RECOVERING
+            # The destination is left alone here on purpose; the angle is held
+            # by the sink rate instead, which is a parameter write and does not
+            # disturb navigation. Break off early enough that the pull-out
+            # bottoms out at MIN_ALT instead of starting there.
+            self.__update_dive_sink_rate(ground_speed, sink_rate)
+            pullout_loss: float = MainWindow.__pullout_altitude_loss(sink_rate)
+            if current_alt - pullout_loss <= KAMIKAZE_MIN_ALT:
+                qDebug("Sink rate %.1fm/s at %.1fm needs %.1fm to pull out, entering recovering state"
+                       % (sink_rate, current_alt, pullout_loss))
+                self.__enter_recovery(current_lat, current_lon)
 
         elif self.kamikaze_state == KamikazeState.RECOVERING:
-            throttle_ch: int = 1950 if current_pitch > 0.0 else 1000
-            self.__send_rc_override(1500, 1900, throttle_ch)
-            if current_alt >= 100.0:
+            # The vehicle keeps sinking into the pull-out; this is the number
+            # KAMIKAZE_PULLOUT_TIME is meant to land on MIN_ALT.
+            self.kamikaze_lowest_alt = min(self.kamikaze_lowest_alt, current_alt)
+            if current_alt >= KAMIKAZE_RECOVER_ALT:
                 qDebug("Recovering complete, returning to last mode")
                 self.kamikaze_state = KamikazeState.RESUMING
                 self.__finish_kamikaze()
+
+    @staticmethod
+    def __pullout_altitude_loss(sink_rate: float) -> float:
+        # How much further the vehicle sinks between the recovery being
+        # commanded and it stopping going down. See KAMIKAZE_PULLOUT_TIME.
+        return sink_rate * KAMIKAZE_PULLOUT_TIME
+
+    def __update_sink_rate(self, current_alt: float) -> float:
+        # Averaged over the whole sample window rather than filtered, so it has
+        # no lag to speak of at the point the pull-out decision is made.
+        self.kamikaze_alt_history.append(current_alt)
+        if len(self.kamikaze_alt_history) > KAMIKAZE_SINK_SAMPLES:
+            self.kamikaze_alt_history.pop(0)
+        if len(self.kamikaze_alt_history) < 2:
+            return 0.0
+        elapsed: float = (len(self.kamikaze_alt_history) - 1) * KAMIKAZE_TICK_INTERVAL / 1000.0
+        return max(0.0, (self.kamikaze_alt_history[0] - self.kamikaze_alt_history[-1]) / elapsed)
+
+    def __kamikaze_aim_point(self, current_lat: float, current_lon: float) -> tuple[float, float]:
+        # The QR point pushed KAMIKAZE_AIM_OVERSHOOT further along the line the
+        # vehicle is running in on, so the straight line to the destination
+        # still passes exactly over the QR code while staying far enough away
+        # for L1 to keep flying it straight. See KAMIKAZE_AIM_OVERSHOOT.
+        bearing: float = math.degrees(MainWindow.__bearing_to(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon))
+        return MainWindow.__offset_coords(self.kamikaze_target_lat, self.kamikaze_target_lon, bearing, KAMIKAZE_AIM_OVERSHOOT)
+
+    def __update_dive_sink_rate(self, ground_speed: float, sink_rate: float):
+        # Sink rate and ground speed are the two legs of the dive angle:
+        # sink = ground_speed * tan(angle). TECS_SINK_MAX caps the descent TECS
+        # is willing to demand, so slaving it to the current ground speed holds
+        # the angle as the dive accelerates. A fixed cap cannot: it gives
+        # asin(cap/V), which flattens out as speed builds.
+        if ground_speed < KAMIKAZE_MIN_VALID_SPEED:
+            return
+        # Ask for the angle plus whatever the vehicle is currently flying short
+        # of it, so TECS's own lag lands on DIVE_ANGLE instead of under it.
+        flown: float = math.degrees(math.atan2(sink_rate, ground_speed))
+        trim: float = KAMIKAZE_DIVE_TRIM_GAIN * (KAMIKAZE_DIVE_ANGLE - flown)
+        commanded: float = KAMIKAZE_DIVE_ANGLE + clamp(trim, 0.0, KAMIKAZE_DIVE_TRIM_MAX)
+        wanted: float = min(KAMIKAZE_TECS_SINK_MAX, ground_speed * math.tan(math.radians(commanded)))
+        if abs(wanted - self.kamikaze_dive_sink_max) < KAMIKAZE_SINK_STEP:
+            return
+        self.kamikaze_dive_sink_max = wanted
+        self.__set_param(b'TECS_SINK_MAX', wanted)
+
+    def __enter_dive(self, current_lat: float, current_lon: float, current_alt: float, distance: float, ground_speed: float, sink_rate: float):
+        self.next_telemetry.lock.lockForRead()
+        yaw: float = self.next_telemetry.iha_yonelme
+        self.next_telemetry.lock.unlock()
+        bearing: float = math.degrees(MainWindow.__bearing_to(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon))
+        heading_error: float = abs((bearing - yaw + 180.0) % 360.0 - 180.0)
+        if heading_error > KAMIKAZE_MAX_DIVE_HEADING_ERROR:
+            self._create_warning("Dive starts %.0f degrees off the target bearing, QR may not be readable" % heading_error)
+        # Engine off, wings pinned, and pitch handed entirely to the altitude
+        # demand so TECS stops trading the descent against airspeed.
+        self.__set_param(b'THR_MAX', KAMIKAZE_DIVE_THR_MAX)
+        self.__set_param(b'TECS_SPDWEIGHT', KAMIKAZE_TECS_SPDWEIGHT)
+        self.__set_param(b'TECS_TIME_CONST', KAMIKAZE_TECS_TIME_CONST)
+        self.__set_param(b'ROLL_LIMIT_DEG', KAMIKAZE_DIVE_ROLL_LIMIT)
+        self.__set_param(b'LIM_ROLL_CD', KAMIKAZE_DIVE_ROLL_LIMIT * 100.0)
+        self.kamikaze_dive_sink_max = 0.0
+        self.kamikaze_lowest_alt = current_alt
+        self.__update_dive_sink_rate(ground_speed, sink_rate)
+        # One destination for the whole dive: down the same line, past the QR
+        # point, at ground level. With the glide slope off the vehicle stops
+        # rationing that altitude over the distance and just descends, which is
+        # what the sink rate above is there to shape.
+        aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
+        self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_MIN_AIM_ALT)
+        qDebug("Diving from %.1fm at %.1fm out, %.1fm/s ground speed" % (current_alt, distance, ground_speed))
+        self.kamikaze_state = KamikazeState.DIVING
+
+    def __enter_recovery(self, current_lat: float, current_lon: float):
+        self.next_telemetry.lock.lockForRead()
+        self.kamikaze_recover_heading = self.next_telemetry.iha_yonelme
+        self.next_telemetry.lock.unlock()
+        self.__set_param(b'THR_MAX', KAMIKAZE_RECOVER_THR_MAX)
+        self.__set_param(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)
+        self.__set_param(b'PTCH_LIM_MIN_DEG', KAMIKAZE_RECOVER_PITCH_MIN)
+        self.__set_param(b'LIM_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN * 100.0)
+        self.__set_param(b'TECS_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN)
+        # One destination again: straight ahead on the dive heading, high
+        # enough that the vehicle keeps climbing through RECOVER_ALT. Being
+        # below the destination is the case where ArduPlane climbs at its max
+        # rate instead of following a slope, which is what pulls the nose up.
+        lead_lat, lead_lon = MainWindow.__offset_coords(current_lat, current_lon, self.kamikaze_recover_heading, KAMIKAZE_RECOVER_LEAD)
+        self.__send_guided_target(lead_lat, lead_lon, KAMIKAZE_APPROACH_ALT)
+        self.kamikaze_state = KamikazeState.RECOVERING
 
     @staticmethod
     def __calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1372,60 +1710,69 @@ class MainWindow(QMainWindow):
         y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
         return math.atan2(x, y)
 
-    def __heading_error_to_roll_channel(self) -> int:
-        self.next_telemetry.lock.lockForRead()
-        enlem: float = self.next_telemetry.iha_enlem
-        boylam: float = self.next_telemetry.iha_boylam
-        yaw: float = self.next_telemetry.iha_yonelme
-        self.next_telemetry.lock.unlock()
-        bearing: float = MainWindow.__bearing_to(
-            enlem, boylam,
-            self.kamikaze_target_lat, self.kamikaze_target_lon
-        )
-        current_heading: float = math.radians(yaw)
-        heading_error: float = math.atan2(math.sin(bearing - current_heading), math.cos(bearing - current_heading))
-        steer: float = max(-1.0, min(1.0, heading_error * 0.8))
-        roll_ch: int = 1500 + int(steer * 500)
-        return max(1000, min(2000, roll_ch))
+    @staticmethod
+    def __offset_coords(latitude: float, longitude: float, heading: float, distance: float) -> tuple[float, float]:
+        R = 6371000
+        angular: float = distance / R
+        bearing: float = math.radians(heading)
+        phi1: float = math.radians(latitude)
+        lambda1: float = math.radians(longitude)
 
-    def __send_rc_override(self, roll_ch: int, pitch_ch: int, throttle_ch: int):
-        if self.mavlink_connection is None:
-            return
-        self.mavlink_connection.mav.rc_channels_override_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            roll_ch,
-            pitch_ch,
-            throttle_ch,
-            1500,
-            0, 0, 0, 0
+        phi2 = math.asin(math.sin(phi1) * math.cos(angular) + math.cos(phi1) * math.sin(angular) * math.cos(bearing))
+        lambda2 = lambda1 + math.atan2(
+            math.sin(bearing) * math.sin(angular) * math.cos(phi1),
+            math.cos(angular) - math.sin(phi1) * math.sin(phi2)
         )
+        return math.degrees(phi2), math.degrees(lambda2)
 
     def __finish_kamikaze(self):
         self.kamikaze_timer.stop()
         self.kamikaze_state = KamikazeState.IDLE
+        self._kamikaze_target_cooldown.stop()
         if self.mavlink_connection is not None:
-            self.mavlink_connection.mav.rc_channels_override_send(
-                self.mavlink_connection.target_system,
-                self.mavlink_connection.target_component,
-                0, 0, 0, 0, 0, 0, 0, 0
-            )
             self.__set_param(b'PTCH_LIM_MIN_DEG', -25.0)
             self.__set_param(b'LIM_PITCH_MIN', -2500.0)
+            self.__set_param(b'TECS_PITCH_MIN', 0.0)  # 0 hands the limit back to LIM_PITCH_MIN
             self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
             self.__set_param(b'LIM_ROLL_CD', 5500.0)
-            # Kamikaze start raised THR_MAX to 100 for the recovery burst;
-            # bring the cruise ceiling back once the run is over.
+            # The run opened up the TECS envelope so the dive could be flown in
+            # GUIDED; close it back down to the cruise values.
+            self.__set_param(b'TECS_SINK_MAX', CRUISE_TECS_SINK_MAX)
+            self.__set_param(b'TECS_CLMB_MAX', CRUISE_TECS_CLMB_MAX)
+            self.__set_param(b'ARSPD_FBW_MAX', CRUISE_ARSPD_FBW_MAX)
+            self.__set_param(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)
+            self.__set_param(b'TECS_TIME_CONST', CRUISE_TECS_TIME_CONST)
+            self.__set_param(b'GLIDE_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN)
+            # Every phase of the run drove THR_MAX itself; bring the cruise
+            # ceiling back once it is over.
             self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
         if self.kamikaze_previous_mode is not None and self.kamikaze_previous_mode >= 0 and self.mavlink_connection is not None:
             self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
+            self._mode_change_cooldown.start()
         if self.server_connection.ip is not None:
-            self.on_kamikaze_end("")
+            self.on_kamikaze_end(self.kamikaze_qr_text)
         self.waits_for_qr = False
+        # The one number KAMIKAZE_PULLOUT_TIME is tuned against, so it
+        # goes on the status bar rather than only into the log.
+        if self.kamikaze_lowest_alt < math.inf:
+            self._create_warning("Kamikaze bottomed out at %.0fm, %.0fm was asked for"
+                                 % (self.kamikaze_lowest_alt, KAMIKAZE_MIN_ALT))
+        self.kamikaze_lowest_alt = math.inf
+        self._kamikaze_climb_warned = False
         qDebug("Kamikaze Completed")
 
     def on_qr_found(self, qr_text: str):
+        if not self.waits_for_qr:
+            return
         self.waits_for_qr = False
+        self.kamikaze_qr_text = qr_text
+        if self.kamikaze_state == KamikazeState.DIVING and self.mavlink_connection is not None:
+            qDebug("QR found during dive, switching to recovery")
+            self.next_telemetry.lock.lockForRead()
+            current_lat: float = self.next_telemetry.iha_enlem
+            current_lon: float = self.next_telemetry.iha_boylam
+            self.next_telemetry.lock.unlock()
+            self.__enter_recovery(current_lat, current_lon)
 
     def on_kamikaze_end(self, qr_text: str) -> None:
         self.next_telemetry.lock.lockForRead()
@@ -1451,10 +1798,16 @@ class MainWindow(QMainWindow):
             self.__finish_kamikaze()
         else:
             self.mavlink_connection.set_mode_apm(10)
+            self._mode_change_cooldown.start()
+            self.next_telemetry.lock.lockForWrite()
+            self.next_telemetry.iha_otonom = 1
+            self.next_telemetry.lock.unlock()
         self._create_warning("Task force-ended, returning to AUTO mission")
 
     def __get_kamikaze_coords(self):
         if self.server_connection.ip is None:
+            self.ui.kamikaze_latitude.setText("39.90448632092518")
+            self.ui.kamikaze_longitude.setText("41.23701348598452")
             return
         try:
             qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.get_address())
@@ -1464,10 +1817,20 @@ class MainWindow(QMainWindow):
         if qr_coords is None:
             self._create_warning("Could not get kamikaze coords from server")
             return
-        self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
         self.ui.kamikaze_latitude.setText(str(qr_coords.qrEnlem))
+        self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
 
     def _change_index(self, index: int):
+        self._mode_change_cooldown.start()
+        if self.kamikaze_state != KamikazeState.IDLE:
+            # Only reached when the operator picks a mode by hand. The run has
+            # to be called off here, otherwise it would drag the vehicle back
+            # into GUIDED with its next destination update. The mode itself is
+            # sent below, so the run must not restore the old one on its way
+            # out.
+            qDebug("Flight mode changed by hand, cancelling kamikaze")
+            self.kamikaze_previous_mode = None
+            self.__finish_kamikaze()
         if self.current_pilot == MAV_AUTOPILOT_PX4:
             base_mode = index_to_px4_uav_mode[index].value[2]
             sub_mode = index_to_px4_uav_mode[index].value[3]
@@ -1477,6 +1840,9 @@ class MainWindow(QMainWindow):
             qDebug("Sending mode with index: %s" % index)
 
             self.mavlink_connection.set_mode_apm(index)
+            self.next_telemetry.lock.lockForWrite()
+            self.next_telemetry.iha_otonom = 1 if index == 10 else 0
+            self.next_telemetry.lock.unlock()
 
     def add_to_watch_list(self, e: TrackableDataEnum):
         if not TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].isEnabled():
@@ -1659,8 +2025,12 @@ class MainWindow(QMainWindow):
         self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
         self.__set_param(b'LIM_ROLL_CD', 5500.0)
         # Full power only while the NAV_TAKEOFF item is active; TECS is capped
-        # at CRUISE_THR_MAX for the rest of the flight.
+        # at CRUISE_THR_MAX for the rest of the flight. TKOFF_THR_MAX_T is how
+        # long full power is actually forced at the start of the takeoff run
+        # (only used when there is no airspeed sensor; with one, full power is
+        # held until the takeoff airspeed is reached instead).
         self.__set_param(b'TKOFF_THR_MAX', 100.0)
+        self.__set_param(b'TKOFF_THR_MAX_T', TAKEOFF_FULL_THROTTLE_TIME)
         self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
         self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
         self.__set_param(b'LIM_ROLL_CD', 4500.0)
@@ -1723,17 +2093,31 @@ class MainWindow(QMainWindow):
                 self.ui.map_view.mouse_input_handler._set_roll_limit(55.0)
 
     def set_arm_mode(self, index: int):
-        if self.ui.arm_mode.currentIndex() != index:
+        self.uav_is_armed = bool(index)
+        if not self._arm_change_cooldown.isActive() and self.ui.arm_mode.currentIndex() != index:
+            self.ui.arm_mode.blockSignals(True)
             self.ui.arm_mode.setCurrentIndex(index)
+            self.ui.arm_mode.blockSignals(False)
 
     def set_fly_mode(self, index: int):
-        if self.ui.fly_mode_combobox.currentIndex() != index:
+        if not self._mode_change_cooldown.isActive() and self.ui.fly_mode_combobox.currentIndex() != index:
+            self.ui.fly_mode_combobox.blockSignals(True)
             self.ui.fly_mode_combobox.setCurrentIndex(index)
+            self.ui.fly_mode_combobox.blockSignals(False)
 
     def _update_time_with_mavlink(self):
         time_ns = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() * 1000000
         time_ns += 1234 # Copied from mavproxy
         self.mavlink_connection.mav.timesync_send(0, time_ns)
+
+    def __send_gcs_heartbeat(self) -> None:
+        if self.mavlink_connection is None:
+            return
+        self.mavlink_connection.mav.heartbeat_send(
+            MAV_TYPE_GCS,
+            MAV_AUTOPILOT_INVALID,
+            0, 0, 0
+        )
 
     def _apply_watch_update(self, row: int, value: str):
         self.ui.watch_list.setItem(row, 3, QTableWidgetItem(value))
@@ -1746,6 +2130,7 @@ class MainWindow(QMainWindow):
         self.ui.arm_mode.setEnabled(True)
         self.ui.fly_mode_combobox.setEnabled(True)
         self.ui.device_connection_warning.hide()
+        self._gcs_heartbeat_timer.start()
         if self.server_connection.ip is None:
             self.plane_on_map_update_timer.start()
 
@@ -1753,6 +2138,7 @@ class MainWindow(QMainWindow):
         self.ui.arm_mode.setEnabled(False)
         self.ui.fly_mode_combobox.setEnabled(False)
         self.ui.device_connection_warning.show()
+        self._gcs_heartbeat_timer.stop()
         if self.plane_on_map_update_timer.isActive():
             self.plane_on_map_update_timer.stop()
 
@@ -1779,6 +2165,7 @@ class MainWindow(QMainWindow):
         self.ui.map_view.mavlink_connection = None
         self.uav_connection.reset_connection_properties()
         self.disableFeaturesAfterUAVDisconnected()
+        self.uav_is_armed = False
         self.next_telemetry = TelemetryData()
         self.resetWatcherWidgetValues()
         self.ui.fly_mode_combobox.setCurrentIndex(-1)
@@ -1984,9 +2371,8 @@ class MainWindow(QMainWindow):
         if self.mavlink_connection is None:
             qDebug("UAV not connected")
             return
-        global SERVER_IS_UNREACHABLE_COUNTER
-        if SERVER_IS_UNREACHABLE_COUNTER > 100:
-            SERVER_IS_UNREACHABLE_COUNTER = 0
+        if server_api.SERVER_IS_UNREACHABLE_COUNTER > 100:
+            server_api.SERVER_IS_UNREACHABLE_COUNTER = 0
             qWarning("Server connection is not possible for 100 time, disconnecting")
             self._server_disconnect()
             return
