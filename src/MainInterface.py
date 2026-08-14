@@ -13,7 +13,7 @@ from src.CommonUtils import TrackableDataPacketTimer, main_and_sub_mode_to_px4_u
 os.environ['MAVLINK20'] = '1'
 
 from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, QLocale, \
-    QTranslator, QCoreApplication, QRegularExpression
+    QTranslator, QCoreApplication, QRegularExpression, QRunnable, QThreadPool
 from PySide6.QtGui import QAction, QDoubleValidator, Qt
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
@@ -32,13 +32,14 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAV_CMD_COMPONENT_ARM_DISARM, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
     MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION, MAV_RESULT_TEMPORARILY_REJECTED, MAV_CMD_DO_SET_MODE, \
     MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, \
-    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT, MAV_TYPE_GCS
+    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT, MAV_TYPE_GCS, \
+    MAVLINK_MSG_ID_PARAM_VALUE
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
 from src.CameraServerConnectionInterface import CameraServerConnectionInterface
 from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions
-from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData, CRUISE_THR_MAX
+from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData, CRUISE_THR_MAX, CRUISE_ROLL_LIMIT
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 import src.ServerConnection as server_api
@@ -49,7 +50,8 @@ from src.ServerConnectionInterface import ServerConnectionInterface
 from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
 from src.HSSPollingWorker import HSSPollingWorker
-from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss
+from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss, point_hits_zone, segment_hits_zone, \
+    CRUISE_SPEED_MS, RoutePlanResult
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -65,6 +67,72 @@ def clamp(val: float, minv: float, maxv: float):
 # TKOFF_ALT is reached; only after it ends does CRUISE_THR_MAX take over.
 TAKEOFF_FULL_THROTTLE_TIME: float = 10.0
 
+# --- HSS güvenlik ağı (geofence) -------------------------------------------
+# Bunlar HSS katmanının malı ve HER ZAMAN yürürlükte: kamikaze koşusu bunları
+# devralmaz, bunların İÇİNE sığacak şekilde planlanır (bkz. KAMIKAZE_APPROACH_ALT).
+# Böylece güvenlik ağı en riskli fazda bile kapanmıyor.
+#
+# FENCE_TYPE bitleri: 1=AltMax, 2=Home merkezli daire (FENCE_RADIUS), 4=Polygon,
+# 8=AltMin. Sunucudan gelen HSS bölgeleri exclusion CIRCLE olarak yükleniyor ve
+# bunlar poly-fence yükleyicisine, yani bit2'ye (4) bağlı -- bit1 (2) DEĞİL.
+# Bit1 hiç set edilmemiş FENCE_RADIUS'u (varsayılan 300 m) kullanan eski
+# home-daire çiti; açık kalırsa uçak home'dan 300 m uzaklaşınca ihlal verir.
+# Bu yüzden 7 değil 5.
+# AltMin biti (8) bilerek kapalı: kamikaze dalışı FENCE_ALT_MIN'in üstünde
+# bitiyor ama yerde/kalkışta çit etkinken anında ihlal üretirdi. Açılacaksa
+# FENCE_AUTOENABLE ile birlikte değerlendirilmeli.
+FENCE_TYPE_BITS: float = 5.0
+# ArduPlane'de geçerli FENCE_ACTION değerleri 0 (sadece rapor), 1 (RTL),
+# 6 (Guided), 7 (GuidedThrottlePass). Eskiden 4 yazılıyordu; 4 Copter'ın değeri,
+# Plane'de tanınmadığı için çit fiilen hiçbir şey yapmıyordu. İstenen davranış
+# ("en yakın rally noktasına git") FENCE_ACTION=1 + FENCE_RET_RALLY=1 ile olur.
+FENCE_ACTION_RTL: float = 1.0
+FENCE_ALT_MAX_M: float = 150.0   # Yarışma tavanı
+FENCE_ALT_MIN_M: float = 30.0    # Yarışma tabanı tahmini (bit kapalı, yukarı bak)
+FENCE_MARGIN_M: float = 5.0      # Çite yaklaşma marjı
+FENCE_LOITER_RADIUS_M: float = 60.0
+
+# --- Cruise / baseline zarfı -----------------------------------------------
+# "Araç normal, HSS'in planladığı hâlde" durumunun TEK tanımı BASELINE_PARAMS
+# tablosu (bu dosyanın altında). Zarfı açan her manevra (kamikaze, reposition)
+# onu apply_baseline_params() ile geri vermek zorunda; kendi literal'ini yazmak
+# yasak. Eskiden kamikaze bitişi roll limitini 55'e çekiyordu ve HSS'in 45'i
+# ilk koşudan sonra sessizce kayboluyordu -- tablo bunu yapısal olarak engelliyor.
+CRUISE_PITCH_MIN: float = -25.0
+# Araca yazılan seyir hava hızı. Eskiden bunun tek tanımı yoktu: rota yüklemesi
+# 15 m/s yazıp bir daha geri koymuyordu, bağlantı bloğu ise hiç yazmıyordu.
+#
+# Rota planlayıcının varsaydığı hızdan (RoutePreplanner.CRUISE_SPEED_MS = 20)
+# BİLEREK düşük. Planlayıcı tamponlarını 20 m/s hava hızı + 8 m/s rüzgâr = 28
+# m/s yer hızı üzerinden boyutluyor; daha yavaş uçmak dönüş yarıçapını
+# küçültüyor, yani planın tamponları fazladan güvenli tarafta kalıyor.
+# Değişmez kural: bu değer HER ZAMAN CRUISE_SPEED_MS'ten küçük veya eşit olmalı.
+# Büyütülürse plan gerçekten daha keskin dönen bir uçak varsayıyor demektir ve
+# HSS tamponları yetersiz kalır.
+#
+# Kamikaze açısından kritik: yaklaşma bu hızda uçuluyor, dalışa bu hızla
+# giriliyor. Bir ara 15 m/s denendi, gerekçe "yavaş giriş = daha düşük yer hızı
+# = aynı alçalma hızıyla daha dik açı" idi. Bu YANLIŞ çıktı: o ilişki oturmuş
+# dalış için geçerli, ama dalış TECS_TIME_CONST'tan kısa olduğu için hiç
+# oturmuyor. Belirleyici olan geçiş rejimi, yani burnun ne kadar hızlı aşağı
+# dönebildiği -- ve o da hava hızıyla artan elevator otoritesine bağlı. Yavaş
+# girmek dönüşü yavaşlattı ve açıyı 38'den 22'ye DÜŞÜRDÜ. Hız düşürülecekse
+# dalış süresi de uzatılmalı (irtifa bütçesi).
+CRUISE_AIRSPEED_MS: float = 20.0
+assert CRUISE_AIRSPEED_MS <= CRUISE_SPEED_MS, \
+    "Seyir hızı rota planlayıcının varsaydığı hızı aşamaz, HSS tamponları yetersiz kalır"
+# RoutePreplanner.compute_safe_route içindeki turn_dist hesabı bu değeri
+# varsayıyor; ikisi birlikte değişmeli.
+CRUISE_NAVL1_PERIOD: float = 14.0
+
+# --- Parametre yazma güvenilirliği -----------------------------------------
+# param_set_send tek yönlü; paket düşerse araç eski değerde kalır ve arayüz
+# bunu göremez. Kritik yazılar PARAM_VALUE ile teyit edilip, gelmezse
+# tekrarlanıyor. Kurtarmadaki THR_MAX yazısının düşmesi motorsuz tırmanış
+# demek olduğu için bu isteğe bağlı bir iyileştirme değil.
+PARAM_ACK_TIMEOUT: int = 700       # ms
+PARAM_MAX_ATTEMPTS: int = 4
+
 # --- Kamikaze run ----------------------------------------------------------
 # The whole run is flown in GUIDED: the autopilot keeps navigating itself, so
 # the heartbeat keeps reporting MAV_MODE_FLAG_AUTO_ENABLED and the run counts
@@ -76,7 +144,15 @@ TAKEOFF_FULL_THROTTLE_TIME: float = 10.0
 # is around 30 m at the ~35 m/s a zero-throttle 45 degree dive builds up. So
 # APPROACH_ALT has to clear MIN_ALT by that pull-out plus however much dive is
 # actually wanted in between.
-KAMIKAZE_APPROACH_ALT: float = 150.0
+#
+# It is also capped from above by the altitude fence, which is NOT suspended for
+# the run: the run-in and the recovery climb both level off at this altitude, so
+# it has to sit below FENCE_ALT_MAX by the fence margin plus enough room for
+# TECS to arrest the climb. It used to be exactly FENCE_ALT_MAX, which put the
+# whole run-in on the fence boundary and let a breach fight the 2 s
+# DO_REPOSITION refresh for control of the vehicle.
+KAMIKAZE_ALT_FENCE_HEADROOM: float = 20.0
+KAMIKAZE_APPROACH_ALT: float = FENCE_ALT_MAX_M - FENCE_MARGIN_M - KAMIKAZE_ALT_FENCE_HEADROOM
 # How far below APPROACH_ALT the dive is still allowed to start from. Diving
 # from lower means less altitude to spend and less time to rotate into the
 # angle, which is what makes a run started right after a previous one come out
@@ -118,20 +194,44 @@ KAMIKAZE_RECOVER_ALT: float = 100.0
 # what is left is the response delay. Tune it against the altitude the run
 # reports bottoming out at when it ends -- below MIN_ALT means raise this,
 # well above it means the dive is still being cut short.
-KAMIKAZE_PULLOUT_TIME: float = 0.25
+#
+# Ölçüm (2026-08-14): tetik 79.6 m'de, alçalma 14.9 m/s, örnek yaşı 0.44 s,
+# dip 67.0 m. Toplam kayıp 12.6 m = 0.85 s; yaş telafisi düşülünce aracın
+# gerçek tepki gecikmesi 0.41 s çıkıyor. Yaş artık ayrıca hesaba katıldığı
+# için bu sabit SADECE o gecikmeyi temsil ediyor.
+KAMIKAZE_PULLOUT_TIME: float = 0.40
+# Pull-out tahmininde kullanılan alçalma hızı, bu kadar saniyelik pencerenin
+# TEPESİ. Bkz. MainWindow.__recent_peak_sink.
+KAMIKAZE_PULLOUT_PEAK_WINDOW: float = 1.5
 # Pitch floor (deg) during the recovery. The dive opens the floor to -45, and
 # leaving it there lets TECS keep the nose down through the pull-out and eat
 # altitude it does not need to. Clamping it at level makes the recovery as
 # tight as the airframe allows, which is what keeps MIN_ALT honest.
 KAMIKAZE_RECOVER_PITCH_MIN: float = 0.0
-# Altitude samples averaged for the sink rate the pull-out is predicted from
-# (the loop runs at KAMIKAZE_TICK_INTERVAL, so 6 samples is half a second).
-KAMIKAZE_SINK_SAMPLES: int = 6
+# Time window (s) the sink rate is measured over. NOT a sample count: the loop
+# ticks at KAMIKAZE_TICK_INTERVAL but GLOBAL_POSITION_INT arrives far slower
+# (measured at ~2 Hz on a real link), so most ticks carry a repeat of the last
+# altitude. Counting repeats and dividing by the tick interval invents a rate --
+# it reported 0 between samples and a 17-27 m/s spike on the tick a new sample
+# landed, and the pull-out decision was being made off those spikes. Samples are
+# now timestamped and only distinct altitudes are recorded, so this window works
+# at any telemetry rate.
+KAMIKAZE_SINK_WINDOW: float = 0.6
 KAMIKAZE_TICK_INTERVAL: int = 100
 # Motor power (%) during the run-in, the dive and the recovery climb.
 KAMIKAZE_APPROACH_THR_MAX: float = 60.0
 KAMIKAZE_DIVE_THR_MAX: float = 0.0
 KAMIKAZE_RECOVER_THR_MAX: float = 90.0
+# Bank limit (deg) for the run-in. More than the planned-route baseline because
+# the run-in has to line up on the target bearing; released back to
+# CRUISE_ROLL_LIMIT at the end.
+KAMIKAZE_APPROACH_ROLL_LIMIT: float = 55.0
+# Bank limit (deg) for the recovery. The dive pins it at DIVE_ROLL_LIMIT, which
+# is too tight to steer around an HSS zone, but the run-in value is too loose
+# for the bottom of the pull-out: banking hard while already pulling g stacks
+# the load factor. This is enough to fly the largest heading offset
+# KAMIKAZE_RECOVER_HEADING_OFFSETS asks for and no more.
+KAMIKAZE_RECOVER_ROLL_LIMIT: float = 35.0
 # Bank limit (deg) while diving. L1 gets very twitchy about bearing as the
 # target gets close, and a wing drop points the camera off the QR code, so the
 # dive is flown with barely enough roll authority to hold the line.
@@ -149,7 +249,15 @@ KAMIKAZE_DIVE_ROLL_LIMIT: float = 15.0
 #    the dive oscillates. 0 puts pitch fully on the altitude demand.
 # The CRUISE_ values below are put back when the run ends and are the ArduPlane
 # defaults, so adjust them if the airframe is tuned differently.
-KAMIKAZE_TECS_SINK_MAX: float = 30.0
+#
+# SINK_MAX is deliberately set above anything the airframe will actually fly:
+# the achievable angle is atan(SINK_MAX/groundspeed), so a 30 m/s ceiling caps
+# the dive at 38 degrees once the groundspeed reaches 38 m/s -- which is exactly
+# what was measured. What really limits the descent is the pitch floor
+# (-(DIVE_ANGLE + DIVE_PITCH_MARGIN) = -60 deg) and drag, so this is left high
+# enough not to be the binding constraint and the angle is shaped by the trim
+# loop instead. Raise the pitch floor, not this, if the dive needs limiting.
+KAMIKAZE_TECS_SINK_MAX: float = 40.0
 KAMIKAZE_TECS_CLMB_MAX: float = 15.0
 KAMIKAZE_ARSPD_FBW_MAX: float = 38.0
 KAMIKAZE_TECS_SPDWEIGHT: float = 0.0
@@ -157,33 +265,70 @@ CRUISE_TECS_SINK_MAX: float = 5.0
 CRUISE_TECS_CLMB_MAX: float = 5.0
 CRUISE_ARSPD_FBW_MAX: float = 22.0
 CRUISE_TECS_SPDWEIGHT: float = 1.0
-# GLIDE_SLOPE_MIN at 0 turns off the glide slope entirely: ArduPlane stops
-# spreading an altitude change over the distance to the destination and demands
-# it right away, leaving TECS_SINK_MAX as the only thing shaping the descent.
-# That is what lets the destination sit 500 m past the target without dragging
-# the dive shallow -- the angle comes from the sink rate, not from where the
-# destination happens to be. 15 is the ArduPlane default.
+# ALT_SLOPE_MIN (older firmware: GLIDE_SLOPE_MIN) at 0 turns off the altitude
+# slope entirely: ArduPlane stops spreading an altitude change over the distance
+# to the destination and demands it right away, leaving TECS_SINK_MAX as the
+# only thing shaping the descent. That is what lets the destination sit 500 m
+# past the target without dragging the dive shallow -- the angle comes from the
+# sink rate, not from where the destination happens to be. 15 is the default.
+#
+# This write was silently failing until the rename was found. With the slope
+# left active the demanded altitude followed a ~10 degree ramp to a destination
+# 665 m away, so every metre the dive gained on that ramp put the vehicle BELOW
+# its own altitude target and TECS pushed back -- which is the most likely
+# reason the dive settled at 38 degrees while being asked for 24 m/s of sink
+# and only delivering 15.
 KAMIKAZE_GLIDE_SLOPE_MIN: float = 0.0
 CRUISE_GLIDE_SLOPE_MIN: float = 15.0
 # Ground speed below which telemetry is not trusted to slave the sink rate to,
 # and how much the slaved value has to move before it is worth a parameter
 # write.
 KAMIKAZE_MIN_VALID_SPEED: float = 5.0
-KAMIKAZE_SINK_STEP: float = 0.5
+# 0.5 iken talep ölçüm gürültüsünü kovalıyordu: ölçülen açı yarım saniyede bir
+# ±3 derece oynadığı için talep 24 ile 31 m/s arasında gidip geliyor ve her
+# seferinde bir parametre yazısı üretiyordu. TECS'in zaman sabiti 3 s, yani bu
+# salınımı zaten alçak geçiriyor -- tek etkisi boşuna telsiz trafiği.
+KAMIKAZE_SINK_STEP: float = 2.0
 # TECS_SINK_MAX is a ceiling, not a demand: TECS lags it by its own time
 # constant and settles a few degrees shallow of whatever is asked for. So the
 # angle actually being flown is measured and the ceiling is asked for the
 # shortfall on top, which both pushes the nose over harder at the entry and
-# trims the settled dive onto DIVE_ANGLE. TRIM_MAX and GAIN keep it from
-# chasing its own measurement lag.
-KAMIKAZE_DIVE_TRIM_MAX: float = 12.0
-KAMIKAZE_DIVE_TRIM_GAIN: float = 0.8
+# trims the settled dive onto DIVE_ANGLE.
+#
+# These are sized against the WORST case, which is the shortest dive: the dive
+# ends on altitude, not on distance, so the altitude budget
+# (APPROACH_ALT - MIN_ALT) decides how long it lasts. At the current 55 m budget
+# that is roughly 2.5 s -- LESS than TECS_TIME_CONST below, so the vehicle never
+# reaches its settled angle and what gets flown is the rotation transient. That
+# is what put the measured angle at 38 instead of 45. The trim therefore has to
+# be aggressive enough to win inside one time constant.
+#
+# The trim is clamped to [0, TRIM_MAX], i.e. it can only ever ask for MORE than
+# DIVE_ANGLE, never less: once the flown angle passes DIVE_ANGLE the term goes
+# to zero and the demand falls back to exactly DIVE_ANGLE. So overshooting the
+# gain costs a slightly abrupt entry, not a runaway.
+#
+# TRIM_MAX must stay equal to KAMIKAZE_DIVE_PITCH_MARGIN (asserted below): the
+# steepest flight path the trim may demand is DIVE_ANGLE + TRIM_MAX, and the
+# steepest the vehicle is allowed to fly is the pitch floor,
+# -(DIVE_ANGLE + DIVE_PITCH_MARGIN). Demanding past the floor only saturates
+# the elevator and winds TECS up against a limit it can never reach.
+KAMIKAZE_DIVE_TRIM_MAX: float = 15.0
+KAMIKAZE_DIVE_TRIM_GAIN: float = 1.2
 # TECS_TIME_CONST is what sets how long the vehicle takes to settle onto a new
 # descent rate, and a dive only lasts a few seconds -- at the 5 s default most
 # of the dive is spent rotating into the angle rather than holding it. 3 is the
 # bottom of the documented range.
 KAMIKAZE_TECS_TIME_CONST: float = 3.0
 CRUISE_TECS_TIME_CONST: float = 5.0
+# TECS_VERT_ACC, yükseklik/hız hatasını düzeltirken kullanılabilecek azami
+# düşey ivme. Varsayılan 7 m/s²; talep 5'ten 40'a sıçradığında burnun aşağı
+# dönmesi bu ivmeyle sınırlanıyor ve ölçümde dalışın ilk 1.4 saniyesi (toplam
+# sürenin %24'ü) alçalma hızı 1.5 m/s'nin altında geçti. 10, parametrenin
+# belgelenmiş üst sınırı. Kısa bir dalışta kazanılan her yarım saniye
+# doğrudan açıya gidiyor.
+KAMIKAZE_TECS_VERT_ACC: float = 10.0
+CRUISE_TECS_VERT_ACC: float = 7.0
 # Extra distance the dive starts ahead of the nose-on point. Rotating from
 # level to DIVE_ANGLE takes a second or two, and during it the vehicle is
 # shallower than the line to the QR point, so the QR sits below the nose. This
@@ -194,6 +339,9 @@ KAMIKAZE_DIVE_ROTATION_LEAD: float = 40.0
 # the flight path angle for a moment to get there, and without that margin the
 # vehicle only ever creeps up on the angle.
 KAMIKAZE_DIVE_PITCH_MARGIN: float = 15.0
+# Trim, uçağın uçmasına izin verilenden daha dik bir yol açısı isteyemez.
+assert KAMIKAZE_DIVE_TRIM_MAX <= KAMIKAZE_DIVE_PITCH_MARGIN, \
+    "Dalış trim'i pitch tabanının izin verdiğinden dik açı istiyor (TECS doyuma girer)"
 # Loiter radius sent with the guided target. It has to stay well below
 # KAMIKAZE_DIVE_START_DISTANCE, otherwise the vehicle starts turning onto its
 # loiter circle around the target before the dive triggers and enters it while
@@ -216,6 +364,124 @@ KAMIKAZE_MIN_AIM_ALT: float = 5.0
 # Warn the operator if the dive starts this far off the target bearing: the
 # camera needs the nose pointed at the QR code.
 KAMIKAZE_MAX_DIVE_HEADING_ERROR: float = 45.0
+# Hard ceiling (s) on a whole run, button press to release. The run-in has no
+# natural end of its own -- if the vehicle is too low to dive it recomputes the
+# destination and goes around, forever. While the run owns the vehicle the HSS
+# layer is frozen (no fence uploads, no replanning), so an unbounded run means
+# an unbounded blind spot. On expiry the run is cancelled and the vehicle is put
+# back into its baseline state.
+KAMIKAZE_MAX_RUN_TIME: float = 120.0
+# Candidate heading offsets (deg) and lead-distance fractions tried, in order,
+# when the straight-ahead recovery lead point falls inside an HSS zone.
+KAMIKAZE_RECOVER_HEADING_OFFSETS: tuple = (0.0, 25.0, -25.0, 50.0, -50.0)
+KAMIKAZE_RECOVER_LEAD_FRACTIONS: tuple = (1.0, 0.6, 0.35)
+
+# --- BASELINE: aracın "normal" durumunun tek tanımı ------------------------
+# Kamikaze veya reposition ne açtıysa buradan kapanır. Bir manevranın dokunduğu
+# HER parametre burada olmak zorunda; olmayan bir parametre, manevra bittikten
+# sonra araçta manevra değeriyle kalır (eski kodda TECS ailesi ve pitch tabanı
+# bağlantı koptuğunda tam olarak böyle kalıyordu).
+#
+# (kanonik_isim, [(mavlink_param, değer), ...]) — ikinci listedeki isimler
+# birbirinin alias'ı; ArduPlane 4.1+ eski centidegree isimlerini yeniden
+# adlandırdığı için ikisi de yazılıyor ve HERHANGİ BİRİNDEN gelen PARAM_VALUE
+# teyit sayılıyor (firmware'de olmayan alias asla cevap vermez).
+BASELINE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
+    ('THR_MAX',          [(b'THR_MAX', CRUISE_THR_MAX)]),
+    ('ROLL_LIMIT_DEG',   [(b'ROLL_LIMIT_DEG', CRUISE_ROLL_LIMIT),
+                          (b'LIM_ROLL_CD', CRUISE_ROLL_LIMIT * 100.0)]),
+    ('PTCH_LIM_MIN_DEG', [(b'PTCH_LIM_MIN_DEG', CRUISE_PITCH_MIN),
+                          (b'LIM_PITCH_MIN', CRUISE_PITCH_MIN * 100.0)]),
+    # 0 hands the pitch floor back to LIM_PITCH_MIN.
+    ('TECS_PITCH_MIN',   [(b'TECS_PITCH_MIN', 0.0)]),
+    ('TECS_SINK_MAX',    [(b'TECS_SINK_MAX', CRUISE_TECS_SINK_MAX)]),
+    ('TECS_CLMB_MAX',    [(b'TECS_CLMB_MAX', CRUISE_TECS_CLMB_MAX)]),
+    # ArduPlane 4.4 renamed the airspeed limits: ARSPD_FBW_MIN/MAX became
+    # AIRSPEED_MIN/MAX (same units, m/s), in the same rename as
+    # TRIM_ARSPD_CM -> AIRSPEED_CRUISE. Writing only the old name on 4.4+ fails
+    # silently, which is exactly what pinned the dive: the kamikaze run raises
+    # this limit so the dive can build speed, and with the write lost TECS held
+    # the nose up at the cruise limit and the dive stalled out at ~35 degrees.
+    ('ARSPD_FBW_MAX',    [(b'AIRSPEED_MAX', CRUISE_ARSPD_FBW_MAX),
+                          (b'ARSPD_FBW_MAX', CRUISE_ARSPD_FBW_MAX)]),
+    ('TECS_SPDWEIGHT',   [(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)]),
+    ('TECS_TIME_CONST',  [(b'TECS_TIME_CONST', CRUISE_TECS_TIME_CONST)]),
+    ('TECS_VERT_ACC',    [(b'TECS_VERT_ACC', CRUISE_TECS_VERT_ACC)]),
+    # Newer ArduPlane renamed GLIDE_SLOPE_MIN to ALT_SLOPE_MIN (and
+    # GLIDE_SLOPE_THR to ALT_SLOPE_MAXHGT). Same meaning, same units, same
+    # default of 15 m. Confirmed against the vehicle's own parameter list.
+    ('ALT_SLOPE_MIN',    [(b'ALT_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN),
+                          (b'GLIDE_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN)]),
+    # ArduPlane 4.4+ renamed TRIM_ARSPD_CM (cm/s) to AIRSPEED_CRUISE (m/s).
+    # NOTE the different units -- writing 1500 to AIRSPEED_CRUISE would command
+    # 1500 m/s. Old firmware ignores the new name and vice versa.
+    ('AIRSPEED_CRUISE',  [(b'AIRSPEED_CRUISE', CRUISE_AIRSPEED_MS),
+                          (b'TRIM_ARSPD_CM', CRUISE_AIRSPEED_MS * 100.0)]),
+    ('NAVL1_PERIOD',     [(b'NAVL1_PERIOD', CRUISE_NAVL1_PERIOD)]),
+]
+
+# HSS güvenlik ağı + rally + AUTO seyrüsefer parametreleri. Bunlar manevralarla
+# değişmediği için baseline'a dahil değil; bağlantı kurulduğunda bir kez yazılır.
+HSS_SAFETY_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
+    ('FENCE_ACTION',     [(b'FENCE_ACTION', FENCE_ACTION_RTL)]),
+    ('FENCE_TYPE',       [(b'FENCE_TYPE', FENCE_TYPE_BITS)]),
+    # Bit0=0: pilot/GCS fence ihlalinden sonra mod değiştirebilir. Kamikaze'nin
+    # dışarıdan gelen mod değişimine boyun eğmesi (set_fly_mode) buna bağlı.
+    ('FENCE_OPTIONS',    [(b'FENCE_OPTIONS', 0.0)]),
+    ('FENCE_MARGIN',     [(b'FENCE_MARGIN', FENCE_MARGIN_M)]),
+    ('FENCE_RET_RALLY',  [(b'FENCE_RET_RALLY', 1.0)]),
+    ('FENCE_ALT_MAX',    [(b'FENCE_ALT_MAX', FENCE_ALT_MAX_M)]),
+    ('FENCE_ALT_MIN',    [(b'FENCE_ALT_MIN', FENCE_ALT_MIN_M)]),
+    ('RALLY_LIMIT_KM',   [(b'RALLY_LIMIT_KM', 0.0)]),
+    ('RALLY_INCL_HOME',  [(b'RALLY_INCL_HOME', 1.0)]),
+    ('MIS_RESTART',      [(b'MIS_RESTART', 0.0)]),
+    ('WP_LOITER_RAD',    [(b'WP_LOITER_RAD', FENCE_LOITER_RADIUS_M)]),
+    ('WP_MAX_RADIUS',    [(b'WP_MAX_RADIUS', 0.0)]),
+    ('WP_RADIUS',        [(b'WP_RADIUS', 30.0)]),
+    ('TKOFF_THR_MAX',    [(b'TKOFF_THR_MAX', 100.0)]),
+    ('TKOFF_THR_MAX_T',  [(b'TKOFF_THR_MAX_T', TAKEOFF_FULL_THROTTLE_TIME)]),
+]
+
+class ParamOwner(Enum):
+    """Araç durumunun o anki sahibi. Bkz. MainWindow.__set_param."""
+    BASELINE = 0
+    KAMIKAZE = 1
+
+class RoutePlanSignals(QObject):
+    # (RoutePlanResult | None). Lives on the GUI thread, so the connection from
+    # the pool thread is automatically queued. Tipi object: hash değerleri 64
+    # bit olabiliyor ve Qt'nin int'i 32 bit.
+    finished = Signal(object, object)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+
+class RoutePlanTask(QRunnable):
+    """
+    compute_safe_route'u havuz thread'inde çalıştırır.
+
+    Bu iş eskiden GUI thread'inde, HSS sinyalinin içinde senkron çalışıyordu.
+    Görünürlük grafiği bölge sayısına göre karesel büyüdüğü için kalabalık bir
+    HSS listesi GUI thread'ini saniyelerce kilitleyebiliyordu -- ve kamikaze'nin
+    dalışı kesme kararı da (kamikaze_timer) aynı thread'de. Bir dalış sırasında
+    o kilitlenme doğrudan yere çakılma demekti.
+    """
+    def __init__(self, waypoints: list, zones: list, plan_hash: int, signals: RoutePlanSignals):
+        super().__init__()
+        self._waypoints = waypoints
+        self._zones = zones
+        self._plan_hash = plan_hash
+        self._signals = signals
+
+    def run(self):
+        result = None
+        try:
+            result = compute_safe_route(self._waypoints, self._zones)
+        except Exception as e:
+            qWarning("[RoutePreplanner] Rota hesabı başarısız: %s" % e)
+        # Hata durumunda da sinyal atılıyor: atılmazsa _plan_in_flight sonsuza
+        # kadar açık kalır ve bir daha hiç rota planlanmaz.
+        self._signals.finished.emit(result, self._plan_hash)
 
 class MavlinkWorkerSignals(QObject):
     set_fly_mode = Signal(int)
@@ -396,6 +662,7 @@ class MavlinkWorker(QObject):
     mission_upload_success = Signal(int)  # count
     mission_upload_failed = Signal(str)
     mission_current_changed = Signal(int)
+    param_value_received = Signal(str, float)
     remove_reposition_location = Signal()
     worker_signals: MavlinkWorkerSignals
     _mission_last_activity_time: float
@@ -631,6 +898,13 @@ class MavlinkWorker(QObject):
                     qDebug("CommandACK received for command %s and result %s" % (command, result))
             elif msgID == MAVLINK_MSG_ID_MISSION_CURRENT:
                 self.mission_current_changed.emit(packet.seq)
+            elif msgID == MAVLINK_MSG_ID_PARAM_VALUE:
+                # ArduPilot her PARAM_SET'e PARAM_VALUE ile cevap verir; bu
+                # MainWindow'daki bekleyen yazıların teyidi (bkz. __set_param).
+                param_id = packet.param_id
+                if isinstance(param_id, bytes):
+                    param_id = param_id.decode('ascii', 'replace')
+                self.param_value_received.emit(param_id.rstrip('\x00'), float(packet.param_value))
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
                 e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
                 data_enum_values = e.value[4]
@@ -727,6 +1001,18 @@ class MainWindow(QMainWindow):
     _current_mission_waypoints: list = []
     _pixhawk_current_seq: int = 0
     _last_planned_hash = None
+    # Kamikaze koşusu aracın sahibiyken gelen HSS anlık görüntüsü buraya
+    # bırakılır ve koşu biter bitmez uygulanır. Bkz. _on_hss_updated.
+    _deferred_snapshot: HssSnapshot | None = None
+    _deferred_manual_ads: bool = False
+    _plan_in_flight: bool = False
+    _fence_upload_retries: int = 0
+    # Doğrulama amaçlı görev indirmesi rota planlamasını yeniden tetiklemesin.
+    _awaiting_mission_verification: bool = False
+    _param_pending: dict
+    _param_retry_timer: QTimer
+    _route_plan_signals: RoutePlanSignals
+    _kamikaze_run_started_at: float = 0.0
     uav_is_armed: bool = False
     _mode_change_cooldown: QTimer
     _arm_change_cooldown: QTimer
@@ -755,9 +1041,20 @@ class MainWindow(QMainWindow):
         self.kamikaze_alt_history = []
         self.kamikaze_dive_sink_max = 0.0
         self.kamikaze_lowest_alt = math.inf
+        self.kamikaze_steepest_angle = 0.0
+        self.kamikaze_steepest_pitch = 0.0
+        self.kamikaze_sink_peaks = []
+        self.kamikaze_dive_started_at = 0.0
+        self.kamikaze_dive_start_alt = 0.0
+        self.kamikaze_dive_duration = 0.0
         self._kamikaze_climb_warned = False
         self._kamikaze_target_cooldown = QTimer(self, singleShot=True, interval=KAMIKAZE_TARGET_REFRESH)
         self.waits_for_qr = False
+        self._param_pending = {}
+        self._param_retry_timer = QTimer(self, interval=PARAM_ACK_TIMEOUT)
+        self._param_retry_timer.timeout.connect(self.__retry_pending_params)
+        self._route_plan_signals = RoutePlanSignals(self)
+        self._route_plan_signals.finished.connect(self._on_route_plan_ready)
         self._mode_change_cooldown = QTimer(self, singleShot=True, interval=2000)
         self._arm_change_cooldown = QTimer(self, singleShot=True, interval=2000)
         self._gcs_heartbeat_timer = QTimer(self, interval=1000)
@@ -892,6 +1189,7 @@ class MainWindow(QMainWindow):
         self._create_warning("Mission Download taking really long, probably vehicle connection has been lost")
         self.next_mission_order_seq_id = 0
         self.requested_to_get_mission = False
+        self._awaiting_mission_verification = False
         self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
         self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
@@ -938,6 +1236,16 @@ class MainWindow(QMainWindow):
                     qDebug("[Mission] Filtering outlier WP %d at (%.4f, %.4f)" % (i, pos.latitude(), pos.longitude()))
                     continue
                 self._current_mission_waypoints.append(pos)
+            if self._awaiting_mission_verification:
+                # Bu indirme, az önce yüklediğimiz düzeltilmiş rotanın teyidi.
+                # Yeniden planlamayı tetiklemek yükle→indir→planla→yükle
+                # döngüsüne yol açardı.
+                self._awaiting_mission_verification = False
+                self._create_warning("Rota doğrulandı: araçta %d waypoint var"
+                                     % len(self._current_mission_waypoints))
+                qDebug("[MissionUpload] Verification download complete: %d waypoints"
+                       % len(self._current_mission_waypoints))
+                return
             # Hash sıfırla — yeni mission'da HSS değişmemiş olsa bile rota yeniden hesaplansın
             self._last_planned_hash = None
             self._trigger_route_replanning()
@@ -1212,8 +1520,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._create_warning("Could not get HSS coordinates from server: %s" % e)
             return
-        if ads_list is not None:
-            self.ui.map_view.update_server_ads_data(ads_list)
+        if ads_list is None:
+            return
+        # Elle yenileme de otomatik polling ile aynı yoldan geçiyor: haritayı,
+        # tampon çemberleri, çiti ve rotayı güncelleyen tek bir akış var ve
+        # kamikaze koşusu sürerken erteleme kuralı da orada uygulanıyor.
+        next_seq = (self._current_snapshot.seq + 1) if self._current_snapshot is not None else 1
+        self._on_hss_updated(HssSnapshot(seq=next_seq, zones=ads_list))
 
     def __setArmStatus(self, is_arm: int):
         self._arm_change_cooldown.start()
@@ -1264,6 +1577,8 @@ class MainWindow(QMainWindow):
         self.geofence_dialog.close()
 
     def _enable_fence(self) -> None:
+        if self.mavlink_connection is None:
+            return
         if self.current_pilot != MAV_AUTOPILOT_PX4:
             self.mavlink_connection.mav.command_long_send(
                 self.mavlink_connection.target_system,
@@ -1370,6 +1685,11 @@ class MainWindow(QMainWindow):
             self.ads_list_cache = []
             self.requested_to_send_fence_with_fence = False
             self.fence_upload_in_progress = False   # FIX: kilit serbest
+            self._fence_upload_retries = 0
+            # Çit ancak tamamı araca yüklendikten SONRA aktif edilir. Eskiden
+            # yükleme başlatılır başlatılmaz aktif ediliyordu.
+            self._enable_fence()
+            qDebug("[Fence] Çit yüklendi ve aktif edildi")
             # FIX: yükleme biterken bekleyen istek varsa hemen işle
             if self.pending_fence_ads_list is not None:
                 pending = self.pending_fence_ads_list
@@ -1411,9 +1731,21 @@ class MainWindow(QMainWindow):
         self._create_warning("Fence Upload taking really long, probably vehicle connection has been lost")
         self.ads_list_cache = []
         self.requested_to_send_fence_with_fence = False
-
         self.fence_upload_in_progress = False        # FIX: timeout'da da kilidi serbest bırak
-        self.pending_fence_ads_list = None           # FIX: bekleyen istek de temizlenir
+        # Bekleyen istek ARTIK atılmıyor: eskiden burada silindiği için, ilk
+        # (dar yarıçaplı) yükleme timeout'a düşünce tamponlu çit hiç yüklenmiyor
+        # ve araçta yanlış çit kalıyordu. Sınırlı sayıda tekrar denenir.
+        pending = self.pending_fence_ads_list
+        self.pending_fence_ads_list = None
+        if pending is None:
+            return
+        if self._fence_upload_retries >= 2:
+            self._fence_upload_retries = 0
+            self._create_warning("Çit yüklenemedi — araçtaki çit güncel DEĞİL!")
+            return
+        self._fence_upload_retries += 1
+        qWarning("[Fence] Yükleme zaman aşımı, tekrar deneniyor (%d/2)" % self._fence_upload_retries)
+        self.update_geofence_data(pending)
 
     def __reset_geofence_dialog(self):
         self.geofence_dialog = None
@@ -1426,22 +1758,129 @@ class MainWindow(QMainWindow):
     kamikaze_previous_mode: int | None
     kamikaze_timer: QTimer
     kamikaze_recover_heading: float
-    kamikaze_alt_history: list[float]
+    kamikaze_alt_history: list[tuple[float, float]]  # (zaman, irtifa)
     kamikaze_dive_sink_max: float
     kamikaze_lowest_alt: float
     waits_for_qr: bool
     kamikaze_qr_text: str
 
-    def __set_param(self, name: bytes, value: float):
+    # --- Parametre yazma: sahiplik + teyit ---------------------------------
+
+    def _kamikaze_owns_vehicle(self) -> bool:
+        return self.kamikaze_state != KamikazeState.IDLE
+
+    def __send_param_writes(self, writes: list[tuple[bytes, float]]) -> None:
+        try:
+            for name, value in writes:
+                self.mavlink_connection.mav.param_set_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    name,
+                    value,
+                    9
+                )
+        except OSError as e:
+            # Bağlantı az önce ölmüş olabilir (USB çıktı, seri port düştü).
+            # Baseline yazıları tam da o anda -- kamikaze bırakılırken --
+            # gönderiliyor, o yüzden burada patlamak sinyal zincirini kırardı.
+            qWarning("Parametre gönderilemedi, bağlantı düşmüş olabilir: %s" % e)
+
+    def __set_param(self, name: bytes, value: float,
+                    owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True) -> None:
+        self.__set_param_group(name.decode('ascii'), [(name, value)], owner, verify)
+
+    def __set_param_group(self, key: str, writes: list[tuple[bytes, float]],
+                          owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True) -> None:
+        """
+        Tek bir mantıksal parametreyi yazar. writes birden fazla mavlink ismi
+        içerebilir (eski/yeni firmware alias'ları); teyit için HERHANGİ birinden
+        PARAM_VALUE gelmesi yeterlidir, çünkü firmware'de olmayan alias hiç
+        cevap vermez.
+
+        owner, o an aracı kimin sürdüğüdür. Kamikaze koşusu sürerken HSS
+        katmanından (veya başka bir yerden) gelen bir yazı sessizce uygulanmaz,
+        engellenir ve loglanır -- iki katmanın aynı anda parametre yazmasının
+        önündeki tek gerçek engel bu.
+        """
         if self.mavlink_connection is None:
             return
-        self.mavlink_connection.mav.param_set_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            name,
-            value,
-            9
-        )
+        active_owner = ParamOwner.KAMIKAZE if self._kamikaze_owns_vehicle() else ParamOwner.BASELINE
+        if owner is not active_owner:
+            qWarning("Parametre yazısı engellendi (%s): sahip %s, isteyen %s"
+                     % (key, active_owner.name, owner.name))
+            return
+        self.__send_param_writes(writes)
+        if not verify:
+            self._param_pending.pop(key, None)
+            return
+        # owner da saklanıyor: tekrar gönderim sırasında aracın sahibi
+        # değişmişse bu yazı bayattır ve gönderilmemeli.
+        self._param_pending[key] = {'writes': writes, 'attempts': 1, 'owner': owner}
+        if not self._param_retry_timer.isActive():
+            self._param_retry_timer.start()
+
+    def _on_param_value(self, name: str, value: float) -> None:
+        for key in list(self._param_pending.keys()):
+            entry = self._param_pending[key]
+            for param_name, expected in entry['writes']:
+                if param_name.decode('ascii', 'replace') != name:
+                    continue
+                if abs(value - expected) <= max(1e-3, abs(expected) * 1e-4):
+                    del self._param_pending[key]
+                break
+        if not self._param_pending:
+            self._param_retry_timer.stop()
+
+    def __retry_pending_params(self) -> None:
+        if self.mavlink_connection is None:
+            self._param_pending.clear()
+            self._param_retry_timer.stop()
+            return
+        active_owner = ParamOwner.KAMIKAZE if self._kamikaze_owns_vehicle() else ParamOwner.BASELINE
+        for key in list(self._param_pending.keys()):
+            entry = self._param_pending[key]
+            # Sahiplik kontrolü tekrar gönderimde de geçerli. Bu olmadan,
+            # kamikaze başlamadan hemen önce kuyruğa girmiş bir baseline yazısı
+            # (ör. TECS_SINK_MAX=5) dalışın ortasında yeniden gönderilip
+            # kamikaze'nin değerini eziyordu -- __set_param_group'taki kapı
+            # buradan atlanıyordu.
+            if entry['owner'] is not active_owner:
+                qDebug("Bayat parametre yazısı düşürüldü: %s (%s -> %s)"
+                       % (key, entry['owner'].name, active_owner.name))
+                del self._param_pending[key]
+                continue
+            if entry['attempts'] >= PARAM_MAX_ATTEMPTS:
+                del self._param_pending[key]
+                self._create_warning("Parametre yazılamadı: %s — otopilot teyit vermedi!" % key)
+                continue
+            entry['attempts'] += 1
+            qDebug("Parametre tekrar gönderiliyor: %s (deneme %d)" % (key, entry['attempts']))
+            self.__send_param_writes(entry['writes'])
+        if not self._param_pending:
+            self._param_retry_timer.stop()
+
+    def apply_baseline_params(self) -> None:
+        """
+        Aracı HSS'in planladığı normal seyir durumuna döndürür.
+
+        Kamikaze bitişi, force-end, reposition bırakma ve bağlantı kurulması --
+        hepsi buradan geçer. Baseline'ın tek tanımı BASELINE_PARAMS tablosudur;
+        buraya bir literal yazmak, bu düzeltmenin çözdüğü hatayı geri getirir.
+        """
+        if self.mavlink_connection is None:
+            return
+        for key, writes in BASELINE_PARAMS:
+            self.__set_param_group(key, writes, ParamOwner.BASELINE)
+        self.ui.map_view.vehicle_locked = False
+        qDebug("[Params] Baseline uygulandı (%d parametre)" % len(BASELINE_PARAMS))
+
+    def apply_hss_safety_params(self) -> None:
+        """Çit/rally/AUTO seyrüsefer parametreleri — bağlantıda bir kez."""
+        if self.mavlink_connection is None:
+            return
+        for key, writes in HSS_SAFETY_PARAMS:
+            self.__set_param_group(key, writes, ParamOwner.BASELINE)
+        qDebug("[Params] HSS güvenlik parametreleri uygulandı (%d parametre)" % len(HSS_SAFETY_PARAMS))
 
     def __start_kamikaze(self):
         if self.kamikaze_state != KamikazeState.IDLE:
@@ -1480,32 +1919,62 @@ class MainWindow(QMainWindow):
         if self.kamikaze_original_alt < 80.0:
             self._create_warning("Altitude %.1fm is below the 80m kamikaze minimum, refusing to start" % self.kamikaze_original_alt)
             return
+        # Giriş kapısı. Koşu boyunca HSS katmanı donduruluyor (fence yüklemesi,
+        # rota planlama, mission yüklemesi yok), o yüzden koşuya girerken
+        # durumun temiz olduğundan emin olmak gerekiyor -- yoksa "gözünü kapat
+        # ve dal" olur.
+        if self.fence_upload_in_progress or (self.mavlink_worker is not None
+                                             and self.mavlink_worker._mission_upload_state > 0):
+            self._create_warning("Çit/rota yüklemesi sürüyor, kamikaze başlatılmıyor")
+            return
+        zones = self._hss_zones()
+        hit = point_hits_zone(latitude, longitude, zones)
+        if hit is not None:
+            self._create_warning("Kamikaze hedefi HSS #%s bölgesinin içinde — başlatılmıyor" % hit.id)
+            return
+        hit = segment_hits_zone(current_lat, current_lon, latitude, longitude, zones)
+        if hit is not None:
+            self._create_warning("DİKKAT: Hedefe giriş hattı HSS #%s bölgesini kesiyor!" % hit.id)
 
         self.kamikaze_previous_mode = self.ui.fly_mode_combobox.currentIndex()
         self.kamikaze_state = KamikazeState.APPROACHING
+        self._kamikaze_run_started_at = time.monotonic()
+        # Araç artık kamikaze'nin: HSS katmanı ve harita reposition'ı bu andan
+        # itibaren parametre yazamaz (bkz. __set_param_group, MapWidget).
+        self.ui.map_view.vehicle_locked = True
         self.kamikaze_timer.start()
 
-        # Dive pitch limit -45deg and turn/roll limit 55deg. Set both the old
-        # (centidegree: LIM_*) and new (degree: *_DEG) ArduPlane parameter names so
-        # this works regardless of firmware version (4.1+ renamed these params).
+        # Dive pitch limit and run-in roll limit. Set both the old (centidegree:
+        # LIM_*) and new (degree: *_DEG) ArduPlane parameter names so this works
+        # regardless of firmware version (4.1+ renamed these params).
         # TECS_PITCH_MIN is the limit TECS itself uses in autothrottle modes and
         # it overrides LIM_PITCH_MIN unless it is left at 0, so it has to be set
         # too or GUIDED will never let the nose past its cruise limit.
         # THR_MAX is set explicitly for the run-in because a still-active
         # reposition or an earlier phase may have left it somewhere else.
         dive_pitch_min: float = -(KAMIKAZE_DIVE_ANGLE + KAMIKAZE_DIVE_PITCH_MARGIN)
-        self.__set_param(b'THR_MAX', KAMIKAZE_APPROACH_THR_MAX)
-        self.__set_param(b'PTCH_LIM_MIN_DEG', dive_pitch_min)
-        self.__set_param(b'LIM_PITCH_MIN', dive_pitch_min * 100.0)
+        k = ParamOwner.KAMIKAZE
+        self.__set_param(b'THR_MAX', KAMIKAZE_APPROACH_THR_MAX, k)
+        self.__set_param_group('PTCH_LIM_MIN_DEG',
+                               [(b'PTCH_LIM_MIN_DEG', dive_pitch_min),
+                                (b'LIM_PITCH_MIN', dive_pitch_min * 100.0)], k)
         # TECS applies its own floor on top of LIM_PITCH_MIN and the tighter of
         # the two wins, so both have to be opened or the dive never gets past
         # the cruise limit.
-        self.__set_param(b'TECS_PITCH_MIN', dive_pitch_min)
-        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-        self.__set_param(b'LIM_ROLL_CD', 5500.0)
-        self.__set_param(b'TECS_CLMB_MAX', KAMIKAZE_TECS_CLMB_MAX)
-        self.__set_param(b'ARSPD_FBW_MAX', KAMIKAZE_ARSPD_FBW_MAX)
-        self.__set_param(b'GLIDE_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN)
+        self.__set_param(b'TECS_PITCH_MIN', dive_pitch_min, k)
+        self.__set_param_group('ROLL_LIMIT_DEG',
+                               [(b'ROLL_LIMIT_DEG', KAMIKAZE_APPROACH_ROLL_LIMIT),
+                                (b'LIM_ROLL_CD', KAMIKAZE_APPROACH_ROLL_LIMIT * 100.0)], k)
+        self.__set_param(b'TECS_CLMB_MAX', KAMIKAZE_TECS_CLMB_MAX, k)
+        # Eski ve yeni isim birlikte -- bkz. BASELINE_PARAMS'taki not. Bu yazı
+        # düştüğünde TECS hızı seyir limitinde tutuyor ve dalış hiç gelişmiyor.
+        self.__set_param_group('ARSPD_FBW_MAX',
+                               [(b'AIRSPEED_MAX', KAMIKAZE_ARSPD_FBW_MAX),
+                                (b'ARSPD_FBW_MAX', KAMIKAZE_ARSPD_FBW_MAX)], k)
+        # Eski ve yeni isim birlikte -- bkz. BASELINE_PARAMS'taki not.
+        self.__set_param_group('ALT_SLOPE_MIN',
+                               [(b'ALT_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN),
+                                (b'GLIDE_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN)], k)
 
         self.mavlink_connection.set_mode_apm(PLANE_MODE_GUIDED)
         self._mode_change_cooldown.start()
@@ -1545,11 +2014,21 @@ class MainWindow(QMainWindow):
         if self.kamikaze_state == KamikazeState.IDLE:
             return
 
+        # Watchdog: koşunun kendiliğinden bitmediği durumlar var (irtifa
+        # yetmezse APPROACHING sonsuza kadar tur atar) ve koşu sürerken HSS
+        # katmanı donuk. Bkz. KAMIKAZE_MAX_RUN_TIME.
+        if time.monotonic() - self._kamikaze_run_started_at > KAMIKAZE_MAX_RUN_TIME:
+            self._create_warning("Kamikaze %.0f saniyede tamamlanamadı, iptal ediliyor"
+                                 % KAMIKAZE_MAX_RUN_TIME)
+            self.__finish_kamikaze()
+            return
+
         self.next_telemetry.lock.lockForRead()
         current_lat: float = self.next_telemetry.iha_enlem
         current_lon: float = self.next_telemetry.iha_boylam
         current_alt: float = self.next_telemetry.iha_irtifa
         ground_speed: float = self.next_telemetry.iha_hiz
+        pitch: float = self.next_telemetry.iha_dikilme
         self.next_telemetry.lock.unlock()
 
         if current_lat == 0 and current_lon == 0:
@@ -1579,18 +2058,43 @@ class MainWindow(QMainWindow):
                                              % (current_alt, KAMIKAZE_APPROACH_ALT))
                 else:
                     qDebug(f"Remaining Distance is {distance:.1f}m of {dive_at:.1f}m, entering dive state")
-                    self.__enter_dive(current_lat, current_lon, current_alt, distance, ground_speed, sink_rate)
+                    self.__enter_dive(current_lat, current_lon, current_alt, distance, ground_speed, pitch)
 
         elif self.kamikaze_state == KamikazeState.DIVING:
             # The destination is left alone here on purpose; the angle is held
             # by the sink rate instead, which is a parameter write and does not
             # disturb navigation. Break off early enough that the pull-out
             # bottoms out at MIN_ALT instead of starting there.
-            self.__update_dive_sink_rate(ground_speed, sink_rate)
-            pullout_loss: float = MainWindow.__pullout_altitude_loss(sink_rate)
+            self.__update_dive_sink_rate(ground_speed, pitch)
+            # Dalışın her tick'i loglanıyor. Tek bir "şu kadar derece daldı"
+            # sayısıyla açının neden sığ kaldığını ayırt etmek mümkün değil:
+            # tavan mı bağlıyor, burun mu dönemiyor, dalış mı erken bitiyor --
+            # üçü de aynı sonucu veriyor ama çözümleri farklı.
+            data_age: float = self.__altitude_data_age()
+            # Uçuş yolu açısı doğrudan pitch'ten: hücum açısı ölçülerek ~0
+            # bulundu ve pitch beş kat hızlı, gürültüsüz bir sinyal.
+            # Bkz. __sink_from_pitch. sink_rate (irtifa türevi) log'da çapraz
+            # kontrol olarak kalıyor.
+            sink_est: float = MainWindow.__sink_from_pitch(ground_speed, pitch)
+            flown_angle: float = max(0.0, -pitch)
+            # Hücum açısı = pitch + uçuş yolu açısı (pitch burun aşağı negatif,
+            # flown_angle alçalırken pozitif). 0'a yakınsa burun uçuş yoluyla
+            # hizalı, yani gerçek bir dalış. Büyükse uçak burnu yukarıda
+            # "çökerek" alçalıyor demektir -- bu hem sürüklemeyi patlatıp hızın
+            # artmasını engeller, hem de KAMERAYI hedeften başka yere baktırır.
+            aoa: float = pitch + math.degrees(math.atan2(sink_rate, max(ground_speed, 0.1)))
+            qDebug("[Dive] t=%.1fs alt=%.1f gs=%.1f sink=%.1f(olc %.1f) aci=%.1f hucum=%.1f talep=%.1f yas=%.2fs"
+                   % (time.monotonic() - self._kamikaze_run_started_at, current_alt,
+                      ground_speed, sink_est, sink_rate, flown_angle, aoa,
+                      self.kamikaze_dive_sink_max, data_age))
+            self.kamikaze_steepest_angle = max(self.kamikaze_steepest_angle, flown_angle)
+            self.kamikaze_steepest_pitch = min(self.kamikaze_steepest_pitch, pitch)
+            pullout_loss: float = MainWindow.__pullout_altitude_loss(
+                self.__recent_peak_sink(sink_est), data_age)
             if current_alt - pullout_loss <= KAMIKAZE_MIN_ALT:
-                qDebug("Sink rate %.1fm/s at %.1fm needs %.1fm to pull out, entering recovering state"
-                       % (sink_rate, current_alt, pullout_loss))
+                qDebug("Sink rate %.1fm/s at %.1fm (%.2fs eski) needs %.1fm to pull out, entering recovering state"
+                       % (sink_rate, current_alt, data_age, pullout_loss))
+                self.kamikaze_dive_duration = time.monotonic() - self.kamikaze_dive_started_at
                 self.__enter_recovery(current_lat, current_lon)
 
         elif self.kamikaze_state == KamikazeState.RECOVERING:
@@ -1603,21 +2107,57 @@ class MainWindow(QMainWindow):
                 self.__finish_kamikaze()
 
     @staticmethod
-    def __pullout_altitude_loss(sink_rate: float) -> float:
+    def __pullout_altitude_loss(sink_rate: float, data_age: float) -> float:
         # How much further the vehicle sinks between the recovery being
-        # commanded and it stopping going down. See KAMIKAZE_PULLOUT_TIME.
-        return sink_rate * KAMIKAZE_PULLOUT_TIME
+        # commanded and it stopping going down (KAMIKAZE_PULLOUT_TIME), PLUS how
+        # far it has already sunk since the altitude being judged was measured.
+        # The altitude in hand is a telemetry sample that can be half a second
+        # old; ignoring that age is why a run aimed at a 70 m floor bottomed out
+        # at 61 m.
+        return sink_rate * (KAMIKAZE_PULLOUT_TIME + data_age)
 
     def __update_sink_rate(self, current_alt: float) -> float:
-        # Averaged over the whole sample window rather than filtered, so it has
-        # no lag to speak of at the point the pull-out decision is made.
-        self.kamikaze_alt_history.append(current_alt)
-        if len(self.kamikaze_alt_history) > KAMIKAZE_SINK_SAMPLES:
+        # Only distinct altitudes are recorded, with the time they were seen, and
+        # the rate is taken over the real span between the oldest and newest
+        # sample. See KAMIKAZE_SINK_WINDOW for why the old fixed-interval
+        # assumption produced a sawtooth instead of a sink rate.
+        now: float = time.monotonic()
+        if not self.kamikaze_alt_history or self.kamikaze_alt_history[-1][1] != current_alt:
+            self.kamikaze_alt_history.append((now, current_alt))
+        # Keep at least two samples so a rate is always available, and drop
+        # anything older than the window so the estimate does not lag the dive.
+        while len(self.kamikaze_alt_history) > 2 and \
+                now - self.kamikaze_alt_history[0][0] > KAMIKAZE_SINK_WINDOW:
             self.kamikaze_alt_history.pop(0)
         if len(self.kamikaze_alt_history) < 2:
             return 0.0
-        elapsed: float = (len(self.kamikaze_alt_history) - 1) * KAMIKAZE_TICK_INTERVAL / 1000.0
-        return max(0.0, (self.kamikaze_alt_history[0] - self.kamikaze_alt_history[-1]) / elapsed)
+        span: float = self.kamikaze_alt_history[-1][0] - self.kamikaze_alt_history[0][0]
+        if span < 1e-3:
+            return 0.0
+        return max(0.0, (self.kamikaze_alt_history[0][1] - self.kamikaze_alt_history[-1][1]) / span)
+
+    def __recent_peak_sink(self, sink_rate: float) -> float:
+        """
+        Son KAMIKAZE_PULLOUT_PEAK_WINDOW saniyedeki en yüksek alçalma hızı.
+
+        Pull-out tahmini anlık ölçümle yapılamaz: ölçülen alçalma hızı yarım
+        saniyede bir 11 ile 15 m/s arasında oynuyor ve tetik tesadüfen düşük bir
+        okumaya denk gelirse kayıp olduğundan az tahmin edilip uçak tabanın
+        altına iniyor (ölçüm: 12.1 okundu, gerçek kayıp 15 m/s'ye karşılık
+        gelen kadardı). Tepe tutma her zaman erken tarafta hata yapar.
+        """
+        now: float = time.monotonic()
+        self.kamikaze_sink_peaks.append((now, sink_rate))
+        while len(self.kamikaze_sink_peaks) > 1 and \
+                now - self.kamikaze_sink_peaks[0][0] > KAMIKAZE_PULLOUT_PEAK_WINDOW:
+            self.kamikaze_sink_peaks.pop(0)
+        return max(s for _, s in self.kamikaze_sink_peaks)
+
+    def __altitude_data_age(self) -> float:
+        """Elimizdeki irtifa örneği kaç saniye önce ölçüldü."""
+        if not self.kamikaze_alt_history:
+            return 0.0
+        return max(0.0, time.monotonic() - self.kamikaze_alt_history[-1][0])
 
     def __kamikaze_aim_point(self, current_lat: float, current_lon: float) -> tuple[float, float]:
         # The QR point pushed KAMIKAZE_AIM_OVERSHOOT further along the line the
@@ -1627,7 +2167,26 @@ class MainWindow(QMainWindow):
         bearing: float = math.degrees(MainWindow.__bearing_to(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon))
         return MainWindow.__offset_coords(self.kamikaze_target_lat, self.kamikaze_target_lon, bearing, KAMIKAZE_AIM_OVERSHOOT)
 
-    def __update_dive_sink_rate(self, ground_speed: float, sink_rate: float):
+    @staticmethod
+    def __sink_from_pitch(ground_speed: float, pitch: float) -> float:
+        """
+        Alçalma hızını irtifa türevi yerine pitch'ten kestirir.
+
+        Ölçüldü (2026-08-14): dalış boyunca hücum açısı -8 ile +0.2 derece
+        arasında, ortalama ~-3 -- yani burun uçuş yoluyla hizalı ve pitch ZATEN
+        uçuş yolu açısı. Pitch ATTITUDE mesajıyla ~10 Hz ve pürüzsüz geliyor;
+        irtifa ise ~2 Hz ve kuantalı, türevi ±3 derecelik testere dişi üretiyor.
+        gs*tan(pitch) ölçülen alçalma hızını birebir tutturuyor (18.6*0.80=14.9,
+        ölçüm 14.9) ama gürültüsüz.
+
+        Bu, hem trim döngüsünün gürültü kovalamasını, hem de pull-out tahmininin
+        salınımın dip noktasına denk gelmesini bitiriyor.
+        """
+        if pitch >= 0.0:
+            return 0.0
+        return max(0.0, ground_speed * math.tan(math.radians(min(-pitch, 85.0))))
+
+    def __update_dive_sink_rate(self, ground_speed: float, pitch: float):
         # Sink rate and ground speed are the two legs of the dive angle:
         # sink = ground_speed * tan(angle). TECS_SINK_MAX caps the descent TECS
         # is willing to demand, so slaving it to the current ground speed holds
@@ -1637,16 +2196,30 @@ class MainWindow(QMainWindow):
             return
         # Ask for the angle plus whatever the vehicle is currently flying short
         # of it, so TECS's own lag lands on DIVE_ANGLE instead of under it.
-        flown: float = math.degrees(math.atan2(sink_rate, ground_speed))
+        #
+        # Uçulan açı pitch'ten alınıyor, irtifa türevinden değil: hücum açısı
+        # ölçülerek ~0 bulundu, yani pitch zaten uçuş yolu açısı ve çok daha
+        # temiz. Eskiden bu değer ±3 derece zıpladığı için talep de 24 ile 31
+        # m/s arasında salınıyordu; TECS'in 3 saniyelik zaman sabiti yarım
+        # saniyede bir değişen bir talebi zaten takip edemez.
+        flown: float = max(0.0, -pitch)
         trim: float = KAMIKAZE_DIVE_TRIM_GAIN * (KAMIKAZE_DIVE_ANGLE - flown)
         commanded: float = KAMIKAZE_DIVE_ANGLE + clamp(trim, 0.0, KAMIKAZE_DIVE_TRIM_MAX)
         wanted: float = min(KAMIKAZE_TECS_SINK_MAX, ground_speed * math.tan(math.radians(commanded)))
         if abs(wanted - self.kamikaze_dive_sink_max) < KAMIKAZE_SINK_STEP:
             return
         self.kamikaze_dive_sink_max = wanted
-        self.__set_param(b'TECS_SINK_MAX', wanted)
+        # verify=True olmak ZORUNDA. Bu tek yazı dalışın tamamını belirliyor ve
+        # kamikaze_dive_sink_max yukarıdaki eşik kontrolünde "araçta bu değer
+        # var" varsayımı olarak kullanılıyor: paket düşerse kod aracın 26 m/s
+        # tavanda olduğunu sanır, araç ise baseline'daki 5 m/s'de kalır ve
+        # hesaplanan değer 0.5'ten fazla oynamadığı için bir daha ASLA
+        # gönderilmez. 5 m/s tavan ~12 m/s yer hızında 22 derecelik bir dalış
+        # demek. Teyit kuyruğu parametre adına göre tutulduğu için burada
+        # birikme olmaz: yeni yazı eskisinin yerine geçer.
+        self.__set_param(b'TECS_SINK_MAX', wanted, ParamOwner.KAMIKAZE)
 
-    def __enter_dive(self, current_lat: float, current_lon: float, current_alt: float, distance: float, ground_speed: float, sink_rate: float):
+    def __enter_dive(self, current_lat: float, current_lon: float, current_alt: float, distance: float, ground_speed: float, pitch: float):
         self.next_telemetry.lock.lockForRead()
         yaw: float = self.next_telemetry.iha_yonelme
         self.next_telemetry.lock.unlock()
@@ -1656,14 +2229,23 @@ class MainWindow(QMainWindow):
             self._create_warning("Dive starts %.0f degrees off the target bearing, QR may not be readable" % heading_error)
         # Engine off, wings pinned, and pitch handed entirely to the altitude
         # demand so TECS stops trading the descent against airspeed.
-        self.__set_param(b'THR_MAX', KAMIKAZE_DIVE_THR_MAX)
-        self.__set_param(b'TECS_SPDWEIGHT', KAMIKAZE_TECS_SPDWEIGHT)
-        self.__set_param(b'TECS_TIME_CONST', KAMIKAZE_TECS_TIME_CONST)
-        self.__set_param(b'ROLL_LIMIT_DEG', KAMIKAZE_DIVE_ROLL_LIMIT)
-        self.__set_param(b'LIM_ROLL_CD', KAMIKAZE_DIVE_ROLL_LIMIT * 100.0)
+        k = ParamOwner.KAMIKAZE
+        self.__set_param(b'THR_MAX', KAMIKAZE_DIVE_THR_MAX, k)
+        self.__set_param(b'TECS_SPDWEIGHT', KAMIKAZE_TECS_SPDWEIGHT, k)
+        self.__set_param(b'TECS_TIME_CONST', KAMIKAZE_TECS_TIME_CONST, k)
+        self.__set_param(b'TECS_VERT_ACC', KAMIKAZE_TECS_VERT_ACC, k)
+        self.__set_param_group('ROLL_LIMIT_DEG',
+                               [(b'ROLL_LIMIT_DEG', KAMIKAZE_DIVE_ROLL_LIMIT),
+                                (b'LIM_ROLL_CD', KAMIKAZE_DIVE_ROLL_LIMIT * 100.0)], k)
         self.kamikaze_dive_sink_max = 0.0
         self.kamikaze_lowest_alt = current_alt
-        self.__update_dive_sink_rate(ground_speed, sink_rate)
+        self.kamikaze_steepest_angle = 0.0
+        self.kamikaze_steepest_pitch = 0.0
+        self.kamikaze_sink_peaks = []
+        self.kamikaze_dive_started_at = time.monotonic()
+        self.kamikaze_dive_start_alt = current_alt
+        self.kamikaze_dive_duration = 0.0
+        self.__update_dive_sink_rate(ground_speed, pitch)
         # One destination for the whole dive: down the same line, past the QR
         # point, at ground level. With the glide slope off the vehicle stops
         # rationing that altitude over the distance and just descends, which is
@@ -1677,18 +2259,57 @@ class MainWindow(QMainWindow):
         self.next_telemetry.lock.lockForRead()
         self.kamikaze_recover_heading = self.next_telemetry.iha_yonelme
         self.next_telemetry.lock.unlock()
-        self.__set_param(b'THR_MAX', KAMIKAZE_RECOVER_THR_MAX)
-        self.__set_param(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)
-        self.__set_param(b'PTCH_LIM_MIN_DEG', KAMIKAZE_RECOVER_PITCH_MIN)
-        self.__set_param(b'LIM_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN * 100.0)
-        self.__set_param(b'TECS_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN)
-        # One destination again: straight ahead on the dive heading, high
-        # enough that the vehicle keeps climbing through RECOVER_ALT. Being
-        # below the destination is the case where ArduPlane climbs at its max
-        # rate instead of following a slope, which is what pulls the nose up.
-        lead_lat, lead_lon = MainWindow.__offset_coords(current_lat, current_lon, self.kamikaze_recover_heading, KAMIKAZE_RECOVER_LEAD)
+        k = ParamOwner.KAMIKAZE
+        self.__set_param(b'THR_MAX', KAMIKAZE_RECOVER_THR_MAX, k)
+        self.__set_param(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT, k)
+        self.__set_param_group('PTCH_LIM_MIN_DEG',
+                               [(b'PTCH_LIM_MIN_DEG', KAMIKAZE_RECOVER_PITCH_MIN),
+                                (b'LIM_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN * 100.0)], k)
+        self.__set_param(b'TECS_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN, k)
+        # Give some bank authority back: the dive pinned it at 15 deg so the
+        # nose would hold the QR line, but the recovery may have to steer away
+        # from an HSS zone (see __kamikaze_recover_lead) and cannot do that at
+        # 15. Not all the way back to the run-in value -- see
+        # KAMIKAZE_RECOVER_ROLL_LIMIT.
+        self.__set_param_group('ROLL_LIMIT_DEG',
+                               [(b'ROLL_LIMIT_DEG', KAMIKAZE_RECOVER_ROLL_LIMIT),
+                                (b'LIM_ROLL_CD', KAMIKAZE_RECOVER_ROLL_LIMIT * 100.0)], k)
+        # One destination again: ahead of the vehicle, high enough that it keeps
+        # climbing through RECOVER_ALT. Being below the destination is the case
+        # where ArduPlane climbs at its max rate instead of following a slope,
+        # which is what pulls the nose up.
+        lead_lat, lead_lon = self.__kamikaze_recover_lead(current_lat, current_lon)
         self.__send_guided_target(lead_lat, lead_lon, KAMIKAZE_APPROACH_ALT)
         self.kamikaze_state = KamikazeState.RECOVERING
+
+    def __kamikaze_recover_lead(self, current_lat: float, current_lon: float) -> tuple[float, float]:
+        """
+        Kurtarma tırmanışının hedef noktası. Tercih edilen nokta dalış yönünde
+        düz ileridedir, ama uçak dalışın dibinde bir HSS bölgesinin kenarında
+        olabilir ve düz ileri devam etmek onu bölgenin içine sokabilir. Rota
+        planlayıcı sadece AUTO görevini düzeltiyor, GUIDED'ın bu bacağını değil
+        -- o yüzden kontrol burada yapılıyor.
+
+        Önce yön sapması, sonra kısaltma denenir; hiçbiri temiz değilse düz
+        ileri kullanılır ve operatör uyarılır (tırmanmamak her hâlükârda daha
+        kötü).
+        """
+        zones = self._hss_zones()
+        heading = self.kamikaze_recover_heading
+        if not zones:
+            return MainWindow.__offset_coords(current_lat, current_lon, heading, KAMIKAZE_RECOVER_LEAD)
+        for fraction in KAMIKAZE_RECOVER_LEAD_FRACTIONS:
+            distance = KAMIKAZE_RECOVER_LEAD * fraction
+            for offset in KAMIKAZE_RECOVER_HEADING_OFFSETS:
+                lead_lat, lead_lon = MainWindow.__offset_coords(
+                    current_lat, current_lon, heading + offset, distance)
+                if segment_hits_zone(current_lat, current_lon, lead_lat, lead_lon, zones) is None:
+                    if offset != 0.0 or fraction != 1.0:
+                        qDebug("Kurtarma hedefi HSS için kaydırıldı: %+.0f derece, %.0f m"
+                               % (offset, distance))
+                    return lead_lat, lead_lon
+        self._create_warning("Kurtarma hattı HSS bölgesinden temizlenemedi, düz tırmanılıyor")
+        return MainWindow.__offset_coords(current_lat, current_lon, heading, KAMIKAZE_RECOVER_LEAD)
 
     @staticmethod
     def __calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1726,40 +2347,55 @@ class MainWindow(QMainWindow):
         return math.degrees(phi2), math.degrees(lambda2)
 
     def __finish_kamikaze(self):
+        """
+        Koşuyu bitirir ve aracın sahipliğini baseline'a geri verir.
+
+        Kamikaze'nin TEK çıkışı burasıdır: normal tamamlama, iptal, elle mod
+        değişimi, dışarıdan mod değişimi, force-end, watchdog ve bağlantı
+        kopması hepsi buraya gelir. Bağlantı yokken de çağrılabilir olması
+        şart -- o durumda parametre yazılamaz, ama kilit yine de bırakılır ve
+        yeniden bağlanınca apply_baseline_params() araca doğru durumu yazar.
+        """
         self.kamikaze_timer.stop()
+        # Önce sahiplik bırakılır, sonra yazılır: __set_param_group sahibe
+        # bakıyor, sıra ters olsa baseline yazıları kendi kilidimize takılırdı.
         self.kamikaze_state = KamikazeState.IDLE
         self._kamikaze_target_cooldown.stop()
-        if self.mavlink_connection is not None:
-            self.__set_param(b'PTCH_LIM_MIN_DEG', -25.0)
-            self.__set_param(b'LIM_PITCH_MIN', -2500.0)
-            self.__set_param(b'TECS_PITCH_MIN', 0.0)  # 0 hands the limit back to LIM_PITCH_MIN
-            self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-            self.__set_param(b'LIM_ROLL_CD', 5500.0)
-            # The run opened up the TECS envelope so the dive could be flown in
-            # GUIDED; close it back down to the cruise values.
-            self.__set_param(b'TECS_SINK_MAX', CRUISE_TECS_SINK_MAX)
-            self.__set_param(b'TECS_CLMB_MAX', CRUISE_TECS_CLMB_MAX)
-            self.__set_param(b'ARSPD_FBW_MAX', CRUISE_ARSPD_FBW_MAX)
-            self.__set_param(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)
-            self.__set_param(b'TECS_TIME_CONST', CRUISE_TECS_TIME_CONST)
-            self.__set_param(b'GLIDE_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN)
-            # Every phase of the run drove THR_MAX itself; bring the cruise
-            # ceiling back once it is over.
-            self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
+        # The run opened up the whole TECS envelope, the pitch floor, the roll
+        # limit and the throttle ceiling so the dive could be flown in GUIDED.
+        # One call puts all of it back -- see BASELINE_PARAMS.
+        self.apply_baseline_params()
+        self.ui.map_view.vehicle_locked = False
         if self.kamikaze_previous_mode is not None and self.kamikaze_previous_mode >= 0 and self.mavlink_connection is not None:
             self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
             self._mode_change_cooldown.start()
         if self.server_connection.ip is not None:
             self.on_kamikaze_end(self.kamikaze_qr_text)
         self.waits_for_qr = False
-        # The one number KAMIKAZE_PULLOUT_TIME is tuned against, so it
-        # goes on the status bar rather than only into the log.
-        if self.kamikaze_lowest_alt < math.inf:
+        # The numbers the dive is tuned against, on the status bar rather than
+        # only in the log: the angle it actually reached, how long it had to
+        # reach it, and where it bottomed out.
+        if self.kamikaze_steepest_angle > 0.0:
+            # Süre dalışın kendisi -- kurtarma tırmanışı dahil DEĞİL.
+            qInfo("[Dive] ozet: %.0fm'den basladi, %.1f sn, en dik yol acisi %.1f, en dik pitch %.1f, hucum %.1f, dipte %.0fm"
+                  % (self.kamikaze_dive_start_alt, self.kamikaze_dive_duration,
+                     self.kamikaze_steepest_angle, self.kamikaze_steepest_pitch,
+                     self.kamikaze_steepest_angle + self.kamikaze_steepest_pitch,
+                     self.kamikaze_lowest_alt))
+            self._create_warning("Dalış: en dik %.0f derece, %.1f sn, dip %.0fm (hedef %.0f derece / %.0fm)"
+                                 % (self.kamikaze_steepest_angle, self.kamikaze_dive_duration,
+                                    self.kamikaze_lowest_alt, KAMIKAZE_DIVE_ANGLE, KAMIKAZE_MIN_ALT))
+        elif self.kamikaze_lowest_alt < math.inf:
             self._create_warning("Kamikaze bottomed out at %.0fm, %.0fm was asked for"
                                  % (self.kamikaze_lowest_alt, KAMIKAZE_MIN_ALT))
         self.kamikaze_lowest_alt = math.inf
+        self.kamikaze_steepest_angle = 0.0
+        self.kamikaze_steepest_pitch = 0.0
+        self.kamikaze_sink_peaks = []
         self._kamikaze_climb_warned = False
         qDebug("Kamikaze Completed")
+        # Koşu boyunca beklemeye alınan HSS işleri şimdi yapılabilir.
+        self._flush_deferred_hss()
 
     def on_qr_found(self, qr_text: str):
         if not self.waits_for_qr:
@@ -1772,6 +2408,7 @@ class MainWindow(QMainWindow):
             current_lat: float = self.next_telemetry.iha_enlem
             current_lon: float = self.next_telemetry.iha_boylam
             self.next_telemetry.lock.unlock()
+            self.kamikaze_dive_duration = time.monotonic() - self.kamikaze_dive_started_at
             self.__enter_recovery(current_lat, current_lon)
 
     def on_kamikaze_end(self, qr_text: str) -> None:
@@ -1790,13 +2427,13 @@ class MainWindow(QMainWindow):
         qInfo("Force End Task requested by user")
         if self.ui.map_view.target_coord.is_set:
             self.ui.map_view.target_coord.remove_position()
-        self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
-        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-        self.__set_param(b'LIM_ROLL_CD', 5500.0)
         if self.kamikaze_state != KamikazeState.IDLE:
             self.kamikaze_previous_mode = 10  # resume the AUTO mission route
+            # Baseline'ı __finish_kamikaze uyguluyor; burada ayrıca yazmak
+            # kilide takılırdı ve zaten tekrar olurdu.
             self.__finish_kamikaze()
         else:
+            self.apply_baseline_params()
             self.mavlink_connection.set_mode_apm(10)
             self._mode_change_cooldown.start()
             self.next_telemetry.lock.lockForWrite()
@@ -2022,38 +2659,14 @@ class MainWindow(QMainWindow):
                                                             0, 0, 0, 0, 0)
         self._enable_fence()
         self._update_time_with_mavlink()
-        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-        self.__set_param(b'LIM_ROLL_CD', 5500.0)
-        # Full power only while the NAV_TAKEOFF item is active; TECS is capped
-        # at CRUISE_THR_MAX for the rest of the flight. TKOFF_THR_MAX_T is how
-        # long full power is actually forced at the start of the takeoff run
-        # (only used when there is no airspeed sensor; with one, full power is
-        # held until the takeoff airspeed is reached instead).
-        self.__set_param(b'TKOFF_THR_MAX', 100.0)
-        self.__set_param(b'TKOFF_THR_MAX_T', TAKEOFF_FULL_THROTTLE_TIME)
-        self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
-        self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
-        self.__set_param(b'LIM_ROLL_CD', 4500.0)
-        # HSS Güvenlik Ağı + Rally Noktası Parametreleri
-        self.__set_param(b'FENCE_ACTION',  4.0)    # 4 = Rally/Loiter — HSS ihlaline karşı en yakın Rally noktasına git ve çember at
-        self.__set_param(b'FENCE_TYPE',    7.0)    # Bit0(1)+Bit1(2)+Bit2(4) = Altitude+Circle+Polygon çitlerinin hepsi aktif
-        self.__set_param(b'FENCE_OPTIONS', 0.0)    # Bit0=0: fence ihlali sonrası pilot mod değiştirebilir
-        self.__set_param(b'FENCE_MARGIN',  5.0)    # Fence sınırına yaklaşma marjı (metre)
-        self.__set_param(b'FENCE_RET_RALLY', 1.0)  # 1 = Fence ihlalinde Home yerine Rally noktasına git
-        self.__set_param(b'RALLY_LIMIT_KM', 0.0)   # 0 = Tüm rally noktaları geçerli (mesafe limiti yok)
-        self.__set_param(b'RALLY_INCL_HOME', 1.0)  # 1 = Home noktasını Rally olarak sayar 
-        self.__set_param(b'MIS_RESTART',   0.0)    # AUTO'ya dönüşte kaldığı yerden devam et
-        self.__set_param(b'WP_LOITER_RAD', 60.0)   # Rally/loiter çember yarıçapı (metre)
-        
-        # --- İRTİFA SINIRLARI (ALTITUDE FENCE) PARAMETRELERİ ---
-        self.__set_param(b'FENCE_ALT_MAX', 150.0)   # Maksimum yükseklik sınırı (metre) - 120 veya 150 yapılabilir
-        #min irtifa test edilecek,gerekirse fbwa modunda fence enable = 0 yapılabilir.
-        self.__set_param(b'FENCE_ALT_MIN', 30.0)    # Minimum yükseklik sınırı (metre) - Yarışma taban limiti tahmini olarak(30m)
-
-        # HSS Optimizasyon (Aşama 0) Parametreleri
-        self.__set_param(b'WP_MAX_RADIUS', 0.0)    # Finish-line sorununu önler
-        self.__set_param(b'WP_RADIUS',     30.0)   # Hıza ve L1 mantığına uygun
-        self.__set_param(b'NAVL1_PERIOD',  14.0)   # Sık WP'leri yumuşak takip
+        # Bağlantı kurulduğunda araç HER ZAMAN bilinen bir duruma çekilir. Bu,
+        # uçuş ortasında telsiz kopup geri geldiğinde de çalışan tek kurtarma
+        # yolu: koşu ortasında kopan bir kamikaze, dalış zarfını araçta bırakmış
+        # olabilir ve burası onu kapatır. Değerlerin tanımı BASELINE_PARAMS ve
+        # HSS_SAFETY_PARAMS tablolarında, burada literal yok.
+        # Yazma işi worker thread'i başladıktan SONRA yapılıyor: teyit
+        # (PARAM_VALUE) o thread üzerinden geliyor, önce yazarsak hepsi
+        # cevapsız kalmış gibi görünüp boşuna tekrarlanırdı.
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)
@@ -2077,8 +2690,11 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.mission_upload_success.connect(self._on_mission_upload_success)
         self.mavlink_worker.mission_upload_failed.connect(self._on_mission_upload_failed)
         self.mavlink_worker.mission_current_changed.connect(self._on_mission_current_changed)
+        self.mavlink_worker.param_value_received.connect(self._on_param_value)
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
+        self.apply_baseline_params()
+        self.apply_hss_safety_params()
         self.enableFeaturesAfterUAVConnected()
 
     def remove_reposition_location(self):
@@ -2089,8 +2705,10 @@ class MainWindow(QMainWindow):
         if self.ui.map_view.target_coord.is_set and not self.ui.map_view.reposition_timer.isActive():
             self.ui.map_view.target_coord.remove_position()
             if self.mavlink_connection is not None and self.kamikaze_state == KamikazeState.IDLE:
-                self.ui.map_view.mouse_input_handler._set_thr_max(CRUISE_THR_MAX)
-                self.ui.map_view.mouse_input_handler._set_roll_limit(55.0)
+                # Reposition sadece THR_MAX ve roll limitini açıyor, ama
+                # baseline'ın tamamını yazmak hem ucuz hem de "geri koymayı
+                # unutulmuş bir parametre" ihtimalini tamamen kaldırıyor.
+                self.apply_baseline_params()
 
     def set_arm_mode(self, index: int):
         self.uav_is_armed = bool(index)
@@ -2100,6 +2718,19 @@ class MainWindow(QMainWindow):
             self.ui.arm_mode.blockSignals(False)
 
     def set_fly_mode(self, index: int):
+        # Otopilotun bildirdiği gerçek mod. Kamikaze koşusu sürerken buraya
+        # GUIDED dışında bir mod gelmesi, aracın kontrolünün dışarıdan alındığı
+        # anlamına gelir: çit ihlali, failsafe veya RC pilotu. Koşu bunu
+        # görmezden gelirse 2 saniyede bir DO_REPOSITION gönderip aracı GUIDED'a
+        # geri çeker ve iki taraf mod salınımına girer -- eskiden aynen böyle
+        # oluyordu, çünkü bu sinyal yolu combobox'ı bloke ederek güncelliyor ve
+        # _change_index hiç çalışmıyor.
+        if (self._kamikaze_owns_vehicle() and not self._mode_change_cooldown.isActive()
+                and index != Ardupilot_UAV_Modes.GUIDED.value[0]):
+            self._create_warning("Uçuş modu dışarıdan değişti (%s), kamikaze bırakılıyor" % index)
+            qWarning("External mode change to %s during kamikaze, releasing the vehicle" % index)
+            self.kamikaze_previous_mode = None  # dışarısı sürüyor, moda karışma
+            self.__finish_kamikaze()
         if not self._mode_change_cooldown.isActive() and self.ui.fly_mode_combobox.currentIndex() != index:
             self.ui.fly_mode_combobox.blockSignals(True)
             self.ui.fly_mode_combobox.setCurrentIndex(index)
@@ -2146,9 +2777,22 @@ class MainWindow(QMainWindow):
     def __on_connection_lost(self, reason: str):
         self._create_warning("UAV connection lost: %s" % reason)
         if self.kamikaze_state != KamikazeState.IDLE:
-            self.kamikaze_timer.stop()
-            self.kamikaze_state = KamikazeState.IDLE
-            self.waits_for_qr = False
+            # Tam bir bırakma yapılıyor. Bağlantı gittiği için parametreler
+            # araca yazılamaz -- araç dalış zarfında kalır. Yeniden bağlanınca
+            # __successful_uav_connection baseline'ın TAMAMINI yazdığı için o
+            # zarf orada kapanır. Eskiden burada sadece state sıfırlanıyordu ve
+            # -60 derece pitch tabanı, kapalı glide slope, SPDWEIGHT=0 uçuşun
+            # geri kalanı boyunca araçta kalıyordu.
+            #
+            # Ertelenmiş HSS işleri önce temizleniyor: __finish_kamikaze sonunda
+            # onları uygulamaya çalışır ve ölü bir bağlantıya fence yüklemeye
+            # kalkardı. Yeniden bağlanınca polling zaten yeni bir anlık görüntü
+            # getiriyor.
+            self._deferred_snapshot = None
+            self._deferred_manual_ads = False
+            self.__finish_kamikaze()
+        self._param_pending.clear()
+        self._param_retry_timer.stop()
         self._uav_disconnect()
 
     def _uav_disconnect(self):
@@ -2254,23 +2898,90 @@ class MainWindow(QMainWindow):
         self._hss_polling_thread = None
         qDebug("[HSS] Polling stopped")
 
+    def _hss_zones(self) -> list[ServerAdsData]:
+        """
+        Sunucu + manuel HSS bölgelerinin tek listesi (ham yarıçaplarla).
+
+        Hem rota planlayıcı, hem çit yüklemesi, hem de kamikaze giriş kapısı
+        buradan besleniyor -- "hangi bölgeler var" sorusunun tek cevabı olsun
+        diye. Tampon ekleme işi tüketiciye ait (fence_radius_for_hss).
+        """
+        zones: list[ServerAdsData] = list(self._current_snapshot.zones) if self._current_snapshot else []
+        for ads in self.ui.map_view.user_ads_data_model.m_datas:
+            zones.append(ServerAdsData(
+                id=-1,
+                lat=ads.position.latitude(),
+                lon=ads.position.longitude(),
+                radius_m=ads.size
+            ))
+        return zones
+
+    def _build_fence_ads_list(self) -> list[AdsData]:
+        """
+        Araca yüklenecek exclusion çemberleri — HER ZAMAN tamponlu.
+
+        Eskiden iki ayrı yol vardı: biri server_ads_data_model'deki HAM
+        yarıçapları yüklüyordu (harita için doğru, çit için 20 m dar), diğeri
+        tamponluyu. İkisi arka arkaya tetiklendiği için her HSS güncellemesinde
+        telsizden iki fence yüklemesi geçiyor ve arada araçta dar çit kalıyordu.
+        Artık tek tanım burası.
+        """
+        ads_list: list[AdsData] = []
+        for hss in self._hss_zones():
+            ads = AdsData()
+            ads.position = QGeoCoordinate(hss.lat, hss.lon)
+            ads.size = fence_radius_for_hss(hss.radius_m)
+            ads.is_selected = False
+            ads_list.append(ads)
+        return ads_list
+
     def _on_hss_updated(self, snapshot: HssSnapshot) -> None:
         """Yeni HSS listesi geldiğinde tetiklenir (HSS polling thread'den sinyal)."""
         # Out-of-order koruması
         if self._current_snapshot is not None and snapshot.seq <= self._current_snapshot.seq:
             qDebug("[HSS] Stale snapshot (seq=%d <= %d), skipping" % (snapshot.seq, self._current_snapshot.seq))
             return
-            
+
         self._current_snapshot = snapshot
         zones = list(snapshot.zones)
-        
-        # 1. Haritayı güncelle (kırmızı HSS çemberleri)
-        self.ui.map_view.update_server_ads_data(zones)
+
+        # 1. Haritayı güncelle (kırmızı HSS çemberleri). notify=False: çiti
+        #    aşağıda kendimiz, tamponlu yarıçaplarla yüklüyoruz.
+        self.ui.map_view.update_server_ads_data(zones, notify=False)
         # 2. Tampon bölge çemberlerini güncelle (turuncu)
         self._update_buffer_zones(zones)
-        # 3. Birleştirilmiş HSS (sunucu + manuel) ile fence yükle
-        self._auto_upload_hss_fences(zones)
-        # 4. Rota yeniden hesapla
+
+        # 3-4. Çit yüklemesi ve rota planlaması araca komut vermek demek.
+        #      Kamikaze koşusu sürerken bu iş yapılmaz: fence yüklemesi telsizi
+        #      doldurup kritik parametre yazılarının düşmesine yol açar, rota
+        #      yüklemesi de koşu bitince dönülecek AUTO görevini altından
+        #      değiştirir. Anlık görüntü saklanır, koşu biter bitmez uygulanır.
+        if self._kamikaze_owns_vehicle():
+            first_deferral = self._deferred_snapshot is None
+            self._deferred_snapshot = snapshot
+            qDebug("[HSS] Kamikaze koşusu sürüyor, %d bölgelik güncelleme ertelendi" % len(zones))
+            if first_deferral:
+                # Koşu boyunca 3 saniyede bir tekrarlamasın; durum çubuğu
+                # kamikaze'nin kendi uyarıları için lazım.
+                self._create_warning("Kamikaze sürüyor — HSS güncellemesi koşu sonuna ertelendi")
+            return
+
+        self._auto_upload_hss_fences()
+        self._trigger_route_replanning()
+
+    def _flush_deferred_hss(self) -> None:
+        """Kamikaze koşusu boyunca beklemeye alınan HSS işlerini uygular."""
+        if self._kamikaze_owns_vehicle():
+            return
+        if self._deferred_snapshot is None and not self._deferred_manual_ads:
+            return
+        qDebug("[HSS] Ertelenmiş güncelleme uygulanıyor")
+        self._deferred_snapshot = None
+        self._deferred_manual_ads = False
+        self._auto_upload_hss_fences()
+        # Koşu sırasında bölge listesi değişmemiş olsa bile yeniden planla:
+        # araç koşu boyunca görev rotasının dışına çıktı.
+        self._last_planned_hash = None
         self._trigger_route_replanning()
 
     def _update_buffer_zones(self, zones: list[ServerAdsData]) -> None:
@@ -2285,40 +2996,33 @@ class MainWindow(QMainWindow):
             model.m_datas.append(ads)
         model.layoutChanged.emit()
 
-    def _auto_upload_hss_fences(self, zones: list[ServerAdsData]) -> None:
+    def _auto_upload_hss_fences(self) -> None:
         """HSS listesini exclusion circle olarak ArduPilot'a yükler (R_hss + FENCE_BUFFER_M)."""
         if self.mavlink_connection is None:
             return
-        ads_with_buffer: list[AdsData] = []
-        for hss in zones:
-            ads = AdsData()
-            ads.position = QGeoCoordinate(hss.lat, hss.lon)
-            ads.size = fence_radius_for_hss(hss.radius_m)
-            ads.is_selected = False
-            ads_with_buffer.append(ads)
-        # Mevcut user_ads (manuel HSS) ile birleştirip yükle
-        all_ads = ads_with_buffer + self.ui.map_view.user_ads_data_model.m_datas
-        self.update_geofence_data(all_ads)
-        # Fence yüklendi — hemen aktif et
-        self._enable_fence()
-        qDebug("[Fence] HSS fence yüklendi ve aktif edildi")
+        if self._kamikaze_owns_vehicle():
+            self._deferred_manual_ads = True
+            return
+        self._fence_upload_retries = 0
+        self.update_geofence_data(self._build_fence_ads_list())
+        # _enable_fence artık yükleme BİTTİĞİNDE çağrılıyor (bkz.
+        # send_fence_mission_data); burada çağrılması, henüz yüklenmemiş bir
+        # çiti aktif etmek anlamına geliyordu.
 
     def _trigger_route_replanning(self) -> None:
         """Mission + HSS verisi mevcutsa rota yeniden hesapla ve haritada göster."""
         if not self._current_mission_waypoints:
             return
+        if self._kamikaze_owns_vehicle():
+            self._deferred_manual_ads = True
+            return
+        if self._plan_in_flight:
+            # Havuzda zaten bir hesap var; hash sıfırlanarak bittiğinde
+            # yenisinin tetiklenmesi sağlanır.
+            self._last_planned_hash = None
+            return
 
-        server_zones: list[ServerAdsData] = list(self._current_snapshot.zones) if self._current_snapshot else []
-        manual_as_hss: list[ServerAdsData] = []
-        for ads in self.ui.map_view.user_ads_data_model.m_datas:
-            manual_as_hss.append(ServerAdsData(
-                id=-1,
-                lat=ads.position.latitude(),
-                lon=ads.position.longitude(),
-                radius_m=ads.size
-            ))
-        combined_hss: list = server_zones + manual_as_hss
-
+        combined_hss: list = self._hss_zones()
         if not combined_hss:
             return
 
@@ -2328,7 +3032,29 @@ class MainWindow(QMainWindow):
             return
         self._last_planned_hash = current_hash
 
-        result = compute_safe_route(self._current_mission_waypoints, list(combined_hss))
+        # Hesap havuz thread'inde yapılıyor; sonuç _on_route_plan_ready'e
+        # sinyalle geliyor. Bkz. RoutePlanTask.
+        self._plan_in_flight = True
+        QThreadPool.globalInstance().start(RoutePlanTask(
+            list(self._current_mission_waypoints), combined_hss,
+            current_hash, self._route_plan_signals))
+
+    def _on_route_plan_ready(self, result: RoutePlanResult | None, plan_hash) -> None:
+        self._plan_in_flight = False
+        if result is None:
+            self._last_planned_hash = None   # bir dahaki tetikte tekrar denensin
+            self._create_warning("Rota hesabı başarısız oldu, düzeltilmiş rota güncellenmedi")
+            return
+        # Hesap sürerken kamikaze başlamış olabilir: sonuç bayatlamadı ama
+        # şu an araca yüklenemez, koşu sonunda yeniden planlanır.
+        if self._kamikaze_owns_vehicle():
+            self._deferred_manual_ads = True
+            self._last_planned_hash = None
+            return
+        if self._last_planned_hash is None:
+            # Hesap sürerken bölgeler değişti — sonucu göster ama hemen
+            # güncelini tetikle.
+            QTimer.singleShot(0, self._trigger_route_replanning)
         # Yeşil alternatif rotayı haritada güncelle
         avoidance_geopath = self.ui.map_view.avoidance_route_geopath
         avoidance_geopath.clear()
@@ -2417,6 +3143,9 @@ class MainWindow(QMainWindow):
     def _reset_hss_state(self) -> None:
         """Tüm HSS durumunu sıfırla — tek yerde, ileride yeni katman eklenince buraya eklenir."""
         self._current_snapshot = None
+        self._deferred_snapshot = None
+        self._deferred_manual_ads = False
+        self._last_planned_hash = None
         # Harita katmanlarını temizle
         self.ui.map_view.server_ads_data_model.m_datas.clear()
         self.ui.map_view.server_ads_data_model.layoutChanged.emit()
@@ -2459,9 +3188,17 @@ class MainWindow(QMainWindow):
         if self.mavlink_connection is None:
             self._create_warning("UAV bağlı değil, rota yüklenemiyor")
             return
+        if self._kamikaze_owns_vehicle():
+            # Koşu sırasında görevi değiştirmek, koşu bitince dönülecek AUTO
+            # rotasını ve current seq'i altından değiştirmek demek.
+            self._deferred_manual_ads = True
+            self._create_warning("Kamikaze sürüyor — rota yüklemesi koşu sonuna ertelendi")
+            return
 
-        self.__set_param(b'TRIM_ARSPD_CM', 1500.0)
-        qDebug("[MissionUpload] HSS Kaçış manevrası için TRIM_ARSPD_CM 1500 olarak ayarlandı.")
+        # Seyir hızı artık BASELINE_PARAMS'ın parçası ve rota planlayıcının
+        # varsaydığı hızla (RoutePreplanner.CRUISE_SPEED_MS) aynı. Buradaki eski
+        # tek seferlik TRIM_ARSPD_CM=1500 yazısı hiçbir zaman geri alınmıyordu,
+        # planlayıcının kendi tampon hesabıyla da çelişiyordu.
 
         if self.mavlink_worker._mission_upload_state > 0:
             self._create_warning("Rota yükleme devam ediyor, lütfen bekleyin")
@@ -2579,22 +3316,25 @@ class MainWindow(QMainWindow):
         """Upload sonrası görevi geri indirip waypoint sayısı + koordinat doğrulaması yapar."""
         if self.mavlink_connection is None:
             return
-        from pymavlink.dialects.v20.all import MAV_MISSION_TYPE_MISSION
-        self.mavlink_connection.mav.mission_request_list_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            MAV_MISSION_TYPE_MISSION
-        )
+        # request_mission_data üzerinden gidiyor: eskiden mission_request_list
+        # doğrudan gönderiliyordu ama requested_to_get_mission bayrağı set
+        # edilmediği için worker gelen MISSION_COUNT'u atıyordu, yani doğrulama
+        # hiçbir zaman çalışmıyordu.
+        if self.requested_to_get_mission:
+            qWarning("[MissionUpload] Görev indirmesi zaten sürüyor, doğrulama atlandı")
+            return
+        self._awaiting_mission_verification = True
+        self.request_mission_data()
         qDebug("[MissionUpload] Verification download requested")
 
     def _on_manual_ads_changed(self) -> None:
         """Manuel ADS ekleme/silme — fence güncelle + rotayı yeniden hesapla."""
-        # Tüm ADS (server + kullanıcı) ile fence güncelle
-        all_ads = (self.ui.map_view.server_ads_data_model.m_datas +
-                   self.ui.map_view.user_ads_data_model.m_datas)
-        self.update_geofence_data(all_ads)
-
+        if self._kamikaze_owns_vehicle():
+            self._deferred_manual_ads = True
+            self._create_warning("Kamikaze sürüyor — ADS değişikliği koşu sonuna ertelendi")
+            return
+        # Çit listesi tek yerden üretiliyor (her zaman tamponlu yarıçaplarla).
+        self._auto_upload_hss_fences()
         self._last_planned_hash = None
-
         self._trigger_route_replanning()
 
