@@ -64,19 +64,15 @@ def clamp(val: float, minv: float, maxv: float):
 
 # Uçuş zarfı sabitleri ve parametre tabloları: src/FlightParams.py
 from src.FlightParams import (
-    BASELINE_PARAMS, CRUISE_TECS_SPDWEIGHT, HSS_SAFETY_PARAMS, KAMIKAZE_AIM_OVERSHOOT,
-    KAMIKAZE_APPROACH_ALT, KAMIKAZE_APPROACH_ALT_TOLERANCE, KAMIKAZE_APPROACH_ROLL_LIMIT,
-    KAMIKAZE_APPROACH_THR_MAX, KAMIKAZE_ARSPD_FBW_MAX, KAMIKAZE_DIVE_ANGLE, KAMIKAZE_DIVE_PITCH_MARGIN,
-    KAMIKAZE_DIVE_ROLL_LIMIT, KAMIKAZE_DIVE_ROTATION_LEAD, KAMIKAZE_DIVE_START_DISTANCE,
-    KAMIKAZE_DIVE_THR_MAX, KAMIKAZE_DIVE_TRIM_GAIN, KAMIKAZE_DIVE_TRIM_MAX, KAMIKAZE_GLIDE_SLOPE_MIN,
-    KAMIKAZE_LOITER_RADIUS, KAMIKAZE_MAX_DIVE_HEADING_ERROR, KAMIKAZE_MAX_RUN_TIME,
-    KAMIKAZE_MIN_AIM_ALT, KAMIKAZE_MIN_ALT, KAMIKAZE_MIN_VALID_SPEED, KAMIKAZE_PULLOUT_PEAK_WINDOW,
-    KAMIKAZE_PULLOUT_TIME, KAMIKAZE_RECOVER_ALT, KAMIKAZE_RECOVER_HEADING_OFFSETS,
-    KAMIKAZE_RECOVER_LEAD, KAMIKAZE_RECOVER_LEAD_FRACTIONS, KAMIKAZE_RECOVER_PITCH_MIN,
-    KAMIKAZE_RECOVER_ROLL_LIMIT, KAMIKAZE_RECOVER_THR_MAX, KAMIKAZE_SINK_STEP, KAMIKAZE_SINK_WINDOW,
-    KAMIKAZE_TARGET_REFRESH, KAMIKAZE_TECS_CLMB_MAX, KAMIKAZE_TECS_SINK_MAX, KAMIKAZE_TECS_SPDWEIGHT,
-    KAMIKAZE_TECS_TIME_CONST, KAMIKAZE_TECS_VERT_ACC, KAMIKAZE_TICK_INTERVAL, PARAM_ACK_TIMEOUT,
-    PARAM_MAX_ATTEMPTS, ParamOwner
+    BASELINE_PARAMS, HSS_SAFETY_PARAMS, KAMIKAZE_AIM_OVERSHOOT, KAMIKAZE_APPROACH_ALT,
+    KAMIKAZE_APPROACH_ALT_TOLERANCE, KAMIKAZE_APPROACH_PARAMS, KAMIKAZE_DIVE_ANGLE,
+    KAMIKAZE_DIVE_PARAMS, KAMIKAZE_DIVE_ROTATION_LEAD, KAMIKAZE_DIVE_START_DISTANCE,
+    KAMIKAZE_DIVE_TRIM_GAIN, KAMIKAZE_DIVE_TRIM_MAX, KAMIKAZE_LOITER_RADIUS,
+    KAMIKAZE_MAX_DIVE_HEADING_ERROR, KAMIKAZE_MAX_RUN_TIME, KAMIKAZE_MIN_AIM_ALT, KAMIKAZE_MIN_ALT,
+    KAMIKAZE_MIN_VALID_SPEED, KAMIKAZE_PULLOUT_PEAK_WINDOW, KAMIKAZE_PULLOUT_TIME, KAMIKAZE_RECOVER_ALT,
+    KAMIKAZE_RECOVER_HEADING_OFFSETS, KAMIKAZE_RECOVER_LEAD, KAMIKAZE_RECOVER_LEAD_FRACTIONS,
+    KAMIKAZE_RECOVER_PARAMS, KAMIKAZE_SINK_STEP, KAMIKAZE_SINK_WINDOW, KAMIKAZE_TARGET_REFRESH,
+    KAMIKAZE_TECS_SINK_MAX, KAMIKAZE_TICK_INTERVAL, PARAM_ACK_TIMEOUT, PARAM_MAX_ATTEMPTS, ParamOwner
 )
 
 
@@ -1515,6 +1511,23 @@ class MainWindow(QMainWindow):
             self.__set_param_group(key, writes, ParamOwner.BASELINE)
         qDebug("[Params] HSS güvenlik parametreleri uygulandı (%d parametre)" % len(HSS_SAFETY_PARAMS))
 
+    def __apply_kamikaze_phase_params(self, phase: str,
+                                      table: list[tuple[str, list[tuple[bytes, float]]]]) -> None:
+        """
+        Kamikaze fazının parametre ön ayarını yazar.
+
+        Fazların tanımı src/FlightParams.py'deki KAMIKAZE_*_PARAMS tablolarında;
+        buraya literal yazılmaz. Sahip KAMIKAZE olduğu için bu yazılar koşu
+        sürerken baseline tarafından ezilmez (bkz. __set_param_group), ve koşu
+        biterken apply_baseline_params hepsini geri kapatır -- kapatabildiği
+        FlightParams'taki assert ile garanti altında.
+        """
+        if self.mavlink_connection is None:
+            return
+        for key, writes in table:
+            self.__set_param_group(key, writes, ParamOwner.KAMIKAZE)
+        qDebug("[Params] Kamikaze %s uygulandı (%d parametre)" % (phase, len(table)))
+
     def __start_kamikaze(self):
         if self.kamikaze_state != KamikazeState.IDLE:
             qDebug("Cancelling Kamikaze")
@@ -1577,37 +1590,7 @@ class MainWindow(QMainWindow):
         self.ui.map_view.vehicle_locked = True
         self.kamikaze_timer.start()
 
-        # Dive pitch limit and run-in roll limit. Set both the old (centidegree:
-        # LIM_*) and new (degree: *_DEG) ArduPlane parameter names so this works
-        # regardless of firmware version (4.1+ renamed these params).
-        # TECS_PITCH_MIN is the limit TECS itself uses in autothrottle modes and
-        # it overrides LIM_PITCH_MIN unless it is left at 0, so it has to be set
-        # too or GUIDED will never let the nose past its cruise limit.
-        # THR_MAX is set explicitly for the run-in because a still-active
-        # reposition or an earlier phase may have left it somewhere else.
-        dive_pitch_min: float = -(KAMIKAZE_DIVE_ANGLE + KAMIKAZE_DIVE_PITCH_MARGIN)
-        k = ParamOwner.KAMIKAZE
-        self.__set_param(b'THR_MAX', KAMIKAZE_APPROACH_THR_MAX, k)
-        self.__set_param_group('PTCH_LIM_MIN_DEG',
-                               [(b'PTCH_LIM_MIN_DEG', dive_pitch_min),
-                                (b'LIM_PITCH_MIN', dive_pitch_min * 100.0)], k)
-        # TECS applies its own floor on top of LIM_PITCH_MIN and the tighter of
-        # the two wins, so both have to be opened or the dive never gets past
-        # the cruise limit.
-        self.__set_param(b'TECS_PITCH_MIN', dive_pitch_min, k)
-        self.__set_param_group('ROLL_LIMIT_DEG',
-                               [(b'ROLL_LIMIT_DEG', KAMIKAZE_APPROACH_ROLL_LIMIT),
-                                (b'LIM_ROLL_CD', KAMIKAZE_APPROACH_ROLL_LIMIT * 100.0)], k)
-        self.__set_param(b'TECS_CLMB_MAX', KAMIKAZE_TECS_CLMB_MAX, k)
-        # Eski ve yeni isim birlikte -- bkz. BASELINE_PARAMS'taki not. Bu yazı
-        # düştüğünde TECS hızı seyir limitinde tutuyor ve dalış hiç gelişmiyor.
-        self.__set_param_group('ARSPD_FBW_MAX',
-                               [(b'AIRSPEED_MAX', KAMIKAZE_ARSPD_FBW_MAX),
-                                (b'ARSPD_FBW_MAX', KAMIKAZE_ARSPD_FBW_MAX)], k)
-        # Eski ve yeni isim birlikte -- bkz. BASELINE_PARAMS'taki not.
-        self.__set_param_group('ALT_SLOPE_MIN',
-                               [(b'ALT_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN),
-                                (b'GLIDE_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN)], k)
+        self.__apply_kamikaze_phase_params('hizalanma', KAMIKAZE_APPROACH_PARAMS)
 
         self.mavlink_connection.set_mode_apm(PLANE_MODE_GUIDED)
         self._mode_change_cooldown.start()
@@ -1860,16 +1843,7 @@ class MainWindow(QMainWindow):
         heading_error: float = abs((bearing - yaw + 180.0) % 360.0 - 180.0)
         if heading_error > KAMIKAZE_MAX_DIVE_HEADING_ERROR:
             self._create_warning("Dive starts %.0f degrees off the target bearing, QR may not be readable" % heading_error)
-        # Engine off, wings pinned, and pitch handed entirely to the altitude
-        # demand so TECS stops trading the descent against airspeed.
-        k = ParamOwner.KAMIKAZE
-        self.__set_param(b'THR_MAX', KAMIKAZE_DIVE_THR_MAX, k)
-        self.__set_param(b'TECS_SPDWEIGHT', KAMIKAZE_TECS_SPDWEIGHT, k)
-        self.__set_param(b'TECS_TIME_CONST', KAMIKAZE_TECS_TIME_CONST, k)
-        self.__set_param(b'TECS_VERT_ACC', KAMIKAZE_TECS_VERT_ACC, k)
-        self.__set_param_group('ROLL_LIMIT_DEG',
-                               [(b'ROLL_LIMIT_DEG', KAMIKAZE_DIVE_ROLL_LIMIT),
-                                (b'LIM_ROLL_CD', KAMIKAZE_DIVE_ROLL_LIMIT * 100.0)], k)
+        self.__apply_kamikaze_phase_params('dalış', KAMIKAZE_DIVE_PARAMS)
         self.kamikaze_dive_sink_max = 0.0
         self.kamikaze_lowest_alt = current_alt
         self.kamikaze_steepest_angle = 0.0
@@ -1892,21 +1866,7 @@ class MainWindow(QMainWindow):
         self.next_telemetry.lock.lockForRead()
         self.kamikaze_recover_heading = self.next_telemetry.iha_yonelme
         self.next_telemetry.lock.unlock()
-        k = ParamOwner.KAMIKAZE
-        self.__set_param(b'THR_MAX', KAMIKAZE_RECOVER_THR_MAX, k)
-        self.__set_param(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT, k)
-        self.__set_param_group('PTCH_LIM_MIN_DEG',
-                               [(b'PTCH_LIM_MIN_DEG', KAMIKAZE_RECOVER_PITCH_MIN),
-                                (b'LIM_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN * 100.0)], k)
-        self.__set_param(b'TECS_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN, k)
-        # Give some bank authority back: the dive pinned it at 15 deg so the
-        # nose would hold the QR line, but the recovery may have to steer away
-        # from an HSS zone (see __kamikaze_recover_lead) and cannot do that at
-        # 15. Not all the way back to the run-in value -- see
-        # KAMIKAZE_RECOVER_ROLL_LIMIT.
-        self.__set_param_group('ROLL_LIMIT_DEG',
-                               [(b'ROLL_LIMIT_DEG', KAMIKAZE_RECOVER_ROLL_LIMIT),
-                                (b'LIM_ROLL_CD', KAMIKAZE_RECOVER_ROLL_LIMIT * 100.0)], k)
+        self.__apply_kamikaze_phase_params('kurtarma', KAMIKAZE_RECOVER_PARAMS)
         # One destination again: ahead of the vehicle, high enough that it keeps
         # climbing through RECOVER_ALT. Being below the destination is the case
         # where ArduPlane climbs at its max rate instead of following a slope,

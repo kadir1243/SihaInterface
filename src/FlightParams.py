@@ -397,6 +397,78 @@ HSS_SAFETY_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('TKOFF_THR_MAX_T',  [(b'TKOFF_THR_MAX_T', TAKEOFF_FULL_THROTTLE_TIME)]),
 ]
 
+# --- Kamikaze fazlarının parametreleri -------------------------------------
+# Koşunun üç fazı, BASELINE_PARAMS ile aynı biçimde. Buradaki HER kanonik isim
+# BASELINE_PARAMS'ta da bulunmak zorunda, yoksa koşu bittiğinde o parametre
+# manevra değeriyle araçta kalır; bunu aşağıdaki assert kontrol ediyor.
+#
+# Dalış sırasında TECS_SINK_MAX ayrıca ve sürekli yazılıyor
+# (MainWindow.__update_dive_sink_rate) -- o bir denetim döngüsü, faz ön ayarı
+# değil, o yüzden bu tablolarda yok.
+
+# Burun tabanı: uçağın dalışa girebilmesi için yol açısını bir an geçmesi
+# gerekiyor, o yüzden taban dalış açısının DIVE_PITCH_MARGIN kadar altında.
+KAMIKAZE_DIVE_PITCH_FLOOR: float = -(KAMIKAZE_DIVE_ANGLE + KAMIKAZE_DIVE_PITCH_MARGIN)
+
+# Hedefe hizalanma fazı. Eski (centidegree: LIM_*) ve yeni (degree: *_DEG)
+# ArduPlane isimleri birlikte yazılıyor; 4.1+ bunları yeniden adlandırdı.
+KAMIKAZE_APPROACH_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
+    # Hâlâ süren bir reposition ya da önceki faz THR_MAX'ı başka yerde bırakmış
+    # olabilir, o yüzden açıkça yazılıyor.
+    ('THR_MAX',          [(b'THR_MAX', KAMIKAZE_APPROACH_THR_MAX)]),
+    ('PTCH_LIM_MIN_DEG', [(b'PTCH_LIM_MIN_DEG', KAMIKAZE_DIVE_PITCH_FLOOR),
+                          (b'LIM_PITCH_MIN', KAMIKAZE_DIVE_PITCH_FLOOR * 100.0)]),
+    # TECS kendi pitch tabanını LIM_PITCH_MIN'in üstüne koyuyor ve dar olan
+    # kazanıyor; ikisi birden açılmazsa GUIDED burnu seyir limitinin altına
+    # hiç indirmiyor.
+    ('TECS_PITCH_MIN',   [(b'TECS_PITCH_MIN', KAMIKAZE_DIVE_PITCH_FLOOR)]),
+    ('ROLL_LIMIT_DEG',   [(b'ROLL_LIMIT_DEG', KAMIKAZE_APPROACH_ROLL_LIMIT),
+                          (b'LIM_ROLL_CD', KAMIKAZE_APPROACH_ROLL_LIMIT * 100.0)]),
+    ('TECS_CLMB_MAX',    [(b'TECS_CLMB_MAX', KAMIKAZE_TECS_CLMB_MAX)]),
+    # Bu yazı düştüğünde TECS hızı seyir limitinde tutuyor ve dalış hiç
+    # gelişmiyor -- isim değişikliği bulunana kadar sessizce olan buydu.
+    ('ARSPD_FBW_MAX',    [(b'AIRSPEED_MAX', KAMIKAZE_ARSPD_FBW_MAX),
+                          (b'ARSPD_FBW_MAX', KAMIKAZE_ARSPD_FBW_MAX)]),
+    ('ALT_SLOPE_MIN',    [(b'ALT_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN),
+                          (b'GLIDE_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN)]),
+]
+
+# Dalış. Motor kapalı, kanatlar sabitlenmiş ve pitch tamamen irtifa talebine
+# bırakılmış: SPDWEIGHT 0 olmazsa TECS alçalma talebiyle hava hızını
+# birbirine karşı oynatıp dalışı salındırıyor.
+KAMIKAZE_DIVE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
+    ('THR_MAX',          [(b'THR_MAX', KAMIKAZE_DIVE_THR_MAX)]),
+    ('TECS_SPDWEIGHT',   [(b'TECS_SPDWEIGHT', KAMIKAZE_TECS_SPDWEIGHT)]),
+    ('TECS_TIME_CONST',  [(b'TECS_TIME_CONST', KAMIKAZE_TECS_TIME_CONST)]),
+    ('TECS_VERT_ACC',    [(b'TECS_VERT_ACC', KAMIKAZE_TECS_VERT_ACC)]),
+    ('ROLL_LIMIT_DEG',   [(b'ROLL_LIMIT_DEG', KAMIKAZE_DIVE_ROLL_LIMIT),
+                          (b'LIM_ROLL_CD', KAMIKAZE_DIVE_ROLL_LIMIT * 100.0)]),
+]
+
+# Kurtarma tırmanışı. Pitch tabanı seviyeye çekiliyor: dalışın -60'ı burada
+# kalırsa TECS burnu aşağıda tutup gereksiz irtifa yiyor ve MIN_ALT tutmuyor.
+# Yatış yetkisi kısmen geri veriliyor -- bkz. KAMIKAZE_RECOVER_ROLL_LIMIT.
+KAMIKAZE_RECOVER_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
+    ('THR_MAX',          [(b'THR_MAX', KAMIKAZE_RECOVER_THR_MAX)]),
+    ('TECS_SPDWEIGHT',   [(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)]),
+    ('PTCH_LIM_MIN_DEG', [(b'PTCH_LIM_MIN_DEG', KAMIKAZE_RECOVER_PITCH_MIN),
+                          (b'LIM_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN * 100.0)]),
+    ('TECS_PITCH_MIN',   [(b'TECS_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN)]),
+    ('ROLL_LIMIT_DEG',   [(b'ROLL_LIMIT_DEG', KAMIKAZE_RECOVER_ROLL_LIMIT),
+                          (b'LIM_ROLL_CD', KAMIKAZE_RECOVER_ROLL_LIMIT * 100.0)]),
+]
+
+# Bir manevranın açtığı her parametrenin baseline'da bir karşılığı olmak
+# zorunda; olmayan, koşu bittiğinde araçta manevra değeriyle kalır.
+_BASELINE_KEYS = {k for k, _ in BASELINE_PARAMS}
+for _table, _name in ((KAMIKAZE_APPROACH_PARAMS, 'APPROACH'),
+                      (KAMIKAZE_DIVE_PARAMS, 'DIVE'),
+                      (KAMIKAZE_RECOVER_PARAMS, 'RECOVER')):
+    _missing = [k for k, _ in _table if k not in _BASELINE_KEYS]
+    assert not _missing, \
+        "KAMIKAZE_%s_PARAMS içinde BASELINE_PARAMS'ta karşılığı olmayan " \
+        "parametre var, koşudan sonra araçta kalır: %s" % (_name, _missing)
+
 class ParamOwner(Enum):
     """Araç durumunun o anki sahibi. Bkz. MainWindow.__set_param."""
     BASELINE = 0
