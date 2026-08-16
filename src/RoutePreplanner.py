@@ -43,8 +43,10 @@ MIN_TURN_RADIUS_M = (GROUND_SPEED_MAX_MS ** 2) / (
 
 WP_ACCEPT_RADIUS_M = 30.0   # ArduPlane WP_RADIUS (kabul yarıçapı)
 GPS_SIGMA_M        = 5.0    # GPS konum hatası tahmini
-LATENCY_BUDGET_S   = 2.0    # Sunucu→GCS→TCP→Jetson→MAVLink→otopilot 
-TRIM_ARSPD_CM      = 1500   # 15 m/sn  
+LATENCY_BUDGET_S   = 2.0    # Sunucu→GCS→TCP→Jetson→MAVLink→otopilot
+# NOT: Seyir hızının araca yazılan değeri MainInterface.CRUISE_AIRSPEED_MS'tir
+# ve o da yukarıdaki CRUISE_SPEED_MS'ten türer. Burada ayrı bir TRIM_ARSPD_CM
+# sabiti vardı (15 m/s) ve bu hesapların varsaydığı 20 m/s ile çelişiyordu.
 
 # Planlama tamponu (Dönüş yarıçapı + Rüzgar + GPS hatası ≈ 80m)
 AVOIDANCE_BUFFER_M = 45.0
@@ -54,7 +56,15 @@ FENCE_BUFFER_M = 20.0
 
 
 # Dar geçit eşiği: iki daire arası boşluk bu değerden azsa birleştir
-GAP_MIN_M = 0.75 * WP_ACCEPT_RADIUS_M 
+GAP_MIN_M = 0.75 * WP_ACCEPT_RADIUS_M
+
+# Bir leg çözülürken görünürlük grafiğine dahil edilecek bölgelerin, leg orta
+# noktasına olan azami uzaklığına eklenen pay. Görünürlük grafiği düğüm sayısı
+# bölge sayısıyla karesel, kenar taraması ise küresel büyüdüğü için (O(n²·Z))
+# 15+ HSS'te çözüm süresi saniyeler mertebesine çıkıyordu. Leg'ten bu kadar
+# uzaktaki bir bölgenin o leg'in kaçış yolunu engellemesi için, kaçışın leg
+# uzunluğu + bu pay kadar sapması gerekirdi; pratikte olmayacak bir durum.
+PLANNER_ZONE_MARGIN_M = 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +161,14 @@ def _segment_clear_all(p1: tuple, p2: tuple,
         if _segment_circle_intersects(p1, p2, (zx, zy), zr):
             return False
     return True
+
+
+def _zones_near_segment(p1: tuple, p2: tuple, zones: list[tuple]) -> list[tuple]:
+    """Bu leg'i etkileyebilecek bölgeleri süz. Bkz. PLANNER_ZONE_MARGIN_M."""
+    leg_len = _dist(p1, p2)
+    mid = ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
+    return [z for z in zones
+            if _dist(mid, (z[0], z[1])) <= leg_len + z[2] + PLANNER_ZONE_MARGIN_M]
 
 
 # ---------------------------------------------------------------------------
@@ -551,8 +569,12 @@ def compute_safe_route(
         raw_p2 = waypoints_m[i + 1]
         p2 = _safe_point(raw_p2, commands[i + 1] if i + 1 < len(commands) else 16)
 
+        # Sadece bu leg'i etkileyebilecek bölgelerle çalış — görünürlük grafiği
+        # bölge sayısına çok duyarlı, uzaktakileri taşımanın anlamı yok.
+        leg_zones = _zones_near_segment(p1, p2, zones_m)
+
         # Bu leg çakışıyor mu?
-        leg_conflicts = [z for z in zones_m
+        leg_conflicts = [z for z in leg_zones
                          if _segment_circle_intersects(p1, p2, (z[0], z[1]), z[2])]
 
         if not leg_conflicts:
@@ -564,7 +586,7 @@ def compute_safe_route(
             conflict_ids.add(hid)
 
         # Görünürlük grafiği + Dijkstra
-        path = _visibility_graph_dijkstra(p1, p2, zones_m, d_min)
+        path = _visibility_graph_dijkstra(p1, p2, leg_zones, d_min)
 
         # path[0] = p1 (zaten eklendi), path[1:] eklenmeli
         n_path = len(path)
@@ -613,3 +635,39 @@ def fence_radius_for_hss(hss_radius_m: float,
     Böylece fence sadece gerçek ihlalde tetiklenir, normal manevrada araya girmez.
     """
     return hss_radius_m + buffer_m
+
+
+# ---------------------------------------------------------------------------
+# Nokta/Doğru — HSS Testleri (kamikaze giriş kapısı ve GUIDED bacakları için)
+#
+# Rota planlayıcı sadece AUTO görevini düzeltir. Kamikaze koşusu GUIDED'da uçar
+# ve kendi hedef noktalarını üretir; o noktaların da aynı geometriden geçmesi
+# için bu iki yardımcı paylaşılır — böylece "bölge içinde mi" sorusunun tek bir
+# tanımı olur.
+# ---------------------------------------------------------------------------
+
+def point_hits_zone(lat: float, lon: float,
+                    hss_zones: list[ServerAdsData],
+                    buffer_m: float = FENCE_BUFFER_M) -> ServerAdsData | None:
+    """Nokta herhangi bir HSS bölgesinin (tampon dahil) içinde mi?"""
+    for hss in hss_zones:
+        radius = hss.radius_m + buffer_m
+        p = _lat_lon_to_m(lat, lon, hss.lat, hss.lon)
+        if _point_in_circle(p, (0.0, 0.0), radius):
+            return hss
+    return None
+
+
+def segment_hits_zone(lat1: float, lon1: float, lat2: float, lon2: float,
+                      hss_zones: list[ServerAdsData],
+                      buffer_m: float = FENCE_BUFFER_M) -> ServerAdsData | None:
+    """(lat1,lon1)→(lat2,lon2) düz çizgisi bir HSS bölgesini kesiyor mu?"""
+    for hss in hss_zones:
+        radius = hss.radius_m + buffer_m
+        p1 = _lat_lon_to_m(lat1, lon1, hss.lat, hss.lon)
+        p2 = _lat_lon_to_m(lat2, lon2, hss.lat, hss.lon)
+        if _point_in_circle(p1, (0.0, 0.0), radius) or _point_in_circle(p2, (0.0, 0.0), radius):
+            return hss
+        if _segment_circle_intersects(p1, p2, (0.0, 0.0), radius):
+            return hss
+    return None

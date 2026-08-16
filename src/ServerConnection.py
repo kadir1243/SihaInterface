@@ -17,7 +17,7 @@ def get_session() -> Session:
 def login_to_server(target_address: str, username: str, password: str) -> int:
     if INTERNAL_DEBUG_SHOULD_BE_DISABLED_IN_PROD_BOOL_THAT_ENABLES_MY_OWN_SERVER_REPLICA_FOR_TEST:
         requests.post(target_address + "/internal/add_new_user", json={"username": username, "password": password}, headers={"Content-Type": "application/json"})
-    login = get_session().post(target_address + "/api/giris", json={"kadi": username, "sifre": password}, headers={'Content-Type': 'application/json'})
+    login = get_session().post(target_address + "/api/giris", json={"kadi": username, "sifre": password}, headers={'Content-Type': 'application/json'}, timeout=5)
     login.raise_for_status()
     return int(login.text)
 
@@ -139,6 +139,7 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
             data.iha_yonelme = s["iha_yonelme"]
             data.iha_dikilme = s["iha_dikilme"]
             data.iha_irtifa = s["iha_irtifa"]
+            data.iha_hizi = s["iha_hizi"]
             data.zaman_farki = int(s["zaman_farki"])
             uav_s.append(data)
         d.konumBilgileri = uav_s
@@ -187,6 +188,7 @@ def get_ads(target_address: str) -> list[ServerAdsData] | None:
         if 400 <= r.status_code < 500 or 500 <= r.status_code < 600:
             return None
         jdata = r.json()
+        qDebug("Received ads list: %s" % jdata)
 
         ads_list: list[ServerAdsData] = list()
         for d in jdata["hss_koordinat_bilgileri"]:
@@ -221,7 +223,7 @@ def send_kamikaze(target_address: str, start: GpsSaati, end: GpsSaati, qr_text: 
             "milisaniye": end.milisaniye
         },
         "qrMetni": qr_text
-    }, headers=headers)
+    }, headers=headers, timeout=5)
     r.raise_for_status()
 
 def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None:
@@ -234,5 +236,5 @@ def send_kilitlenme(target_address: str, end: GpsSaati, automatic: bool) -> None
                 "milisaniye": end.milisaniye
         },
         "otonom_kilitlenme": 1 if automatic else 0
-    }, headers=headers)
+    }, headers=headers, timeout=5)
     r.raise_for_status()

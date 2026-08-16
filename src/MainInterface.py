@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import os
 import re
@@ -13,11 +14,12 @@ from src.CommonUtils import TrackableDataPacketTimer, main_and_sub_mode_to_px4_u
 os.environ['MAVLINK20'] = '1'
 
 from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDebug, QThread, QObject, Signal, QLocale, \
-    QTranslator, QCoreApplication, QRegularExpression
+    QTranslator, QCoreApplication, QRegularExpression, QRunnable, QThreadPool
 from PySide6.QtGui import QAction, QDoubleValidator, Qt
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
-from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication, QMessageBox, QStyle, QProxyStyle
+from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication, QMessageBox, QStyle, QProxyStyle, \
+    QComboBox
 from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
     MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message, \
     MAVLink_global_position_int_message, MAVLink_system_time_message, MAV_CMD_DO_FENCE_ENABLE, \
@@ -25,29 +27,32 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION, MAV_FRAME_GLOBAL_INT, \
     MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION, MAVLINK_MSG_ID_MISSION_REQUEST_INT, MAV_MISSION_TYPE_FENCE, \
     MAVLINK_MSG_ID_MISSION_ACK, MAVLINK_MSG_ID_MISSION_REQUEST, MAV_FRAME_GLOBAL, MAVLINK_MSG_ID_BAD_DATA, \
-    MAVLINK_MSG_ID_COMMAND_ACK, MAV_CMD_DO_REPOSITION, MAV_RESULT_DENIED, \
+    MAVLINK_MSG_ID_COMMAND_ACK, MAV_CMD_DO_REPOSITION, MAV_RESULT_DENIED, PLANE_MODE_GUIDED, \
+    MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, \
     MAVLINK_MSG_ID_MISSION_COUNT, MAVLINK_MSG_ID_MISSION_ITEM_INT, MAVLink_mission_item_int_message, \
     MAV_MISSION_ACCEPTED, MAVLINK_MSG_ID_MISSION_ITEM, MAVLink_mission_item_message, MAV_MODE_FLAG_SAFETY_ARMED, \
     MAV_CMD_COMPONENT_ARM_DISARM, MAV_AUTOPILOT_INVALID, MAV_DATA_STREAM_ALL, \
     MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION, MAV_RESULT_TEMPORARILY_REJECTED, MAV_CMD_DO_SET_MODE, \
     MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, \
-    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT
+    MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT, MAV_TYPE_GCS, \
+    MAVLINK_MSG_ID_PARAM_VALUE
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
 from src.CameraServerConnectionInterface import CameraServerConnectionInterface
 from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions
-from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData, CRUISE_THR_MAX
+from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
+import src.ServerConnection as server_api
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
-    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze, \
-    SERVER_IS_UNREACHABLE_COUNTER, ServerAdsData
+    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze, ServerAdsData
 from src.ServerConnectionInterface import ServerConnectionInterface
 from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
 from src.HSSPollingWorker import HSSPollingWorker
-from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss
+from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss, point_hits_zone, segment_hits_zone, \
+    RoutePlanResult
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -57,6 +62,72 @@ def to_degree(x: float) -> float:
 
 def clamp(val: float, minv: float, maxv: float):
     return max(minv, min(maxv, val))
+
+# Sunucusuz (SITL) denemelerde kamikaze hedefini elle girmek zorunda kalmamak
+# için okunan yerel dosya. Depoya girmez, .gitignore'da: hedef koordinat sahaya
+# göre değişir, kaynakta sabit bir değer taşımanın anlamı yok.
+# Biçim: {"lat": 39.9044, "lon": 41.2370}
+OFFLINE_TEST_TARGET_FILE: str = "kamikaze_test_target.json"
+
+def load_offline_test_target() -> tuple[float, float] | None:
+    try:
+        with open(OFFLINE_TEST_TARGET_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return float(data["lat"]), float(data["lon"])
+    except FileNotFoundError:
+        return None
+    except (ValueError, KeyError, OSError) as e:
+        qWarning("%s okunamadı: %s" % (OFFLINE_TEST_TARGET_FILE, e))
+        return None
+
+# Uçuş zarfı sabitleri ve parametre tabloları: src/FlightParams.py
+from src.FlightParams import (
+    BASELINE_PARAMS, HSS_SAFETY_PARAMS, KAMIKAZE_AIM_OVERSHOOT, KAMIKAZE_APPROACH_ALT,
+    KAMIKAZE_APPROACH_ALT_TOLERANCE, KAMIKAZE_APPROACH_PARAMS, KAMIKAZE_DIVE_ANGLE,
+    KAMIKAZE_DIVE_PARAMS, KAMIKAZE_DIVE_ROTATION_LEAD, KAMIKAZE_DIVE_START_DISTANCE,
+    KAMIKAZE_DIVE_TRIM_GAIN, KAMIKAZE_DIVE_TRIM_MAX, KAMIKAZE_LOITER_RADIUS,
+    KAMIKAZE_MAX_DIVE_HEADING_ERROR, KAMIKAZE_MAX_RUN_TIME, KAMIKAZE_MIN_AIM_ALT, KAMIKAZE_MIN_ALT,
+    KAMIKAZE_MIN_VALID_SPEED, KAMIKAZE_PULLOUT_PEAK_WINDOW, KAMIKAZE_PULLOUT_TIME, KAMIKAZE_RECOVER_ALT,
+    KAMIKAZE_RECOVER_HEADING_OFFSETS, KAMIKAZE_RECOVER_LEAD, KAMIKAZE_RECOVER_LEAD_FRACTIONS,
+    KAMIKAZE_RECOVER_PARAMS, KAMIKAZE_SINK_STEP, KAMIKAZE_SINK_WINDOW, KAMIKAZE_TARGET_REFRESH,
+    KAMIKAZE_TECS_SINK_MAX, KAMIKAZE_TICK_INTERVAL, PARAM_ACK_TIMEOUT, PARAM_MAX_ATTEMPTS, ParamOwner
+)
+
+
+class RoutePlanSignals(QObject):
+    # (RoutePlanResult | None). Lives on the GUI thread, so the connection from
+    # the pool thread is automatically queued. Tipi object: hash değerleri 64
+    # bit olabiliyor ve Qt'nin int'i 32 bit.
+    finished = Signal(object, object)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+
+class RoutePlanTask(QRunnable):
+    """
+    compute_safe_route'u havuz thread'inde çalıştırır.
+
+    GUI thread'inde çalıştırılmamalı: görünürlük grafiği bölge sayısına göre
+    karesel büyüdüğü için kalabalık bir HSS listesi thread'i saniyelerce
+    kilitleyebilir. Kamikaze'nin dalışı kesme kararı da (kamikaze_timer) aynı
+    thread'de olduğundan, dalış sırasındaki bir kilitlenme yere çakılma demek.
+    """
+    def __init__(self, waypoints: list, zones: list, plan_hash: int, signals: RoutePlanSignals):
+        super().__init__()
+        self._waypoints = waypoints
+        self._zones = zones
+        self._plan_hash = plan_hash
+        self._signals = signals
+
+    def run(self):
+        result = None
+        try:
+            result = compute_safe_route(self._waypoints, self._zones)
+        except Exception as e:
+            qWarning("[RoutePreplanner] Rota hesabı başarısız: %s" % e)
+        # Hata durumunda da sinyal atılıyor: atılmazsa _plan_in_flight sonsuza
+        # kadar açık kalır ve bir daha hiç rota planlanmaz.
+        self._signals.finished.emit(result, self._plan_hash)
 
 class MavlinkWorkerSignals(QObject):
     set_fly_mode = Signal(int)
@@ -237,6 +308,7 @@ class MavlinkWorker(QObject):
     mission_upload_success = Signal(int)  # count
     mission_upload_failed = Signal(str)
     mission_current_changed = Signal(int)
+    param_value_received = Signal(str, float)
     remove_reposition_location = Signal()
     worker_signals: MavlinkWorkerSignals
     _mission_last_activity_time: float
@@ -472,6 +544,13 @@ class MavlinkWorker(QObject):
                     qDebug("CommandACK received for command %s and result %s" % (command, result))
             elif msgID == MAVLINK_MSG_ID_MISSION_CURRENT:
                 self.mission_current_changed.emit(packet.seq)
+            elif msgID == MAVLINK_MSG_ID_PARAM_VALUE:
+                # ArduPilot her PARAM_SET'e PARAM_VALUE ile cevap verir; bu
+                # MainWindow'daki bekleyen yazıların teyidi (bkz. __set_param).
+                param_id = packet.param_id
+                if isinstance(param_id, bytes):
+                    param_id = param_id.decode('ascii', 'replace')
+                self.param_value_received.emit(param_id.rstrip('\x00'), float(packet.param_value))
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
                 e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
                 data_enum_values = e.value[4]
@@ -542,6 +621,35 @@ class NoAccentStyle(QProxyStyle):
         super().drawPrimitive(element, option, painter, widget)
 
 
+class TimerHoldFixedValue(QTimer):
+    """
+    Operatörün seçimini, araçtan gelen bildirime karşı bir süre korur.
+
+    Operatör combobox'tan arm/mod seçtiğinde komut araca gider, ama araç onu
+    uygulayana kadar heartbeat eski değeri bildirmeye devam eder. O aralıkta
+    bildirimi kutuya yazmak seçimi geri alır ve kutu operatörün tıkladığı
+    değerden kendiliğinden dönmüş gibi görünür.
+
+    Bekleme yalnızca burada, arayüz tarafında yapılabilir: araç komutu
+    reddederse heartbeat eski değeri bildirmeye devam eder ve kutuyu gerçeğe
+    geri çeken şey tam olarak o tekrarlardır. Telemetri tarafına "değişmediyse
+    yollama" filtresi konsaydı o düzeltme hiç gelmezdi.
+    """
+
+    def __init__(self, parent: QObject, hold_ms: int = 2000):
+        super().__init__(parent, singleShot=True, interval=hold_ms)
+
+    def hold(self) -> None:
+        """Operatör kutuya dokundu; bekleme penceresini baştan başlat."""
+        self.start()
+
+    def apply_reported(self, combobox: QComboBox, index: int) -> None:
+        """Aracın bildirdiği değeri kutuya yaz (bekleme sürmüyorsa)."""
+        if self.isActive() or combobox.currentIndex() == index:
+            return
+        combobox.setCurrentIndex(index)
+
+
 class MainWindow(QMainWindow):
     ui: Ui_MainWindow
     uav_connection: UavConnection = UavConnection()
@@ -568,6 +676,23 @@ class MainWindow(QMainWindow):
     _current_mission_waypoints: list = []
     _pixhawk_current_seq: int = 0
     _last_planned_hash = None
+    # Kamikaze koşusu aracın sahibiyken gelen HSS anlık görüntüsü buraya
+    # bırakılır ve koşu biter bitmez uygulanır. Bkz. _on_hss_updated.
+    _deferred_snapshot: HssSnapshot | None = None
+    _deferred_manual_ads: bool = False
+    _plan_in_flight: bool = False
+    _fence_upload_retries: int = 0
+    # Doğrulama amaçlı görev indirmesi rota planlamasını yeniden tetiklemesin.
+    _awaiting_mission_verification: bool = False
+    _param_pending: dict
+    _param_retry_timer: QTimer
+    _route_plan_signals: RoutePlanSignals
+    _kamikaze_run_started_at: float = 0.0
+    uav_is_armed: bool = False
+    _mode_change_cooldown: TimerHoldFixedValue
+    _arm_change_cooldown: TimerHoldFixedValue
+    _gcs_heartbeat_timer: QTimer
+    _kamikaze_target_cooldown: QTimer
 
     def __init__(self):
         QMainWindow.__init__(self)
@@ -585,9 +710,30 @@ class MainWindow(QMainWindow):
         self.kamikaze_target_lon = 0.0
         self.kamikaze_previous_mode = None
         self.kamikaze_timer = QTimer(self)
-        self.kamikaze_timer.setInterval(100)
+        self.kamikaze_timer.setInterval(KAMIKAZE_TICK_INTERVAL)
         self.kamikaze_timer.timeout.connect(self.__kamikaze_loop)
+        self.kamikaze_recover_heading = 0.0
+        self.kamikaze_alt_history = []
+        self.kamikaze_dive_sink_max = 0.0
+        self.kamikaze_lowest_alt = math.inf
+        self.kamikaze_steepest_angle = 0.0
+        self.kamikaze_steepest_pitch = 0.0
+        self.kamikaze_sink_peaks = []
+        self.kamikaze_dive_started_at = 0.0
+        self.kamikaze_dive_start_alt = 0.0
+        self.kamikaze_dive_duration = 0.0
+        self._kamikaze_climb_warned = False
+        self._kamikaze_target_cooldown = QTimer(self, singleShot=True, interval=KAMIKAZE_TARGET_REFRESH)
         self.waits_for_qr = False
+        self._param_pending = {}
+        self._param_retry_timer = QTimer(self, interval=PARAM_ACK_TIMEOUT)
+        self._param_retry_timer.timeout.connect(self.__retry_pending_params)
+        self._route_plan_signals = RoutePlanSignals(self)
+        self._route_plan_signals.finished.connect(self._on_route_plan_ready)
+        self._mode_change_cooldown = TimerHoldFixedValue(self)
+        self._arm_change_cooldown = TimerHoldFixedValue(self)
+        self._gcs_heartbeat_timer = QTimer(self, interval=1000)
+        self._gcs_heartbeat_timer.timeout.connect(self.__send_gcs_heartbeat)
 
         self.current_pilot = MAV_AUTOPILOT_INVALID
 
@@ -718,6 +864,7 @@ class MainWindow(QMainWindow):
         self._create_warning("Mission Download taking really long, probably vehicle connection has been lost")
         self.next_mission_order_seq_id = 0
         self.requested_to_get_mission = False
+        self._awaiting_mission_verification = False
         self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
         self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
@@ -764,6 +911,16 @@ class MainWindow(QMainWindow):
                     qDebug("[Mission] Filtering outlier WP %d at (%.4f, %.4f)" % (i, pos.latitude(), pos.longitude()))
                     continue
                 self._current_mission_waypoints.append(pos)
+            if self._awaiting_mission_verification:
+                # Bu indirme, az önce yüklediğimiz düzeltilmiş rotanın teyidi.
+                # Yeniden planlamayı tetiklemek yükle→indir→planla→yükle
+                # döngüsüne yol açardı.
+                self._awaiting_mission_verification = False
+                self._create_warning("Rota doğrulandı: araçta %d waypoint var"
+                                     % len(self._current_mission_waypoints))
+                qDebug("[MissionUpload] Verification download complete: %d waypoints"
+                       % len(self._current_mission_waypoints))
+                return
             # Hash sıfırla — yeni mission'da HSS değişmemiş olsa bile rota yeniden hesaplansın
             self._last_planned_hash = None
             self._trigger_route_replanning()
@@ -1033,11 +1190,21 @@ class MainWindow(QMainWindow):
     def __refresh_ads(self):
         if not self.server_connection.ip:
             return
-        result = get_ads(self.server_connection.get_address())
-        if result is not None:
-            self.ui.map_view.update_server_ads_data(result)
+        try:
+            ads_list = get_ads(self.server_connection.get_address())
+        except Exception as e:
+            self._create_warning("Could not get HSS coordinates from server: %s" % e)
+            return
+        if ads_list is None:
+            return
+        # Elle yenileme de otomatik polling ile aynı yoldan geçiyor: haritayı,
+        # tampon çemberleri, çiti ve rotayı güncelleyen tek bir akış var ve
+        # kamikaze koşusu sürerken erteleme kuralı da orada uygulanıyor.
+        next_seq = (self._current_snapshot.seq + 1) if self._current_snapshot is not None else 1
+        self._on_hss_updated(HssSnapshot(seq=next_seq, zones=ads_list))
 
     def __setArmStatus(self, is_arm: int):
+        self._arm_change_cooldown.hold()
         qDebug("Trying to send armed status: %s" % is_arm)
 
         self.mavlink_connection.mav.command_long_send(
@@ -1085,6 +1252,8 @@ class MainWindow(QMainWindow):
         self.geofence_dialog.close()
 
     def _enable_fence(self) -> None:
+        if self.mavlink_connection is None:
+            return
         if self.current_pilot != MAV_AUTOPILOT_PX4:
             self.mavlink_connection.mav.command_long_send(
                 self.mavlink_connection.target_system,
@@ -1191,6 +1360,11 @@ class MainWindow(QMainWindow):
             self.ads_list_cache = []
             self.requested_to_send_fence_with_fence = False
             self.fence_upload_in_progress = False   # FIX: kilit serbest
+            self._fence_upload_retries = 0
+            # Çit ancak tamamı araca yüklendikten SONRA aktif edilir: yükleme
+            # sürerken aktif etmek yarım listeyle ihlal üretir.
+            self._enable_fence()
+            qDebug("[Fence] Çit yüklendi ve aktif edildi")
             # FIX: yükleme biterken bekleyen istek varsa hemen işle
             if self.pending_fence_ads_list is not None:
                 pending = self.pending_fence_ads_list
@@ -1232,9 +1406,21 @@ class MainWindow(QMainWindow):
         self._create_warning("Fence Upload taking really long, probably vehicle connection has been lost")
         self.ads_list_cache = []
         self.requested_to_send_fence_with_fence = False
-
         self.fence_upload_in_progress = False        # FIX: timeout'da da kilidi serbest bırak
-        self.pending_fence_ads_list = None           # FIX: bekleyen istek de temizlenir
+        # Bekleyen istek burada atılmamalı: timeout'a düşen yükleme atılırsa
+        # araçta o ana kadar yazılmış eksik çit kalır. Sınırlı sayıda tekrar
+        # denenir.
+        pending = self.pending_fence_ads_list
+        self.pending_fence_ads_list = None
+        if pending is None:
+            return
+        if self._fence_upload_retries >= 2:
+            self._fence_upload_retries = 0
+            self._create_warning("Çit yüklenemedi — araçtaki çit güncel DEĞİL!")
+            return
+        self._fence_upload_retries += 1
+        qWarning("[Fence] Yükleme zaman aşımı, tekrar deneniyor (%d/2)" % self._fence_upload_retries)
+        self.update_geofence_data(pending)
 
     def __reset_geofence_dialog(self):
         self.geofence_dialog = None
@@ -1246,18 +1432,147 @@ class MainWindow(QMainWindow):
     kamikaze_target_lon: float
     kamikaze_previous_mode: int | None
     kamikaze_timer: QTimer
+    kamikaze_recover_heading: float
+    kamikaze_alt_history: list[tuple[float, float]]  # (zaman, irtifa)
+    kamikaze_dive_sink_max: float
+    kamikaze_lowest_alt: float
     waits_for_qr: bool
+    kamikaze_qr_text: str
 
-    def __set_param(self, name: bytes, value: float):
+    # --- Parametre yazma: sahiplik + teyit ---------------------------------
+
+    def is_kamikaze_happening(self) -> bool:
+        return self.kamikaze_state != KamikazeState.IDLE
+
+    def __send_param_writes(self, writes: list[tuple[bytes, float]]) -> None:
+        try:
+            for name, value in writes:
+                self.mavlink_connection.mav.param_set_send(
+                    self.mavlink_connection.target_system,
+                    self.mavlink_connection.target_component,
+                    name,
+                    value,
+                    9
+                )
+        except OSError as e:
+            # Bağlantı az önce ölmüş olabilir (USB çıktı, seri port düştü).
+            # Baseline yazıları tam da o anda -- kamikaze bırakılırken --
+            # gönderiliyor, o yüzden burada patlamak sinyal zincirini kırardı.
+            qWarning("Parametre gönderilemedi, bağlantı düşmüş olabilir: %s" % e)
+
+    def __set_param(self, name: bytes, value: float,
+                    owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True) -> None:
+        self.__set_param_group(name.decode('ascii'), [(name, value)], owner, verify)
+
+    def __set_param_group(self, key: str, writes: list[tuple[bytes, float]],
+                          owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True) -> None:
+        """
+        Tek bir mantıksal parametreyi yazar. writes birden fazla mavlink ismi
+        içerebilir (eski/yeni firmware alias'ları); teyit için HERHANGİ birinden
+        PARAM_VALUE gelmesi yeterlidir, çünkü firmware'de olmayan alias hiç
+        cevap vermez.
+
+        owner, o an aracı kimin sürdüğüdür. Kamikaze koşusu sürerken HSS
+        katmanından (veya başka bir yerden) gelen bir yazı sessizce uygulanmaz,
+        engellenir ve loglanır -- iki katmanın aynı anda parametre yazmasının
+        önündeki tek gerçek engel bu.
+        """
         if self.mavlink_connection is None:
             return
-        self.mavlink_connection.mav.param_set_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            name,
-            value,
-            9
-        )
+        active_owner = ParamOwner.KAMIKAZE if self.is_kamikaze_happening() else ParamOwner.BASELINE
+        if owner is not active_owner:
+            qWarning("Parametre yazısı engellendi (%s): sahip %s, isteyen %s"
+                     % (key, active_owner.name, owner.name))
+            return
+        self.__send_param_writes(writes)
+        if not verify:
+            self._param_pending.pop(key, None)
+            return
+        # owner da saklanıyor: tekrar gönderim sırasında aracın sahibi
+        # değişmişse bu yazı bayattır ve gönderilmemeli.
+        self._param_pending[key] = {'writes': writes, 'attempts': 1, 'owner': owner}
+        if not self._param_retry_timer.isActive():
+            self._param_retry_timer.start()
+
+    def _on_param_value(self, name: str, value: float) -> None:
+        for key in list(self._param_pending.keys()):
+            entry = self._param_pending[key]
+            for param_name, expected in entry['writes']:
+                if param_name.decode('ascii', 'replace') != name:
+                    continue
+                if abs(value - expected) <= max(1e-3, abs(expected) * 1e-4):
+                    del self._param_pending[key]
+                break
+        if not self._param_pending:
+            self._param_retry_timer.stop()
+
+    def __retry_pending_params(self) -> None:
+        if self.mavlink_connection is None:
+            self._param_pending.clear()
+            self._param_retry_timer.stop()
+            return
+        active_owner = ParamOwner.KAMIKAZE if self.is_kamikaze_happening() else ParamOwner.BASELINE
+        for key in list(self._param_pending.keys()):
+            entry = self._param_pending[key]
+            # Sahiplik kontrolü tekrar gönderimde de geçerli. Bu olmadan,
+            # kamikaze başlamadan hemen önce kuyruğa girmiş bir baseline yazısı
+            # (ör. TECS_SINK_MAX=5) dalışın ortasında yeniden gönderilip
+            # kamikaze'nin değerini eziyordu -- __set_param_group'taki kapı
+            # buradan atlanıyordu.
+            if entry['owner'] is not active_owner:
+                qDebug("Bayat parametre yazısı düşürüldü: %s (%s -> %s)"
+                       % (key, entry['owner'].name, active_owner.name))
+                del self._param_pending[key]
+                continue
+            if entry['attempts'] >= PARAM_MAX_ATTEMPTS:
+                del self._param_pending[key]
+                self._create_warning("Parametre yazılamadı: %s — otopilot teyit vermedi!" % key)
+                continue
+            entry['attempts'] += 1
+            qDebug("Parametre tekrar gönderiliyor: %s (deneme %d)" % (key, entry['attempts']))
+            self.__send_param_writes(entry['writes'])
+        if not self._param_pending:
+            self._param_retry_timer.stop()
+
+    def apply_baseline_params(self) -> None:
+        """
+        Aracı HSS'in planladığı normal seyir durumuna döndürür.
+
+        Kamikaze bitişi, force-end, reposition bırakma ve bağlantı kurulması --
+        hepsi buradan geçer. Baseline'ın tek tanımı BASELINE_PARAMS tablosudur;
+        buraya bir literal yazmak, bu düzeltmenin çözdüğü hatayı geri getirir.
+        """
+        if self.mavlink_connection is None:
+            return
+        for key, writes in BASELINE_PARAMS:
+            self.__set_param_group(key, writes, ParamOwner.BASELINE)
+        self.ui.map_view.vehicle_locked = False
+        qDebug("[Params] Baseline uygulandı (%d parametre)" % len(BASELINE_PARAMS))
+
+    def apply_hss_safety_params(self) -> None:
+        """Çit/rally/AUTO seyrüsefer parametreleri — bağlantıda bir kez."""
+        if self.mavlink_connection is None:
+            return
+        for key, writes in HSS_SAFETY_PARAMS:
+            self.__set_param_group(key, writes, ParamOwner.BASELINE)
+        qDebug("[Params] HSS güvenlik parametreleri uygulandı (%d parametre)" % len(HSS_SAFETY_PARAMS))
+
+    def __apply_kamikaze_phase_params(self, phase: str,
+                                      table: list[tuple[str, list[tuple[bytes, float]]]]) -> None:
+        """
+        Kamikaze fazının parametre ön ayarını yazar.
+
+        Fazların tanımı src/FlightParams.py'deki KAMIKAZE_*_PARAMS tablolarında;
+        buraya literal yazılmaz. Sahip KAMIKAZE olduğu için bu yazılar koşu
+        sürerken baseline tarafından ezilmez (bkz. __set_param_group), ve koşu
+        biterken apply_baseline_params hepsini geri kapatır -- kapatabildiği
+        FlightParams'taki assert ile garanti altında.
+        """
+        if self.mavlink_connection is None:
+            return
+        for key, writes in table:
+            self.__set_param_group(key, writes, ParamOwner.KAMIKAZE)
+        qDebug("[Params] Kamikaze %s uygulandı (%d parametre)" % (phase, len(table)))
 
     def __start_kamikaze(self):
         if self.kamikaze_state != KamikazeState.IDLE:
@@ -1269,88 +1584,371 @@ class MainWindow(QMainWindow):
             qWarning("No UAV Connection, Can not Start Kamikaze")
             return
         try:
-            latitude: float = float(self.ui.kamikaze_latitude.text())
-            longitude: float = float(self.ui.kamikaze_longitude.text())
+            target_latitude: float = float(self.ui.kamikaze_latitude.text())
+            target_longitude: float = float(self.ui.kamikaze_longitude.text())
         except ValueError:
             qWarning("Invalid Kamikaze Coordinates")
             return
 
-        self.kamikaze_target_lat = latitude
-        self.kamikaze_target_lon = longitude
+        self.kamikaze_target_lat = target_latitude
+        self.kamikaze_target_lon = target_longitude
 
         self.next_telemetry.lock.lockForRead()
         self.kamikaze_start = self.next_telemetry.gps_saati
         self.kamikaze_original_alt = self.next_telemetry.iha_irtifa
+        current_lat: float = self.next_telemetry.iha_enlem
+        current_lon: float = self.next_telemetry.iha_boylam
         self.next_telemetry.lock.unlock()
         if self.kamikaze_original_alt <= 0:
             qWarning("No Valid UAV Info Found, Cancelling Kamikaze")
             return
-        if not self.ui.arm_mode.currentIndex() == 1:
+        if current_lat == 0 and current_lon == 0:
+            self._create_warning("No valid UAV position yet, refusing to start kamikaze")
+            return
+        if not self.uav_is_armed:
             self._create_warning("UAV is not armed, refusing to start kamikaze")
             return
         if self.kamikaze_original_alt < 80.0:
             self._create_warning("Altitude %.1fm is below the 80m kamikaze minimum, refusing to start" % self.kamikaze_original_alt)
             return
+        # Giriş kapısı. Koşu boyunca HSS katmanı donduruluyor (fence yüklemesi,
+        # rota planlama, mission yüklemesi yok), o yüzden koşuya girerken
+        # durumun temiz olduğundan emin olmak gerekiyor -- yoksa "gözünü kapat
+        # ve dal" olur.
+        if self.fence_upload_in_progress or (self.mavlink_worker is not None
+                                             and self.mavlink_worker._mission_upload_state > 0):
+            self._create_warning("Çit/rota yüklemesi sürüyor, kamikaze başlatılmıyor")
+            return
+        zones = self._hss_zones()
+        hit = point_hits_zone(target_latitude, target_longitude, zones)
+        if hit is not None:
+            self._create_warning("Kamikaze hedefi HSS #%s bölgesinin içinde — başlatılmıyor" % hit.id)
+            return
+        hit = segment_hits_zone(current_lat, current_lon, target_latitude, target_longitude, zones)
+        if hit is not None:
+            self._create_warning("DİKKAT: Hedefe giriş hattı HSS #%s bölgesini kesiyor!" % hit.id)
 
         self.kamikaze_previous_mode = self.ui.fly_mode_combobox.currentIndex()
         self.kamikaze_state = KamikazeState.APPROACHING
+        self._kamikaze_run_started_at = time.monotonic()
+        # Araç artık kamikaze'nin: HSS katmanı ve harita reposition'ı bu andan
+        # itibaren parametre yazamaz (bkz. __set_param_group, MapWidget).
+        self.ui.map_view.vehicle_locked = True
         self.kamikaze_timer.start()
 
-        # Dive pitch limit -45deg and turn/roll limit 55deg. Set both the old
-        # (centidegree: LIM_*) and new (degree: *_DEG) ArduPlane parameter names so
-        # this works regardless of firmware version (4.1+ renamed these params).
-        # THR_MAX must be 100 here: FBWA clamps even RC-override throttle to it,
-        # and a still-active reposition may have left it at 60.
-        self.__set_param(b'THR_MAX', 100.0)
-        self.__set_param(b'PTCH_LIM_MIN_DEG', -45.0)
-        self.__set_param(b'LIM_PITCH_MIN', -4500.0)
-        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-        self.__set_param(b'LIM_ROLL_CD', 5500.0)
-        self.mavlink_connection.set_mode_apm(5)
+        self.__apply_kamikaze_phase_params('hizalanma', KAMIKAZE_APPROACH_PARAMS)
+
+        self.mavlink_connection.set_mode_apm(PLANE_MODE_GUIDED)
+        self._mode_change_cooldown.hold()
+        self.kamikaze_alt_history.clear()
+        self.kamikaze_dive_sink_max = 0.0
+        aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
+        self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_APPROACH_ALT)
+        self._kamikaze_target_cooldown.start()
         self.waits_for_qr = True
+        self.kamikaze_qr_text = ""
         qDebug("Kamikaze Started")
+
+    def __send_guided_target(self, latitude: float, longitude: float, altitude: float):
+        # Points the GUIDED destination at a coordinate. The command carries
+        # MAV_DO_REPOSITION_FLAGS_CHANGE_MODE so it is accepted (and switches to
+        # GUIDED) even if the mode change was missed. Sent once per phase: see
+        # KAMIKAZE_TARGET_REFRESH for why it must not be repeated mid-dive.
+        if self.mavlink_connection is None:
+            return
+        self.mavlink_connection.mav.command_int_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            MAV_CMD_DO_REPOSITION,
+            0,
+            0,
+            -1.0,  # ground speed, -1 keeps the current one
+            MAV_DO_REPOSITION_FLAGS_CHANGE_MODE,
+            KAMIKAZE_LOITER_RADIUS,
+            float('nan'),  # yaw, NaN keeps the current one
+            int(latitude * 10 ** 7),
+            int(longitude * 10 ** 7),
+            max(KAMIKAZE_MIN_AIM_ALT, altitude)
+        )
 
     def __kamikaze_loop(self):
         if self.kamikaze_state == KamikazeState.IDLE:
+            return
+
+        # Watchdog: koşunun kendiliğinden bitmediği durumlar var (irtifa
+        # yetmezse APPROACHING sonsuza kadar tur atar) ve koşu sürerken HSS
+        # katmanı donuk. Bkz. KAMIKAZE_MAX_RUN_TIME.
+        if time.monotonic() - self._kamikaze_run_started_at > KAMIKAZE_MAX_RUN_TIME:
+            self._create_warning("Kamikaze %.0f saniyede tamamlanamadı, iptal ediliyor"
+                                 % KAMIKAZE_MAX_RUN_TIME)
+            self.__finish_kamikaze()
             return
 
         self.next_telemetry.lock.lockForRead()
         current_lat: float = self.next_telemetry.iha_enlem
         current_lon: float = self.next_telemetry.iha_boylam
         current_alt: float = self.next_telemetry.iha_irtifa
-        current_pitch: float = self.next_telemetry.iha_dikilme
+        ground_speed: float = self.next_telemetry.iha_hiz
+        pitch: float = self.next_telemetry.iha_dikilme
         self.next_telemetry.lock.unlock()
 
         if current_lat == 0 and current_lon == 0:
             return
 
         distance: float = MainWindow.__calculate_distance(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon)
-        roll_ch: int = self.__heading_error_to_roll_channel()
+        sink_rate: float = self.__update_sink_rate(current_alt)
 
         if self.kamikaze_state == KamikazeState.APPROACHING:
-            alt_error: float = 120.0 - current_alt
-            pitch_offset: int = int(alt_error * 5)
-            pitch_ch: int = 1500 + max(-200, min(200, pitch_offset))
-            self.__send_rc_override(roll_ch, pitch_ch, 1550)
-            if distance <= 105.0:
-                qDebug(f"Remaining Distance is {distance:.1f}m, entering dive state")
-                self.mavlink_connection.set_mode_apm(5)
-                self.kamikaze_state = KamikazeState.DIVING
+            # GUIDED flies the run-in and the climb by itself; the destination
+            # is only repeated slowly so a dropped command still gets through,
+            # and it is recomputed each time because the line it has to sit on
+            # is the one the vehicle is currently running in along.
+            if not self._kamikaze_target_cooldown.isActive():
+                aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
+                self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_APPROACH_ALT)
+                self._kamikaze_target_cooldown.start()
+            # Dive from wherever the QR point is on the nose plus the rotation
+            # lead, but never closer than the configured minimum.
+            dive_at: float = max(KAMIKAZE_DIVE_START_DISTANCE,
+                                 current_alt / math.tan(math.radians(KAMIKAZE_DIVE_ANGLE)) + KAMIKAZE_DIVE_ROTATION_LEAD)
+            if distance <= dive_at:
+                if current_alt < KAMIKAZE_APPROACH_ALT - KAMIKAZE_APPROACH_ALT_TOLERANCE:
+                    if not self._kamikaze_climb_warned:
+                        self._kamikaze_climb_warned = True
+                        self._create_warning("Only at %.0fm of the %.0fm dive altitude, going around"
+                                             % (current_alt, KAMIKAZE_APPROACH_ALT))
+                else:
+                    qDebug(f"Remaining Distance is {distance:.1f}m of {dive_at:.1f}m, entering dive state")
+                    self.__enter_dive(current_lat, current_lon, current_alt, distance, ground_speed, pitch)
 
         elif self.kamikaze_state == KamikazeState.DIVING:
-            self.__send_rc_override(1500, 1000, 1000)
-            if current_alt <= 70.0:
-                qDebug("Achieved target altitude, entering recovering state")
-                self.mavlink_connection.set_mode_apm(5)
-                self.kamikaze_state = KamikazeState.RECOVERING
+            # The destination is left alone here on purpose; the angle is held
+            # by the sink rate instead, which is a parameter write and does not
+            # disturb navigation. Break off early enough that the pull-out
+            # bottoms out at MIN_ALT instead of starting there.
+            self.__update_dive_sink_rate(ground_speed, pitch)
+            # Dalışın her tick'i loglanıyor. Tek bir "şu kadar derece daldı"
+            # sayısıyla açının neden sığ kaldığını ayırt etmek mümkün değil:
+            # tavan mı bağlıyor, burun mu dönemiyor, dalış mı erken bitiyor --
+            # üçü de aynı sonucu veriyor ama çözümleri farklı.
+            data_age: float = self.__altitude_data_age()
+            # Uçuş yolu açısı doğrudan pitch'ten: hücum açısı ölçülerek ~0
+            # bulundu ve pitch beş kat hızlı, gürültüsüz bir sinyal.
+            # Bkz. __sink_from_pitch. sink_rate (irtifa türevi) log'da çapraz
+            # kontrol olarak kalıyor.
+            sink_est: float = MainWindow.__sink_from_pitch(ground_speed, pitch)
+            flown_angle: float = max(0.0, -pitch)
+            # Hücum açısı = pitch + uçuş yolu açısı (pitch burun aşağı negatif,
+            # flown_angle alçalırken pozitif). 0'a yakınsa burun uçuş yoluyla
+            # hizalı, yani gerçek bir dalış. Büyükse uçak burnu yukarıda
+            # "çökerek" alçalıyor demektir -- bu hem sürüklemeyi patlatıp hızın
+            # artmasını engeller, hem de KAMERAYI hedeften başka yere baktırır.
+            aoa: float = pitch + math.degrees(math.atan2(sink_rate, max(ground_speed, 0.1)))
+            qDebug("[Dive] t=%.1fs alt=%.1f gs=%.1f sink=%.1f(olc %.1f) aci=%.1f hucum=%.1f talep=%.1f yas=%.2fs"
+                   % (time.monotonic() - self._kamikaze_run_started_at, current_alt,
+                      ground_speed, sink_est, sink_rate, flown_angle, aoa,
+                      self.kamikaze_dive_sink_max, data_age))
+            self.kamikaze_steepest_angle = max(self.kamikaze_steepest_angle, flown_angle)
+            self.kamikaze_steepest_pitch = min(self.kamikaze_steepest_pitch, pitch)
+            pullout_loss: float = MainWindow.__pullout_altitude_loss(
+                self.__recent_peak_sink(sink_est), data_age)
+            if current_alt - pullout_loss <= KAMIKAZE_MIN_ALT:
+                qDebug("Sink rate %.1fm/s at %.1fm (%.2fs eski) needs %.1fm to pull out, entering recovering state"
+                       % (sink_rate, current_alt, data_age, pullout_loss))
+                self.kamikaze_dive_duration = time.monotonic() - self.kamikaze_dive_started_at
+                self.__enter_recovery(current_lat, current_lon)
 
         elif self.kamikaze_state == KamikazeState.RECOVERING:
-            throttle_ch: int = 1950 if current_pitch > 0.0 else 1000
-            self.__send_rc_override(1500, 1900, throttle_ch)
-            if current_alt >= 100.0:
+            # The vehicle keeps sinking into the pull-out; this is the number
+            # KAMIKAZE_PULLOUT_TIME is meant to land on MIN_ALT.
+            self.kamikaze_lowest_alt = min(self.kamikaze_lowest_alt, current_alt)
+            if current_alt >= KAMIKAZE_RECOVER_ALT:
                 qDebug("Recovering complete, returning to last mode")
                 self.kamikaze_state = KamikazeState.RESUMING
                 self.__finish_kamikaze()
+
+    @staticmethod
+    def __pullout_altitude_loss(sink_rate: float, data_age: float) -> float:
+        # How much further the vehicle sinks between the recovery being
+        # commanded and it stopping going down (KAMIKAZE_PULLOUT_TIME), PLUS how
+        # far it has already sunk since the altitude being judged was measured.
+        # The altitude in hand is a telemetry sample that can be half a second
+        # old; ignoring that age is why a run aimed at a 70 m floor bottomed out
+        # at 61 m.
+        return sink_rate * (KAMIKAZE_PULLOUT_TIME + data_age)
+
+    def __update_sink_rate(self, current_alt: float) -> float:
+        # Only distinct altitudes are recorded, with the time they were seen, and
+        # the rate is taken over the real span between the oldest and newest
+        # sample. See KAMIKAZE_SINK_WINDOW for why the old fixed-interval
+        # assumption produced a sawtooth instead of a sink rate.
+        now: float = time.monotonic()
+        if not self.kamikaze_alt_history or self.kamikaze_alt_history[-1][1] != current_alt:
+            self.kamikaze_alt_history.append((now, current_alt))
+        # Keep at least two samples so a rate is always available, and drop
+        # anything older than the window so the estimate does not lag the dive.
+        while len(self.kamikaze_alt_history) > 2 and \
+                now - self.kamikaze_alt_history[0][0] > KAMIKAZE_SINK_WINDOW:
+            self.kamikaze_alt_history.pop(0)
+        if len(self.kamikaze_alt_history) < 2:
+            return 0.0
+        span: float = self.kamikaze_alt_history[-1][0] - self.kamikaze_alt_history[0][0]
+        if span < 1e-3:
+            return 0.0
+        return max(0.0, (self.kamikaze_alt_history[0][1] - self.kamikaze_alt_history[-1][1]) / span)
+
+    def __recent_peak_sink(self, sink_rate: float) -> float:
+        """
+        Son KAMIKAZE_PULLOUT_PEAK_WINDOW saniyedeki en yüksek alçalma hızı.
+
+        Pull-out tahmini anlık ölçümle yapılamaz: ölçülen alçalma hızı yarım
+        saniyede bir 11 ile 15 m/s arasında oynuyor ve tetik tesadüfen düşük bir
+        okumaya denk gelirse kayıp olduğundan az tahmin edilip uçak tabanın
+        altına iniyor (ölçüm: 12.1 okundu, gerçek kayıp 15 m/s'ye karşılık
+        gelen kadardı). Tepe tutma her zaman erken tarafta hata yapar.
+        """
+        now: float = time.monotonic()
+        self.kamikaze_sink_peaks.append((now, sink_rate))
+        while len(self.kamikaze_sink_peaks) > 1 and \
+                now - self.kamikaze_sink_peaks[0][0] > KAMIKAZE_PULLOUT_PEAK_WINDOW:
+            self.kamikaze_sink_peaks.pop(0)
+        return max(s for _, s in self.kamikaze_sink_peaks)
+
+    def __altitude_data_age(self) -> float:
+        """Elimizdeki irtifa örneği kaç saniye önce ölçüldü."""
+        if not self.kamikaze_alt_history:
+            return 0.0
+        return max(0.0, time.monotonic() - self.kamikaze_alt_history[-1][0])
+
+    def __kamikaze_aim_point(self, current_lat: float, current_lon: float) -> tuple[float, float]:
+        # The QR point pushed KAMIKAZE_AIM_OVERSHOOT further along the line the
+        # vehicle is running in on, so the straight line to the destination
+        # still passes exactly over the QR code while staying far enough away
+        # for L1 to keep flying it straight. See KAMIKAZE_AIM_OVERSHOOT.
+        bearing: float = math.degrees(MainWindow.__bearing_to(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon))
+        return MainWindow.__offset_coords(self.kamikaze_target_lat, self.kamikaze_target_lon, bearing, KAMIKAZE_AIM_OVERSHOOT)
+
+    @staticmethod
+    def __sink_from_pitch(ground_speed: float, pitch: float) -> float:
+        """
+        Alçalma hızını irtifa türevi yerine pitch'ten kestirir.
+
+        Ölçüldü (2026-08-14): dalış boyunca hücum açısı -8 ile +0.2 derece
+        arasında, ortalama ~-3 -- yani burun uçuş yoluyla hizalı ve pitch ZATEN
+        uçuş yolu açısı. Pitch ATTITUDE mesajıyla ~10 Hz ve pürüzsüz geliyor;
+        irtifa ise ~2 Hz ve kuantalı, türevi ±3 derecelik testere dişi üretiyor.
+        gs*tan(pitch) ölçülen alçalma hızını birebir tutturuyor (18.6*0.80=14.9,
+        ölçüm 14.9) ama gürültüsüz.
+
+        Bu, hem trim döngüsünün gürültü kovalamasını, hem de pull-out tahmininin
+        salınımın dip noktasına denk gelmesini bitiriyor.
+        """
+        if pitch >= 0.0:
+            return 0.0
+        return max(0.0, ground_speed * math.tan(math.radians(min(-pitch, 85.0))))
+
+    def __update_dive_sink_rate(self, ground_speed: float, pitch: float):
+        # Sink rate and ground speed are the two legs of the dive angle:
+        # sink = ground_speed * tan(angle). TECS_SINK_MAX caps the descent TECS
+        # is willing to demand, so slaving it to the current ground speed holds
+        # the angle as the dive accelerates. A fixed cap cannot: it gives
+        # asin(cap/V), which flattens out as speed builds.
+        if ground_speed < KAMIKAZE_MIN_VALID_SPEED:
+            return
+        # Ask for the angle plus whatever the vehicle is currently flying short
+        # of it, so TECS's own lag lands on DIVE_ANGLE instead of under it.
+        #
+        # Uçulan açı pitch'ten alınıyor, irtifa türevinden değil: hücum açısı
+        # ölçülerek ~0 bulundu (2026-08-14), yani pitch zaten uçuş yolu açısı ve
+        # çok daha az gürültülü. İrtifa türevi ±3 derece zıplayıp talebi yarım
+        # saniyede bir 24-31 m/s arasında oynatıyor; TECS'in 3 saniyelik zaman
+        # sabiti böyle bir talebi zaten takip edemez.
+        flown: float = max(0.0, -pitch)
+        trim: float = KAMIKAZE_DIVE_TRIM_GAIN * (KAMIKAZE_DIVE_ANGLE - flown)
+        commanded: float = KAMIKAZE_DIVE_ANGLE + clamp(trim, 0.0, KAMIKAZE_DIVE_TRIM_MAX)
+        wanted: float = min(KAMIKAZE_TECS_SINK_MAX, ground_speed * math.tan(math.radians(commanded)))
+        if abs(wanted - self.kamikaze_dive_sink_max) < KAMIKAZE_SINK_STEP:
+            return
+        self.kamikaze_dive_sink_max = wanted
+        # verify=True olmak ZORUNDA. Bu tek yazı dalışın tamamını belirliyor ve
+        # kamikaze_dive_sink_max yukarıdaki eşik kontrolünde "araçta bu değer
+        # var" varsayımı olarak kullanılıyor: paket düşerse kod aracın 26 m/s
+        # tavanda olduğunu sanır, araç ise baseline'daki 5 m/s'de kalır ve
+        # hesaplanan değer 0.5'ten fazla oynamadığı için bir daha ASLA
+        # gönderilmez. 5 m/s tavan ~12 m/s yer hızında 22 derecelik bir dalış
+        # demek. Teyit kuyruğu parametre adına göre tutulduğu için burada
+        # birikme olmaz: yeni yazı eskisinin yerine geçer.
+        self.__set_param(b'TECS_SINK_MAX', wanted, ParamOwner.KAMIKAZE)
+
+    def __enter_dive(self, current_lat: float, current_lon: float, current_alt: float, distance: float, ground_speed: float, pitch: float):
+        self.next_telemetry.lock.lockForRead()
+        yaw: float = self.next_telemetry.iha_yonelme
+        self.next_telemetry.lock.unlock()
+        bearing: float = math.degrees(MainWindow.__bearing_to(current_lat, current_lon, self.kamikaze_target_lat, self.kamikaze_target_lon))
+        heading_error: float = abs((bearing - yaw + 180.0) % 360.0 - 180.0)
+        if heading_error > KAMIKAZE_MAX_DIVE_HEADING_ERROR:
+            self._create_warning("Dive starts %.0f degrees off the target bearing, QR may not be readable" % heading_error)
+        self.__apply_kamikaze_phase_params('dalış', KAMIKAZE_DIVE_PARAMS)
+        self.kamikaze_dive_sink_max = 0.0
+        self.kamikaze_lowest_alt = current_alt
+        self.kamikaze_steepest_angle = 0.0
+        self.kamikaze_steepest_pitch = 0.0
+        self.kamikaze_sink_peaks = []
+        self.kamikaze_dive_started_at = time.monotonic()
+        self.kamikaze_dive_start_alt = current_alt
+        self.kamikaze_dive_duration = 0.0
+        self.__update_dive_sink_rate(ground_speed, pitch)
+        # One destination for the whole dive: down the same line, past the QR
+        # point, at ground level. With the glide slope off the vehicle stops
+        # rationing that altitude over the distance and just descends, which is
+        # what the sink rate above is there to shape.
+        aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
+        self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_MIN_AIM_ALT)
+        qDebug("Diving from %.1fm at %.1fm out, %.1fm/s ground speed" % (current_alt, distance, ground_speed))
+        self.kamikaze_state = KamikazeState.DIVING
+
+    def __enter_recovery(self, current_lat: float, current_lon: float):
+        self.next_telemetry.lock.lockForRead()
+        self.kamikaze_recover_heading = self.next_telemetry.iha_yonelme
+        self.next_telemetry.lock.unlock()
+        self.__apply_kamikaze_phase_params('kurtarma', KAMIKAZE_RECOVER_PARAMS)
+        # One destination again: ahead of the vehicle, high enough that it keeps
+        # climbing through RECOVER_ALT. Being below the destination is the case
+        # where ArduPlane climbs at its max rate instead of following a slope,
+        # which is what pulls the nose up.
+        lead_lat, lead_lon = self.__kamikaze_recover_lead(current_lat, current_lon)
+        self.__send_guided_target(lead_lat, lead_lon, KAMIKAZE_APPROACH_ALT)
+        self.kamikaze_state = KamikazeState.RECOVERING
+
+    def __kamikaze_recover_lead(self, current_lat: float, current_lon: float) -> tuple[float, float]:
+        """
+        Kurtarma tırmanışının hedef noktası. Tercih edilen nokta dalış yönünde
+        düz ileridedir, ama uçak dalışın dibinde bir HSS bölgesinin kenarında
+        olabilir ve düz ileri devam etmek onu bölgenin içine sokabilir. Rota
+        planlayıcı sadece AUTO görevini düzeltiyor, GUIDED'ın bu bacağını değil
+        -- o yüzden kontrol burada yapılıyor.
+
+        Önce yön sapması, sonra kısaltma denenir; hiçbiri temiz değilse düz
+        ileri kullanılır ve operatör uyarılır (tırmanmamak her hâlükârda daha
+        kötü).
+        """
+        zones = self._hss_zones()
+        heading = self.kamikaze_recover_heading
+        if not zones:
+            return MainWindow.__offset_coords(current_lat, current_lon, heading, KAMIKAZE_RECOVER_LEAD)
+        for fraction in KAMIKAZE_RECOVER_LEAD_FRACTIONS:
+            distance = KAMIKAZE_RECOVER_LEAD * fraction
+            for offset in KAMIKAZE_RECOVER_HEADING_OFFSETS:
+                lead_lat, lead_lon = MainWindow.__offset_coords(
+                    current_lat, current_lon, heading + offset, distance)
+                if segment_hits_zone(current_lat, current_lon, lead_lat, lead_lon, zones) is None:
+                    if offset != 0.0 or fraction != 1.0:
+                        qDebug("Kurtarma hedefi HSS için kaydırıldı: %+.0f derece, %.0f m"
+                               % (offset, distance))
+                    return lead_lat, lead_lon
+        self._create_warning("Kurtarma hattı HSS bölgesinden temizlenemedi, düz tırmanılıyor")
+        return MainWindow.__offset_coords(current_lat, current_lon, heading, KAMIKAZE_RECOVER_LEAD)
 
     @staticmethod
     def __calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -1372,60 +1970,85 @@ class MainWindow(QMainWindow):
         y = math.cos(lat1) * math.sin(lat2) - math.sin(lat1) * math.cos(lat2) * math.cos(dlon)
         return math.atan2(x, y)
 
-    def __heading_error_to_roll_channel(self) -> int:
-        self.next_telemetry.lock.lockForRead()
-        enlem: float = self.next_telemetry.iha_enlem
-        boylam: float = self.next_telemetry.iha_boylam
-        yaw: float = self.next_telemetry.iha_yonelme
-        self.next_telemetry.lock.unlock()
-        bearing: float = MainWindow.__bearing_to(
-            enlem, boylam,
-            self.kamikaze_target_lat, self.kamikaze_target_lon
-        )
-        current_heading: float = math.radians(yaw)
-        heading_error: float = math.atan2(math.sin(bearing - current_heading), math.cos(bearing - current_heading))
-        steer: float = max(-1.0, min(1.0, heading_error * 0.8))
-        roll_ch: int = 1500 + int(steer * 500)
-        return max(1000, min(2000, roll_ch))
+    @staticmethod
+    def __offset_coords(latitude: float, longitude: float, heading: float, distance: float) -> tuple[float, float]:
+        R = 6371000
+        angular: float = distance / R
+        bearing: float = math.radians(heading)
+        phi1: float = math.radians(latitude)
+        lambda1: float = math.radians(longitude)
 
-    def __send_rc_override(self, roll_ch: int, pitch_ch: int, throttle_ch: int):
-        if self.mavlink_connection is None:
-            return
-        self.mavlink_connection.mav.rc_channels_override_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            roll_ch,
-            pitch_ch,
-            throttle_ch,
-            1500,
-            0, 0, 0, 0
+        phi2 = math.asin(math.sin(phi1) * math.cos(angular) + math.cos(phi1) * math.sin(angular) * math.cos(bearing))
+        lambda2 = lambda1 + math.atan2(
+            math.sin(bearing) * math.sin(angular) * math.cos(phi1),
+            math.cos(angular) - math.sin(phi1) * math.sin(phi2)
         )
+        return math.degrees(phi2), math.degrees(lambda2)
 
     def __finish_kamikaze(self):
+        """
+        Koşuyu bitirir ve aracın sahipliğini baseline'a geri verir.
+
+        Kamikaze'nin TEK çıkışı burasıdır: normal tamamlama, iptal, elle mod
+        değişimi, dışarıdan mod değişimi, force-end, watchdog ve bağlantı
+        kopması hepsi buraya gelir. Bağlantı yokken de çağrılabilir olması
+        şart -- o durumda parametre yazılamaz, ama kilit yine de bırakılır ve
+        yeniden bağlanınca apply_baseline_params() araca doğru durumu yazar.
+        """
         self.kamikaze_timer.stop()
+        # Önce sahiplik bırakılır, sonra yazılır: __set_param_group sahibe
+        # bakıyor, sıra ters olsa baseline yazıları kendi kilidimize takılırdı.
         self.kamikaze_state = KamikazeState.IDLE
-        if self.mavlink_connection is not None:
-            self.mavlink_connection.mav.rc_channels_override_send(
-                self.mavlink_connection.target_system,
-                self.mavlink_connection.target_component,
-                0, 0, 0, 0, 0, 0, 0, 0
-            )
-            self.__set_param(b'PTCH_LIM_MIN_DEG', -25.0)
-            self.__set_param(b'LIM_PITCH_MIN', -2500.0)
-            self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-            self.__set_param(b'LIM_ROLL_CD', 5500.0)
-            # Kamikaze start raised THR_MAX to 100 for the recovery burst;
-            # bring the cruise ceiling back once the run is over.
-            self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
+        self._kamikaze_target_cooldown.stop()
+        # The run opened up the whole TECS envelope, the pitch floor, the roll
+        # limit and the throttle ceiling so the dive could be flown in GUIDED.
+        # One call puts all of it back -- see BASELINE_PARAMS.
+        self.apply_baseline_params()
+        self.ui.map_view.vehicle_locked = False
         if self.kamikaze_previous_mode is not None and self.kamikaze_previous_mode >= 0 and self.mavlink_connection is not None:
             self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
+            self._mode_change_cooldown.hold()
         if self.server_connection.ip is not None:
-            self.on_kamikaze_end("")
+            self.on_kamikaze_end(self.kamikaze_qr_text)
         self.waits_for_qr = False
+        # The numbers the dive is tuned against, on the status bar rather than
+        # only in the log: the angle it actually reached, how long it had to
+        # reach it, and where it bottomed out.
+        if self.kamikaze_steepest_angle > 0.0:
+            # Süre dalışın kendisi -- kurtarma tırmanışı dahil DEĞİL.
+            qInfo("[Dive] ozet: %.0fm'den basladi, %.1f sn, en dik yol acisi %.1f, en dik pitch %.1f, hucum %.1f, dipte %.0fm"
+                  % (self.kamikaze_dive_start_alt, self.kamikaze_dive_duration,
+                     self.kamikaze_steepest_angle, self.kamikaze_steepest_pitch,
+                     self.kamikaze_steepest_angle + self.kamikaze_steepest_pitch,
+                     self.kamikaze_lowest_alt))
+            self._create_warning("Dalış: en dik %.0f derece, %.1f sn, dip %.0fm (hedef %.0f derece / %.0fm)"
+                                 % (self.kamikaze_steepest_angle, self.kamikaze_dive_duration,
+                                    self.kamikaze_lowest_alt, KAMIKAZE_DIVE_ANGLE, KAMIKAZE_MIN_ALT))
+        elif self.kamikaze_lowest_alt < math.inf:
+            self._create_warning("Kamikaze bottomed out at %.0fm, %.0fm was asked for"
+                                 % (self.kamikaze_lowest_alt, KAMIKAZE_MIN_ALT))
+        self.kamikaze_lowest_alt = math.inf
+        self.kamikaze_steepest_angle = 0.0
+        self.kamikaze_steepest_pitch = 0.0
+        self.kamikaze_sink_peaks = []
+        self._kamikaze_climb_warned = False
         qDebug("Kamikaze Completed")
+        # Koşu boyunca beklemeye alınan HSS işleri şimdi yapılabilir.
+        self._flush_deferred_hss()
 
     def on_qr_found(self, qr_text: str):
+        if not self.waits_for_qr:
+            return
         self.waits_for_qr = False
+        self.kamikaze_qr_text = qr_text
+        if self.kamikaze_state == KamikazeState.DIVING and self.mavlink_connection is not None:
+            qDebug("QR found during dive, switching to recovery")
+            self.next_telemetry.lock.lockForRead()
+            current_lat: float = self.next_telemetry.iha_enlem
+            current_lon: float = self.next_telemetry.iha_boylam
+            self.next_telemetry.lock.unlock()
+            self.kamikaze_dive_duration = time.monotonic() - self.kamikaze_dive_started_at
+            self.__enter_recovery(current_lat, current_lon)
 
     def on_kamikaze_end(self, qr_text: str) -> None:
         self.next_telemetry.lock.lockForRead()
@@ -1443,18 +2066,27 @@ class MainWindow(QMainWindow):
         qInfo("Force End Task requested by user")
         if self.ui.map_view.target_coord.is_set:
             self.ui.map_view.target_coord.remove_position()
-        self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
-        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-        self.__set_param(b'LIM_ROLL_CD', 5500.0)
         if self.kamikaze_state != KamikazeState.IDLE:
             self.kamikaze_previous_mode = 10  # resume the AUTO mission route
+            # Baseline'ı __finish_kamikaze uyguluyor; burada ayrıca yazmak
+            # kilide takılırdı ve zaten tekrar olurdu.
             self.__finish_kamikaze()
         else:
+            self.apply_baseline_params()
             self.mavlink_connection.set_mode_apm(10)
+            self._mode_change_cooldown.hold()
         self._create_warning("Task force-ended, returning to AUTO mission")
 
     def __get_kamikaze_coords(self):
         if self.server_connection.ip is None:
+            target = load_offline_test_target()
+            if target is None:
+                self._create_warning(
+                    "Sunucu bağlı değil; hedefi elle girin veya %s oluşturun" % OFFLINE_TEST_TARGET_FILE)
+                return
+            self.ui.kamikaze_latitude.setText(str(target[0]))
+            self.ui.kamikaze_longitude.setText(str(target[1]))
+            qInfo("Kamikaze hedefi yerel test dosyasından alındı: %s" % OFFLINE_TEST_TARGET_FILE)
             return
         try:
             qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.get_address())
@@ -1464,10 +2096,20 @@ class MainWindow(QMainWindow):
         if qr_coords is None:
             self._create_warning("Could not get kamikaze coords from server")
             return
-        self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
         self.ui.kamikaze_latitude.setText(str(qr_coords.qrEnlem))
+        self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
 
     def _change_index(self, index: int):
+        self._mode_change_cooldown.hold()
+        if self.kamikaze_state != KamikazeState.IDLE:
+            # Only reached when the operator picks a mode by hand. The run has
+            # to be called off here, otherwise it would drag the vehicle back
+            # into GUIDED with its next destination update. The mode itself is
+            # sent below, so the run must not restore the old one on its way
+            # out.
+            qDebug("Flight mode changed by hand, cancelling kamikaze")
+            self.kamikaze_previous_mode = None
+            self.__finish_kamikaze()
         if self.current_pilot == MAV_AUTOPILOT_PX4:
             base_mode = index_to_px4_uav_mode[index].value[2]
             sub_mode = index_to_px4_uav_mode[index].value[3]
@@ -1656,34 +2298,14 @@ class MainWindow(QMainWindow):
                                                             0, 0, 0, 0, 0)
         self._enable_fence()
         self._update_time_with_mavlink()
-        self.__set_param(b'ROLL_LIMIT_DEG', 55.0)
-        self.__set_param(b'LIM_ROLL_CD', 5500.0)
-        # Full power only while the NAV_TAKEOFF item is active; TECS is capped
-        # at CRUISE_THR_MAX for the rest of the flight.
-        self.__set_param(b'TKOFF_THR_MAX', 100.0)
-        self.__set_param(b'THR_MAX', CRUISE_THR_MAX)
-        self.__set_param(b'ROLL_LIMIT_DEG', 45.0)
-        self.__set_param(b'LIM_ROLL_CD', 4500.0)
-        # HSS Güvenlik Ağı + Rally Noktası Parametreleri
-        self.__set_param(b'FENCE_ACTION',  4.0)    # 4 = Rally/Loiter — HSS ihlaline karşı en yakın Rally noktasına git ve çember at
-        self.__set_param(b'FENCE_TYPE',    7.0)    # Bit0(1)+Bit1(2)+Bit2(4) = Altitude+Circle+Polygon çitlerinin hepsi aktif
-        self.__set_param(b'FENCE_OPTIONS', 0.0)    # Bit0=0: fence ihlali sonrası pilot mod değiştirebilir
-        self.__set_param(b'FENCE_MARGIN',  5.0)    # Fence sınırına yaklaşma marjı (metre)
-        self.__set_param(b'FENCE_RET_RALLY', 1.0)  # 1 = Fence ihlalinde Home yerine Rally noktasına git
-        self.__set_param(b'RALLY_LIMIT_KM', 0.0)   # 0 = Tüm rally noktaları geçerli (mesafe limiti yok)
-        self.__set_param(b'RALLY_INCL_HOME', 1.0)  # 1 = Home noktasını Rally olarak sayar 
-        self.__set_param(b'MIS_RESTART',   0.0)    # AUTO'ya dönüşte kaldığı yerden devam et
-        self.__set_param(b'WP_LOITER_RAD', 60.0)   # Rally/loiter çember yarıçapı (metre)
-        
-        # --- İRTİFA SINIRLARI (ALTITUDE FENCE) PARAMETRELERİ ---
-        self.__set_param(b'FENCE_ALT_MAX', 150.0)   # Maksimum yükseklik sınırı (metre) - 120 veya 150 yapılabilir
-        #min irtifa test edilecek,gerekirse fbwa modunda fence enable = 0 yapılabilir.
-        self.__set_param(b'FENCE_ALT_MIN', 30.0)    # Minimum yükseklik sınırı (metre) - Yarışma taban limiti tahmini olarak(30m)
-
-        # HSS Optimizasyon (Aşama 0) Parametreleri
-        self.__set_param(b'WP_MAX_RADIUS', 0.0)    # Finish-line sorununu önler
-        self.__set_param(b'WP_RADIUS',     30.0)   # Hıza ve L1 mantığına uygun
-        self.__set_param(b'NAVL1_PERIOD',  14.0)   # Sık WP'leri yumuşak takip
+        # Bağlantı kurulduğunda araç HER ZAMAN bilinen bir duruma çekilir. Bu,
+        # uçuş ortasında telsiz kopup geri geldiğinde de çalışan tek kurtarma
+        # yolu: koşu ortasında kopan bir kamikaze, dalış zarfını araçta bırakmış
+        # olabilir ve burası onu kapatır. Değerlerin tanımı BASELINE_PARAMS ve
+        # HSS_SAFETY_PARAMS tablolarında, burada literal yok.
+        # Yazma işi worker thread'i başladıktan SONRA yapılıyor: teyit
+        # (PARAM_VALUE) o thread üzerinden geliyor, önce yazarsak hepsi
+        # cevapsız kalmış gibi görünüp boşuna tekrarlanırdı.
 
         self.ui.map_view.mavlink_connection = self.mavlink_connection
         self.mavlink_thread = QThread(self)
@@ -1707,8 +2329,11 @@ class MainWindow(QMainWindow):
         self.mavlink_worker.mission_upload_success.connect(self._on_mission_upload_success)
         self.mavlink_worker.mission_upload_failed.connect(self._on_mission_upload_failed)
         self.mavlink_worker.mission_current_changed.connect(self._on_mission_current_changed)
+        self.mavlink_worker.param_value_received.connect(self._on_param_value)
         self.mavlink_worker.moveToThread(self.mavlink_thread)
         self.mavlink_thread.start()
+        self.apply_baseline_params()
+        self.apply_hss_safety_params()
         self.enableFeaturesAfterUAVConnected()
 
     def remove_reposition_location(self):
@@ -1719,21 +2344,60 @@ class MainWindow(QMainWindow):
         if self.ui.map_view.target_coord.is_set and not self.ui.map_view.reposition_timer.isActive():
             self.ui.map_view.target_coord.remove_position()
             if self.mavlink_connection is not None and self.kamikaze_state == KamikazeState.IDLE:
-                self.ui.map_view.mouse_input_handler._set_thr_max(CRUISE_THR_MAX)
-                self.ui.map_view.mouse_input_handler._set_roll_limit(55.0)
+                # Reposition sadece THR_MAX ve roll limitini açıyor, ama
+                # baseline'ın tamamını yazmak hem ucuz hem de "geri koymayı
+                # unutulmuş bir parametre" ihtimalini tamamen kaldırıyor.
+                self.apply_baseline_params()
 
     def set_arm_mode(self, index: int):
-        if self.ui.arm_mode.currentIndex() != index:
-            self.ui.arm_mode.setCurrentIndex(index)
+        # uav_is_armed her heartbeat'te güncellenir, combobox ise bekleme
+        # penceresi boyunca güncellenmez. Kamikaze'nin yerde başlamayı reddeden
+        # kontrolü aracın gerçek durumunu sormak zorunda, operatörün az önce
+        # tıkladığı değeri değil -- bu yüzden ayrı bir alan.
+        self.uav_is_armed = bool(index)
+        self._arm_change_cooldown.apply_reported(self.ui.arm_mode, index)
 
     def set_fly_mode(self, index: int):
-        if self.ui.fly_mode_combobox.currentIndex() != index:
-            self.ui.fly_mode_combobox.setCurrentIndex(index)
+        # Kamikaze koşusu sürerken GUIDED dışında bir mod bildirilmesi, aracın
+        # kontrolünün dışarıdan alındığı anlamına gelir: çit ihlali, failsafe
+        # veya RC pilotu. Koşu bunu görmezden gelirse 2 saniyede bir
+        # DO_REPOSITION gönderip aracı GUIDED'a geri çeker ve iki taraf mod
+        # salınımına girer. Combobox güncellemesi _change_index'i çalıştırmadığı
+        # için dışarıdan gelen mod değişimini görebilecek tek yer burası.
+        if (self.is_kamikaze_happening() and not self._mode_change_cooldown.isActive()
+                and index != Ardupilot_UAV_Modes.GUIDED.value[0]):
+            self._create_warning("Uçuş modu dışarıdan değişti (%s), kamikaze bırakılıyor" % index)
+            qWarning("External mode change to %s during kamikaze, releasing the vehicle" % index)
+            self.kamikaze_previous_mode = None  # dışarısı sürüyor, moda karışma
+            self.__finish_kamikaze()
+        self._mode_change_cooldown.apply_reported(self.ui.fly_mode_combobox, index)
 
     def _update_time_with_mavlink(self):
         time_ns = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() * 1000000
         time_ns += 1234 # Copied from mavproxy
         self.mavlink_connection.mav.timesync_send(0, time_ns)
+
+    def __send_gcs_heartbeat(self) -> None:
+        # MAVLink'te hatta bağlı her düğüm 1 Hz heartbeat yayınlamak zorunda;
+        # bunu hiç yapmayan bir yer istasyonu araç açısından "yok" demektir.
+        # ArduPilot bunun üzerine iki şey kuruyor:
+        #  - GCS failsafe (FS_GCS_ENABL): heartbeat FS_LONG_TIMEOUT boyunca
+        #    gelmezse araç yer bağlantısını kopmuş sayıp failsafe'e giriyor.
+        #  - SYSID_MYGCS: araç ilk gördüğü GCS heartbeat'inin sistem kimliğine
+        #    kilitleniyor ve bazı komutları yalnızca ondan kabul ediyor.
+        # Bu iki parametre araç tarafında ayarlanıyor, buradan yazılmıyor. Ama
+        # kamikaze koşusunun tamamı bu istasyondan GUIDED/DO_REPOSITION ile
+        # uçuruluyor: failsafe uçuşta açıksa ve biz heartbeat yollamıyorsak,
+        # araç koşunun ortasında yer bağlantısını kopmuş sayıp kontrolü alır.
+        # Bağlantı kurulunca başlıyor, koptuğunda duruyor
+        # (enableFeaturesAfterUAVConnected / disableFeaturesAfterUAVDisconnected).
+        if self.mavlink_connection is None:
+            return
+        self.mavlink_connection.mav.heartbeat_send(
+            MAV_TYPE_GCS,
+            MAV_AUTOPILOT_INVALID,
+            0, 0, 0
+        )
 
     def _apply_watch_update(self, row: int, value: str):
         self.ui.watch_list.setItem(row, 3, QTableWidgetItem(value))
@@ -1746,6 +2410,7 @@ class MainWindow(QMainWindow):
         self.ui.arm_mode.setEnabled(True)
         self.ui.fly_mode_combobox.setEnabled(True)
         self.ui.device_connection_warning.hide()
+        self._gcs_heartbeat_timer.start()
         if self.server_connection.ip is None:
             self.plane_on_map_update_timer.start()
 
@@ -1753,6 +2418,7 @@ class MainWindow(QMainWindow):
         self.ui.arm_mode.setEnabled(False)
         self.ui.fly_mode_combobox.setEnabled(False)
         self.ui.device_connection_warning.show()
+        self._gcs_heartbeat_timer.stop()
         if self.plane_on_map_update_timer.isActive():
             self.plane_on_map_update_timer.stop()
 
@@ -1760,9 +2426,22 @@ class MainWindow(QMainWindow):
     def __on_connection_lost(self, reason: str):
         self._create_warning("UAV connection lost: %s" % reason)
         if self.kamikaze_state != KamikazeState.IDLE:
-            self.kamikaze_timer.stop()
-            self.kamikaze_state = KamikazeState.IDLE
-            self.waits_for_qr = False
+            # Tam bir bırakma yapılıyor. Bağlantı gittiği için parametreler
+            # araca yazılamaz -- araç dalış zarfında kalır. Yeniden bağlanınca
+            # __successful_uav_connection baseline'ın TAMAMINI yazdığı için o
+            # zarf orada kapanır. Yalnızca state sıfırlanırsa -60 derece pitch
+            # tabanı, kapalı glide slope ve SPDWEIGHT=0 uçuşun geri kalanı
+            # boyunca araçta kalır.
+            #
+            # Ertelenmiş HSS işleri önce temizleniyor: __finish_kamikaze sonunda
+            # onları uygulamaya çalışır ve ölü bir bağlantıya fence yüklemeye
+            # kalkardı. Yeniden bağlanınca polling zaten yeni bir anlık görüntü
+            # getiriyor.
+            self._deferred_snapshot = None
+            self._deferred_manual_ads = False
+            self.__finish_kamikaze()
+        self._param_pending.clear()
+        self._param_retry_timer.stop()
         self._uav_disconnect()
 
     def _uav_disconnect(self):
@@ -1779,6 +2458,7 @@ class MainWindow(QMainWindow):
         self.ui.map_view.mavlink_connection = None
         self.uav_connection.reset_connection_properties()
         self.disableFeaturesAfterUAVDisconnected()
+        self.uav_is_armed = False
         self.next_telemetry = TelemetryData()
         self.resetWatcherWidgetValues()
         self.ui.fly_mode_combobox.setCurrentIndex(-1)
@@ -1867,23 +2547,88 @@ class MainWindow(QMainWindow):
         self._hss_polling_thread = None
         qDebug("[HSS] Polling stopped")
 
+    def _hss_zones(self) -> list[ServerAdsData]:
+        """
+        Sunucu + manuel HSS bölgelerinin tek listesi (ham yarıçaplarla).
+
+        Hem rota planlayıcı, hem çit yüklemesi, hem de kamikaze giriş kapısı
+        buradan besleniyor -- "hangi bölgeler var" sorusunun tek cevabı olsun
+        diye. Tampon ekleme işi tüketiciye ait (fence_radius_for_hss).
+        """
+        zones: list[ServerAdsData] = list(self._current_snapshot.zones) if self._current_snapshot else []
+        for ads in self.ui.map_view.user_ads_data_model.m_datas:
+            zones.append(ServerAdsData(
+                id=-1,
+                lat=ads.position.latitude(),
+                lon=ads.position.longitude(),
+                radius_m=ads.size
+            ))
+        return zones
+
+    def _build_fence_ads_list(self) -> list[AdsData]:
+        """
+        Araca yüklenecek exclusion çemberleri — HER ZAMAN tamponlu.
+
+        Araca yüklenecek çemberlerin tek tanımı burası. server_ads_data_model'in
+        HAM yarıçapları harita için doğru ama çit için 20 m dar; oradan doğrudan
+        yükleyen ikinci bir yol açılırsa araçta dar çit kalır.
+        """
+        ads_list: list[AdsData] = []
+        for hss in self._hss_zones():
+            ads = AdsData()
+            ads.position = QGeoCoordinate(hss.lat, hss.lon)
+            ads.size = fence_radius_for_hss(hss.radius_m)
+            ads.is_selected = False
+            ads_list.append(ads)
+        return ads_list
+
     def _on_hss_updated(self, snapshot: HssSnapshot) -> None:
         """Yeni HSS listesi geldiğinde tetiklenir (HSS polling thread'den sinyal)."""
         # Out-of-order koruması
         if self._current_snapshot is not None and snapshot.seq <= self._current_snapshot.seq:
             qDebug("[HSS] Stale snapshot (seq=%d <= %d), skipping" % (snapshot.seq, self._current_snapshot.seq))
             return
-            
+
         self._current_snapshot = snapshot
         zones = list(snapshot.zones)
-        
-        # 1. Haritayı güncelle (kırmızı HSS çemberleri)
-        self.ui.map_view.update_server_ads_data(zones)
+
+        # 1. Haritayı güncelle (kırmızı HSS çemberleri). notify=False: çiti
+        #    aşağıda kendimiz, tamponlu yarıçaplarla yüklüyoruz.
+        self.ui.map_view.update_server_ads_data(zones, notify=False)
         # 2. Tampon bölge çemberlerini güncelle (turuncu)
         self._update_buffer_zones(zones)
-        # 3. Birleştirilmiş HSS (sunucu + manuel) ile fence yükle
-        self._auto_upload_hss_fences(zones)
-        # 4. Rota yeniden hesapla
+
+        # 3-4. Çit yüklemesi ve rota planlaması araca komut vermek demek.
+        #      Kamikaze koşusu sürerken bu iş yapılmaz: fence yüklemesi telsizi
+        #      doldurup kritik parametre yazılarının düşmesine yol açar, rota
+        #      yüklemesi de koşu bitince dönülecek AUTO görevini altından
+        #      değiştirir. Anlık görüntü saklanır, koşu biter bitmez uygulanır.
+        if self.is_kamikaze_happening():
+            first_deferral = self._deferred_snapshot is None
+            self._deferred_snapshot = snapshot
+            qDebug("[HSS] Kamikaze koşusu sürüyor, %d bölgelik güncelleme ertelendi" % len(zones))
+            if first_deferral:
+                # Koşu boyunca 3 saniyede bir tekrarlamasın; durum çubuğu
+                # kamikaze'nin kendi uyarıları için lazım.
+                self._create_warning("Kamikaze sürüyor — HSS güncellemesi koşu sonuna ertelendi")
+            return
+
+        self._auto_upload_hss_fences()
+        self._trigger_route_replanning()
+
+    def _flush_deferred_hss(self) -> None:
+        """Kamikaze koşusu boyunca beklemeye alınan HSS işlerini uygular."""
+        if self.is_kamikaze_happening():
+            return
+        if self._deferred_snapshot is None and not self._deferred_manual_ads:
+            return
+        qDebug("[HSS] Ertelenmiş güncelleme uygulanıyor")
+        self._deferred_snapshot = None
+        self._deferred_manual_ads = False
+        self._auto_upload_hss_fences()
+        # Koşu sırasında bölge listesi değişmemiş olsa bile yeniden planla:
+        # araç koşu boyunca görev rotasının dışına çıktı.
+        self._last_planned_hash = None
         self._trigger_route_replanning()
 
     def _update_buffer_zones(self, zones: list[ServerAdsData]) -> None:
@@ -1898,40 +2643,33 @@ class MainWindow(QMainWindow):
             model.m_datas.append(ads)
         model.layoutChanged.emit()
 
-    def _auto_upload_hss_fences(self, zones: list[ServerAdsData]) -> None:
+    def _auto_upload_hss_fences(self) -> None:
         """HSS listesini exclusion circle olarak ArduPilot'a yükler (R_hss + FENCE_BUFFER_M)."""
         if self.mavlink_connection is None:
             return
-        ads_with_buffer: list[AdsData] = []
-        for hss in zones:
-            ads = AdsData()
-            ads.position = QGeoCoordinate(hss.lat, hss.lon)
-            ads.size = fence_radius_for_hss(hss.radius_m)
-            ads.is_selected = False
-            ads_with_buffer.append(ads)
-        # Mevcut user_ads (manuel HSS) ile birleştirip yükle
-        all_ads = ads_with_buffer + self.ui.map_view.user_ads_data_model.m_datas
-        self.update_geofence_data(all_ads)
-        # Fence yüklendi — hemen aktif et
-        self._enable_fence()
-        qDebug("[Fence] HSS fence yüklendi ve aktif edildi")
+        if self.is_kamikaze_happening():
+            self._deferred_manual_ads = True
+            return
+        self._fence_upload_retries = 0
+        self.update_geofence_data(self._build_fence_ads_list())
+        # _enable_fence artık yükleme BİTTİĞİNDE çağrılıyor (bkz.
+        # send_fence_mission_data); burada çağrılması, henüz yüklenmemiş bir
+        # çiti aktif etmek anlamına geliyordu.
 
     def _trigger_route_replanning(self) -> None:
         """Mission + HSS verisi mevcutsa rota yeniden hesapla ve haritada göster."""
         if not self._current_mission_waypoints:
             return
+        if self.is_kamikaze_happening():
+            self._deferred_manual_ads = True
+            return
+        if self._plan_in_flight:
+            # Havuzda zaten bir hesap var; hash sıfırlanarak bittiğinde
+            # yenisinin tetiklenmesi sağlanır.
+            self._last_planned_hash = None
+            return
 
-        server_zones: list[ServerAdsData] = list(self._current_snapshot.zones) if self._current_snapshot else []
-        manual_as_hss: list[ServerAdsData] = []
-        for ads in self.ui.map_view.user_ads_data_model.m_datas:
-            manual_as_hss.append(ServerAdsData(
-                id=-1,
-                lat=ads.position.latitude(),
-                lon=ads.position.longitude(),
-                radius_m=ads.size
-            ))
-        combined_hss: list = server_zones + manual_as_hss
-
+        combined_hss: list = self._hss_zones()
         if not combined_hss:
             return
 
@@ -1941,7 +2679,29 @@ class MainWindow(QMainWindow):
             return
         self._last_planned_hash = current_hash
 
-        result = compute_safe_route(self._current_mission_waypoints, list(combined_hss))
+        # Hesap havuz thread'inde yapılıyor; sonuç _on_route_plan_ready'e
+        # sinyalle geliyor. Bkz. RoutePlanTask.
+        self._plan_in_flight = True
+        QThreadPool.globalInstance().start(RoutePlanTask(
+            list(self._current_mission_waypoints), combined_hss,
+            current_hash, self._route_plan_signals))
+
+    def _on_route_plan_ready(self, result: RoutePlanResult | None, plan_hash) -> None:
+        self._plan_in_flight = False
+        if result is None:
+            self._last_planned_hash = None   # bir dahaki tetikte tekrar denensin
+            self._create_warning("Rota hesabı başarısız oldu, düzeltilmiş rota güncellenmedi")
+            return
+        # Hesap sürerken kamikaze başlamış olabilir: sonuç bayatlamadı ama
+        # şu an araca yüklenemez, koşu sonunda yeniden planlanır.
+        if self.is_kamikaze_happening():
+            self._deferred_manual_ads = True
+            self._last_planned_hash = None
+            return
+        if self._last_planned_hash is None:
+            # Hesap sürerken bölgeler değişti — sonucu göster ama hemen
+            # güncelini tetikle.
+            QTimer.singleShot(0, self._trigger_route_replanning)
         # Yeşil alternatif rotayı haritada güncelle
         avoidance_geopath = self.ui.map_view.avoidance_route_geopath
         avoidance_geopath.clear()
@@ -1984,9 +2744,8 @@ class MainWindow(QMainWindow):
         if self.mavlink_connection is None:
             qDebug("UAV not connected")
             return
-        global SERVER_IS_UNREACHABLE_COUNTER
-        if SERVER_IS_UNREACHABLE_COUNTER > 100:
-            SERVER_IS_UNREACHABLE_COUNTER = 0
+        if server_api.SERVER_IS_UNREACHABLE_COUNTER > 100:
+            server_api.SERVER_IS_UNREACHABLE_COUNTER = 0
             qWarning("Server connection is not possible for 100 time, disconnecting")
             self._server_disconnect()
             return
@@ -2031,6 +2790,9 @@ class MainWindow(QMainWindow):
     def _reset_hss_state(self) -> None:
         """Tüm HSS durumunu sıfırla — tek yerde, ileride yeni katman eklenince buraya eklenir."""
         self._current_snapshot = None
+        self._deferred_snapshot = None
+        self._deferred_manual_ads = False
+        self._last_planned_hash = None
         # Harita katmanlarını temizle
         self.ui.map_view.server_ads_data_model.m_datas.clear()
         self.ui.map_view.server_ads_data_model.layoutChanged.emit()
@@ -2073,9 +2835,17 @@ class MainWindow(QMainWindow):
         if self.mavlink_connection is None:
             self._create_warning("UAV bağlı değil, rota yüklenemiyor")
             return
+        if self.is_kamikaze_happening():
+            # Koşu sırasında görevi değiştirmek, koşu bitince dönülecek AUTO
+            # rotasını ve current seq'i altından değiştirmek demek.
+            self._deferred_manual_ads = True
+            self._create_warning("Kamikaze sürüyor — rota yüklemesi koşu sonuna ertelendi")
+            return
 
-        self.__set_param(b'TRIM_ARSPD_CM', 1500.0)
-        qDebug("[MissionUpload] HSS Kaçış manevrası için TRIM_ARSPD_CM 1500 olarak ayarlandı.")
+        # Seyir hızı artık BASELINE_PARAMS'ın parçası ve rota planlayıcının
+        # varsaydığı hızla (RoutePreplanner.CRUISE_SPEED_MS) aynı. Buradaki eski
+        # tek seferlik TRIM_ARSPD_CM=1500 yazısı hiçbir zaman geri alınmıyordu,
+        # planlayıcının kendi tampon hesabıyla da çelişiyordu.
 
         if self.mavlink_worker._mission_upload_state > 0:
             self._create_warning("Rota yükleme devam ediyor, lütfen bekleyin")
@@ -2193,22 +2963,24 @@ class MainWindow(QMainWindow):
         """Upload sonrası görevi geri indirip waypoint sayısı + koordinat doğrulaması yapar."""
         if self.mavlink_connection is None:
             return
-        from pymavlink.dialects.v20.all import MAV_MISSION_TYPE_MISSION
-        self.mavlink_connection.mav.mission_request_list_send(
-            self.mavlink_connection.target_system,
-            self.mavlink_connection.target_component,
-            MAV_MISSION_TYPE_MISSION
-        )
+        # request_mission_data üzerinden gitmeli, doğrudan mission_request_list
+        # gönderilmemeli: worker gelen MISSION_COUNT'u ancak
+        # requested_to_get_mission bayrağı set edilmişse işliyor.
+        if self.requested_to_get_mission:
+            qWarning("[MissionUpload] Görev indirmesi zaten sürüyor, doğrulama atlandı")
+            return
+        self._awaiting_mission_verification = True
+        self.request_mission_data()
         qDebug("[MissionUpload] Verification download requested")
 
     def _on_manual_ads_changed(self) -> None:
         """Manuel ADS ekleme/silme — fence güncelle + rotayı yeniden hesapla."""
-        # Tüm ADS (server + kullanıcı) ile fence güncelle
-        all_ads = (self.ui.map_view.server_ads_data_model.m_datas +
-                   self.ui.map_view.user_ads_data_model.m_datas)
-        self.update_geofence_data(all_ads)
-
+        if self.is_kamikaze_happening():
+            self._deferred_manual_ads = True
+            self._create_warning("Kamikaze sürüyor — ADS değişikliği koşu sonuna ertelendi")
+            return
+        # Çit listesi tek yerden üretiliyor (her zaman tamponlu yarıçaplarla).
+        self._auto_upload_hss_fences()
         self._last_planned_hash = None
-
         self._trigger_route_replanning()
 

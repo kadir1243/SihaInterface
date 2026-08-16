@@ -13,6 +13,7 @@ from pymavlink.mavutil import mavfile
 
 from src.AdvancedRepositionDialog import AdvancedRepositionDialog, DEFAULT_ALTITUDE, DEFAULT_LOITER_RADIUS, \
     DEFAULT_SPEED, DEFAULT_YAW
+from src.RoutePreplanner import MAX_BANK_DEG
 from src.ServerConnection import TelemetryResponseData, ServerAdsData, TelemetryData
 from src.input_types import InputMapping, KeybindingsEnum
 
@@ -206,6 +207,12 @@ class MouseInputHandler(QObject):
                 pass
 
     def _set_param(self, name: bytes, value: float):
+        # Kamikaze koşusu sürerken araç onun; reposition'ın parametre yazması
+        # (veya reposition komutu göndermesi) koşuyla çakışır. MainWindow bu
+        # bayrağı koşu boyunca açık tutuyor.
+        if self.parent.vehicle_locked:
+            qWarning("Kamikaze koşusu sürüyor, harita parametre yazısı engellendi: %s" % name)
+            return
         self.parent.mavlink_connection.mav.param_set_send(
             self.parent.mavlink_connection.target_system,
             self.parent.mavlink_connection.target_component,
@@ -227,12 +234,15 @@ class MouseInputHandler(QObject):
         if not self.parent.target_coord.is_set or self.parent.mavlink_connection is None:
             return
         self._set_thr_max(CRUISE_THR_MAX)
-        self._set_roll_limit(55.0)
+        self._set_roll_limit(CRUISE_ROLL_LIMIT)
         self.parent.mavlink_connection.set_mode_apm(PLANE_MODE_AUTO)
         self.parent.target_coord.remove_position()
 
     def adv_reposition(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
          if not self.ard_dialog is None or self.parent.mavlink_connection is None:
+             return
+         if self.parent.vehicle_locked:
+             qWarning("Kamikaze koşusu sürüyor, reposition engellendi")
              return
          if not coordinate.isValid():
              qWarning("Invalid input, advanced reposition needs a coordinate")
@@ -263,8 +273,8 @@ class MouseInputHandler(QObject):
             self.parent.reposition_yaw = float(self.ard_dialog.ui.yaw.text())
 
     def ard_ok(self):
-        self._set_thr_max(60.0)
-        self._set_roll_limit(55.0)
+        self._set_thr_max(CRUISE_THR_MAX)
+        self._set_roll_limit(REPOSITION_ROLL_LIMIT)
         self.parent.target_coord.set_position(QGeoCoordinate(float(self.ard_dialog.ui.latitude.text()), float(self.ard_dialog.ui.longitude.text())))
         speed: float = self.return_non_null(self.ard_dialog.ui.speed.text(), self.parent.reposition_speed)
         yaw: float = self.return_non_null(self.ard_dialog.ui.yaw.text(), self.parent.reposition_yaw)
@@ -349,11 +359,14 @@ class MouseInputHandler(QObject):
     def basic_reposition(self, coordinate: QGeoCoordinate, mouseX: float, mouseY: float):
         if self.parent.mavlink_connection is None:
             return
+        if self.parent.vehicle_locked:
+            qWarning("Kamikaze koşusu sürüyor, reposition engellendi")
+            return
         if not coordinate.isValid():
             qWarning("Invalid input, repositioning needs a coordinate")
             return
-        self._set_thr_max(60.0)
-        self._set_roll_limit(55.0)
+        self._set_thr_max(CRUISE_THR_MAX)
+        self._set_roll_limit(REPOSITION_ROLL_LIMIT)
         self.parent.target_coord.set_position(coordinate)
         self.parent.mavlink_connection.mav.command_int_send(self.parent.mavlink_connection.target_system,
                                                             self.parent.mavlink_connection.target_component,
@@ -410,7 +423,18 @@ ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
 # Throttle ceiling (%) outside takeoff and kamikaze. The airframe has ~1.7
 # thrust-to-weight, so full power is only needed during the takeoff climb;
 # TKOFF_THR_MAX stays at 100 and covers that phase on its own.
-CRUISE_THR_MAX: float = 70.0
+CRUISE_THR_MAX: float = 60.0
+
+# Baseline bank limit (deg). This is the SAME number the HSS route planner sizes
+# its turn radius and avoidance buffers from (RoutePreplanner.MAX_BANK_DEG), so
+# the plan and the vehicle can never disagree about how tightly it can turn.
+# Anything that raises the limit for a manoeuvre must put THIS value back, not a
+# literal -- see MainWindow.apply_baseline_params.
+CRUISE_ROLL_LIMIT: float = MAX_BANK_DEG
+# Repositioning is a hand-flown "go there now" order, so it gets more bank
+# authority than the planned route does. Released back to CRUISE_ROLL_LIMIT when
+# the reposition target is removed or times out.
+REPOSITION_ROLL_LIMIT: float = 55.0
 
 class GeofenceData(QObject):
     gc1_v: QGeoCoordinate = ZERO_GEO_COORDS
@@ -504,6 +528,10 @@ class MapWidget(QQuickWidget):
     reposition_speed: float = DEFAULT_SPEED
     reposition_timer: QTimer
     input_config_reference: Callable[[], dict[KeybindingsEnum, InputMapping]]
+    # MainWindow tarafından kamikaze koşusu boyunca True tutulur: araç o sırada
+    # kamikaze'nin, harita üzerinden parametre yazılamaz ve reposition
+    # gönderilemez. Bkz. MainWindow.apply_baseline_params / __start_kamikaze.
+    vehicle_locked: bool = False
 
     def __init__(self, parent: QWidget | None = None):
         QQuickWidget.__init__(self, parent)
@@ -562,7 +590,11 @@ class MapWidget(QQuickWidget):
         self.plane_data_model.m_datas.append(PlaneData(-1, pos, 2 if self.selected_plane_team_no == -1 else 0, rotation, False))
         self.plane_data_model.layoutChanged.emit()
 
-    def update_server_ads_data(self, ads_list: list[ServerAdsData]):
+    def update_server_ads_data(self, ads_list: list[ServerAdsData], notify: bool = True):
+        # notify=False: caller uploads the fence itself. The HSS path does that,
+        # because the radii stored here are the RAW zone radii for display and
+        # uploading them as-is would put an unbuffered fence on the vehicle.
+        # See MainWindow._build_fence_ads_list.
         self.server_ads_data_model.m_datas.clear()
         for ads in ads_list:
             data: AdsData = AdsData()
@@ -571,7 +603,8 @@ class MapWidget(QQuickWidget):
             data.is_selected = False
             self.server_ads_data_model.m_datas.append(data)
         self.server_ads_data_model.layoutChanged.emit()
-        self.upload_ads_data.emit()
+        if notify:
+            self.upload_ads_data.emit()
 
     def update_ads_data(self, ads: AdsData):
         self.user_ads_data_model.m_datas.append(ads)
