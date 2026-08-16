@@ -41,19 +41,18 @@ from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 from src.AddADSInterface import AddADSInterface
 from src.CameraServerConnectionInterface import CameraServerConnectionInterface
 from src.ColorSelectorInterface import ColorSelectorInterface, ColorOptions
-from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData, CRUISE_THR_MAX, CRUISE_ROLL_LIMIT
+from src.MapWidget import ZERO_GEO_COORDS, AdsData, SpecialCoordsData
 from src.SetGeofenceInterface import SetGeofenceInterface
 from src.FightingUAVConnectionInterface import FightingUAVConnectionInterface, ConnectionType
 import src.ServerConnection as server_api
 from src.ServerConnection import login_to_server, GpsSaati, send_telemetry, QrCoords, \
-    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze, \
-    SERVER_IS_UNREACHABLE_COUNTER, ServerAdsData
+    get_kamikaze_coords, TelemetryData, TelemetryResponseData, get_ads, send_kamikaze, ServerAdsData
 from src.ServerConnectionInterface import ServerConnectionInterface
 from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
 from src.HSSPollingWorker import HSSPollingWorker
 from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss, point_hits_zone, segment_hits_zone, \
-    CRUISE_SPEED_MS, RoutePlanResult
+    RoutePlanResult
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -1621,11 +1620,11 @@ class MainWindow(QMainWindow):
             self._create_warning("Çit/rota yüklemesi sürüyor, kamikaze başlatılmıyor")
             return
         zones = self._hss_zones()
-        hit = point_hits_zone(latitude, longitude, zones)
+        hit = point_hits_zone(target_latitude, target_longitude, zones)
         if hit is not None:
             self._create_warning("Kamikaze hedefi HSS #%s bölgesinin içinde — başlatılmıyor" % hit.id)
             return
-        hit = segment_hits_zone(current_lat, current_lon, latitude, longitude, zones)
+        hit = segment_hits_zone(current_lat, current_lon, target_latitude, target_longitude, zones)
         if hit is not None:
             self._create_warning("DİKKAT: Hedefe giriş hattı HSS #%s bölgesini kesiyor!" % hit.id)
 
