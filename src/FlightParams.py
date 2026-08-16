@@ -1,16 +1,14 @@
 """
 Uçuş zarfı sabitleri ve parametre tabloları.
 
-Bu değerler MainInterface.py içinde duruyordu ve dosyanın onda birini
-kaplıyordu. Buraya alınmalarının sebebi sadece yer açmak değil: bir
-manevranın (kamikaze, reposition) açtığı her parametrenin nasıl geri
-kapandığı tek yerden okunabilsin diye. Sabitler ile onları geri yazan
-BASELINE_PARAMS tablosu ayrı dosyalara düşerse, tabloya eklenmesi
-unutulan bir parametre gözden kaçar -- eskiden TECS ailesinin başına
-tam olarak bu gelmişti.
+Sabitler, onları araca yazan BASELINE_PARAMS/KAMIKAZE_*_PARAMS tablolarıyla
+aynı dosyada tutuluyor: bir manevranın açtığı parametrenin baseline'da
+karşılığı yoksa, manevra bittiğinde o değer araçta kalır. İkisi bir arada
+olduğu için bu eksiklik hem gözle görülür hem de dosyanın sonundaki assert
+ile import anında yakalanır.
 
-Değer değiştirirken: her sabitin üstündeki yorum o değerin NEDEN o
-olduğunu anlatıyor ve çoğu uçuş ölçümüne dayanıyor.
+Her sabitin üstündeki yorum değerin neden o olduğunu anlatır; uçuş
+ölçümüne dayananlarda ölçüm tarihiyle birlikte yazılıdır.
 """
 from enum import Enum
 
@@ -38,9 +36,9 @@ TAKEOFF_FULL_THROTTLE_TIME: float = 10.0
 # FENCE_AUTOENABLE ile birlikte değerlendirilmeli.
 FENCE_TYPE_BITS: float = 5.0
 # ArduPlane'de geçerli FENCE_ACTION değerleri 0 (sadece rapor), 1 (RTL),
-# 6 (Guided), 7 (GuidedThrottlePass). Eskiden 4 yazılıyordu; 4 Copter'ın değeri,
-# Plane'de tanınmadığı için çit fiilen hiçbir şey yapmıyordu. İstenen davranış
-# ("en yakın rally noktasına git") FENCE_ACTION=1 + FENCE_RET_RALLY=1 ile olur.
+# 6 (Guided), 7 (GuidedThrottlePass). Copter'ın 4'ü Plane'de tanınmaz ve çiti
+# fiilen devre dışı bırakır. İstenen davranış ("en yakın rally noktasına git")
+# FENCE_ACTION=1 + FENCE_RET_RALLY=1 ile elde edilir.
 FENCE_ACTION_RTL: float = 1.0
 FENCE_ALT_MAX_M: float = 150.0   # Yarışma tavanı
 FENCE_ALT_MIN_M: float = 30.0    # Yarışma tabanı tahmini (bit kapalı, yukarı bak)
@@ -51,11 +49,12 @@ FENCE_LOITER_RADIUS_M: float = 60.0
 # "Araç normal, HSS'in planladığı hâlde" durumunun TEK tanımı BASELINE_PARAMS
 # tablosu (bu dosyanın altında). Zarfı açan her manevra (kamikaze, reposition)
 # onu apply_baseline_params() ile geri vermek zorunda; kendi literal'ini yazmak
-# yasak. Eskiden kamikaze bitişi roll limitini 55'e çekiyordu ve HSS'in 45'i
-# ilk koşudan sonra sessizce kayboluyordu -- tablo bunu yapısal olarak engelliyor.
+# yasak. Manevra bitişine literal yazılırsa HSS'in belirlediği limit ilk
+# koşudan sonra sessizce kaybolur.
 CRUISE_PITCH_MIN: float = -25.0
-# Araca yazılan seyir hava hızı. Eskiden bunun tek tanımı yoktu: rota yüklemesi
-# 15 m/s yazıp bir daha geri koymuyordu, bağlantı bloğu ise hiç yazmıyordu.
+# Araca yazılan seyir hava hızı. Tek tanımı burasıdır: rota yükleme ve bağlantı
+# kurma yolları da bu değeri kullanmak zorunda, yoksa araç plandan farklı bir
+# hızda uçar.
 #
 # Rota planlayıcının varsaydığı hızdan (RoutePreplanner.CRUISE_SPEED_MS = 20)
 # BİLEREK düşük. Planlayıcı tamponlarını 20 m/s hava hızı + 8 m/s rüzgâr = 28
@@ -66,12 +65,12 @@ CRUISE_PITCH_MIN: float = -25.0
 # HSS tamponları yetersiz kalır.
 #
 # Kamikaze açısından kritik: yaklaşma bu hızda uçuluyor, dalışa bu hızla
-# giriliyor. Bir ara 15 m/s denendi, gerekçe "yavaş giriş = daha düşük yer hızı
-# = aynı alçalma hızıyla daha dik açı" idi. Bu YANLIŞ çıktı: o ilişki oturmuş
-# dalış için geçerli, ama dalış TECS_TIME_CONST'tan kısa olduğu için hiç
-# oturmuyor. Belirleyici olan geçiş rejimi, yani burnun ne kadar hızlı aşağı
-# dönebildiği -- ve o da hava hızıyla artan elevator otoritesine bağlı. Yavaş
-# girmek dönüşü yavaşlattı ve açıyı 38'den 22'ye DÜŞÜRDÜ. Hız düşürülecekse
+# giriliyor. Düşürmek dalış açısını ARTIRMAZ, azaltır. "Yavaş giriş = düşük yer
+# hızı = aynı alçalma hızıyla daha dik açı" ilişkisi yalnızca oturmuş dalış için
+# geçerli; dalış TECS_TIME_CONST'tan kısa sürdüğü için hiç oturmuyor.
+# Belirleyici olan geçiş rejimi, yani burnun ne kadar hızlı aşağı dönebildiği --
+# o da hava hızıyla artan elevator otoritesine bağlı. 15 m/s ölçümünde açı
+# 38'den 22'ye düştü (2026-08-14). Hız düşürülecekse
 # dalış süresi de uzatılmalı (irtifa bütçesi).
 CRUISE_AIRSPEED_MS: float = 20.0
 assert CRUISE_AIRSPEED_MS <= CRUISE_SPEED_MS, \
@@ -103,9 +102,9 @@ PARAM_MAX_ATTEMPTS: int = 4
 # It is also capped from above by the altitude fence, which is NOT suspended for
 # the run: the run-in and the recovery climb both level off at this altitude, so
 # it has to sit below FENCE_ALT_MAX by the fence margin plus enough room for
-# TECS to arrest the climb. It used to be exactly FENCE_ALT_MAX, which put the
-# whole run-in on the fence boundary and let a breach fight the 2 s
-# DO_REPOSITION refresh for control of the vehicle.
+# TECS to arrest the climb. Setting it at FENCE_ALT_MAX would put the whole
+# run-in on the fence boundary, where a breach fights the 2 s DO_REPOSITION
+# refresh for control of the vehicle.
 KAMIKAZE_ALT_FENCE_HEADROOM: float = 20.0
 KAMIKAZE_APPROACH_ALT: float = FENCE_ALT_MAX_M - FENCE_MARGIN_M - KAMIKAZE_ALT_FENCE_HEADROOM
 # How far below APPROACH_ALT the dive is still allowed to start from. Diving
@@ -334,8 +333,7 @@ KAMIKAZE_RECOVER_LEAD_FRACTIONS: tuple = (1.0, 0.6, 0.35)
 # --- BASELINE: aracın "normal" durumunun tek tanımı ------------------------
 # Kamikaze veya reposition ne açtıysa buradan kapanır. Bir manevranın dokunduğu
 # HER parametre burada olmak zorunda; olmayan bir parametre, manevra bittikten
-# sonra araçta manevra değeriyle kalır (eski kodda TECS ailesi ve pitch tabanı
-# bağlantı koptuğunda tam olarak böyle kalıyordu).
+# sonra araçta manevra değeriyle kalır.
 #
 # (kanonik_isim, [(mavlink_param, değer), ...]) — ikinci listedeki isimler
 # birbirinin alias'ı; ArduPlane 4.1+ eski centidegree isimlerini yeniden

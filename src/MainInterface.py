@@ -1,4 +1,5 @@
 import copy
+import json
 import math
 import os
 import re
@@ -17,7 +18,8 @@ from PySide6.QtCore import QTimer, QModelIndex, qInfo, qWarning, QDateTime, qDeb
 from PySide6.QtGui import QAction, QDoubleValidator, Qt
 from PySide6.QtPositioning import QGeoCoordinate
 from PySide6.QtSerialPort import QSerialPortInfo
-from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication, QMessageBox, QStyle, QProxyStyle
+from PySide6.QtWidgets import QMainWindow, QTableWidgetItem, QMenu, QApplication, QMessageBox, QStyle, QProxyStyle, \
+    QComboBox
 from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_attitude_message, \
     MAVLink_vfr_hud_message, MAVLink_battery_status_message, MAVLink_message, MAVLink_heartbeat_message, \
     MAVLink_global_position_int_message, MAVLink_system_time_message, MAV_CMD_DO_FENCE_ENABLE, \
@@ -62,6 +64,23 @@ def to_degree(x: float) -> float:
 def clamp(val: float, minv: float, maxv: float):
     return max(minv, min(maxv, val))
 
+# Sunucusuz (SITL) denemelerde kamikaze hedefini elle girmek zorunda kalmamak
+# için okunan yerel dosya. Depoya girmez, .gitignore'da: hedef koordinat sahaya
+# göre değişir, kaynakta sabit bir değer taşımanın anlamı yok.
+# Biçim: {"lat": 39.9044, "lon": 41.2370}
+OFFLINE_TEST_TARGET_FILE: str = "kamikaze_test_target.json"
+
+def load_offline_test_target() -> tuple[float, float] | None:
+    try:
+        with open(OFFLINE_TEST_TARGET_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return float(data["lat"]), float(data["lon"])
+    except FileNotFoundError:
+        return None
+    except (ValueError, KeyError, OSError) as e:
+        qWarning("%s okunamadı: %s" % (OFFLINE_TEST_TARGET_FILE, e))
+        return None
+
 # Uçuş zarfı sabitleri ve parametre tabloları: src/FlightParams.py
 from src.FlightParams import (
     BASELINE_PARAMS, HSS_SAFETY_PARAMS, KAMIKAZE_AIM_OVERSHOOT, KAMIKAZE_APPROACH_ALT,
@@ -89,11 +108,10 @@ class RoutePlanTask(QRunnable):
     """
     compute_safe_route'u havuz thread'inde çalıştırır.
 
-    Bu iş eskiden GUI thread'inde, HSS sinyalinin içinde senkron çalışıyordu.
-    Görünürlük grafiği bölge sayısına göre karesel büyüdüğü için kalabalık bir
-    HSS listesi GUI thread'ini saniyelerce kilitleyebiliyordu -- ve kamikaze'nin
-    dalışı kesme kararı da (kamikaze_timer) aynı thread'de. Bir dalış sırasında
-    o kilitlenme doğrudan yere çakılma demekti.
+    GUI thread'inde çalıştırılmamalı: görünürlük grafiği bölge sayısına göre
+    karesel büyüdüğü için kalabalık bir HSS listesi thread'i saniyelerce
+    kilitleyebilir. Kamikaze'nin dalışı kesme kararı da (kamikaze_timer) aynı
+    thread'de olduğundan, dalış sırasındaki bir kilitlenme yere çakılma demek.
     """
     def __init__(self, waypoints: list, zones: list, plan_hash: int, signals: RoutePlanSignals):
         super().__init__()
@@ -604,6 +622,35 @@ class NoAccentStyle(QProxyStyle):
         super().drawPrimitive(element, option, painter, widget)
 
 
+class TimerHoldFixedValue(QTimer):
+    """
+    Operatörün seçimini, araçtan gelen bildirime karşı bir süre korur.
+
+    Operatör combobox'tan arm/mod seçtiğinde komut araca gider, ama araç onu
+    uygulayana kadar heartbeat eski değeri bildirmeye devam eder. O aralıkta
+    bildirimi kutuya yazmak seçimi geri alır ve kutu operatörün tıkladığı
+    değerden kendiliğinden dönmüş gibi görünür.
+
+    Bekleme yalnızca burada, arayüz tarafında yapılabilir: araç komutu
+    reddederse heartbeat eski değeri bildirmeye devam eder ve kutuyu gerçeğe
+    geri çeken şey tam olarak o tekrarlardır. Telemetri tarafına "değişmediyse
+    yollama" filtresi konsaydı o düzeltme hiç gelmezdi.
+    """
+
+    def __init__(self, parent: QObject, hold_ms: int = 2000):
+        super().__init__(parent, singleShot=True, interval=hold_ms)
+
+    def hold(self) -> None:
+        """Operatör kutuya dokundu; bekleme penceresini baştan başlat."""
+        self.start()
+
+    def apply_reported(self, combobox: QComboBox, index: int) -> None:
+        """Aracın bildirdiği değeri kutuya yaz (bekleme sürmüyorsa)."""
+        if self.isActive() or combobox.currentIndex() == index:
+            return
+        combobox.setCurrentIndex(index)
+
+
 class MainWindow(QMainWindow):
     ui: Ui_MainWindow
     uav_connection: UavConnection = UavConnection()
@@ -643,8 +690,8 @@ class MainWindow(QMainWindow):
     _route_plan_signals: RoutePlanSignals
     _kamikaze_run_started_at: float = 0.0
     uav_is_armed: bool = False
-    _mode_change_cooldown: QTimer
-    _arm_change_cooldown: QTimer
+    _mode_change_cooldown: TimerHoldFixedValue
+    _arm_change_cooldown: TimerHoldFixedValue
     _gcs_heartbeat_timer: QTimer
     _kamikaze_target_cooldown: QTimer
 
@@ -684,8 +731,8 @@ class MainWindow(QMainWindow):
         self._param_retry_timer.timeout.connect(self.__retry_pending_params)
         self._route_plan_signals = RoutePlanSignals(self)
         self._route_plan_signals.finished.connect(self._on_route_plan_ready)
-        self._mode_change_cooldown = QTimer(self, singleShot=True, interval=2000)
-        self._arm_change_cooldown = QTimer(self, singleShot=True, interval=2000)
+        self._mode_change_cooldown = TimerHoldFixedValue(self)
+        self._arm_change_cooldown = TimerHoldFixedValue(self)
         self._gcs_heartbeat_timer = QTimer(self, interval=1000)
         self._gcs_heartbeat_timer.timeout.connect(self.__send_gcs_heartbeat)
 
@@ -1158,7 +1205,7 @@ class MainWindow(QMainWindow):
         self._on_hss_updated(HssSnapshot(seq=next_seq, zones=ads_list))
 
     def __setArmStatus(self, is_arm: int):
-        self._arm_change_cooldown.start()
+        self._arm_change_cooldown.hold()
         qDebug("Trying to send armed status: %s" % is_arm)
 
         self.mavlink_connection.mav.command_long_send(
@@ -1315,8 +1362,8 @@ class MainWindow(QMainWindow):
             self.requested_to_send_fence_with_fence = False
             self.fence_upload_in_progress = False   # FIX: kilit serbest
             self._fence_upload_retries = 0
-            # Çit ancak tamamı araca yüklendikten SONRA aktif edilir. Eskiden
-            # yükleme başlatılır başlatılmaz aktif ediliyordu.
+            # Çit ancak tamamı araca yüklendikten SONRA aktif edilir: yükleme
+            # sürerken aktif etmek yarım listeyle ihlal üretir.
             self._enable_fence()
             qDebug("[Fence] Çit yüklendi ve aktif edildi")
             # FIX: yükleme biterken bekleyen istek varsa hemen işle
@@ -1361,9 +1408,9 @@ class MainWindow(QMainWindow):
         self.ads_list_cache = []
         self.requested_to_send_fence_with_fence = False
         self.fence_upload_in_progress = False        # FIX: timeout'da da kilidi serbest bırak
-        # Bekleyen istek ARTIK atılmıyor: eskiden burada silindiği için, ilk
-        # (dar yarıçaplı) yükleme timeout'a düşünce tamponlu çit hiç yüklenmiyor
-        # ve araçta yanlış çit kalıyordu. Sınırlı sayıda tekrar denenir.
+        # Bekleyen istek burada atılmamalı: timeout'a düşen yükleme atılırsa
+        # araçta o ana kadar yazılmış eksik çit kalır. Sınırlı sayıda tekrar
+        # denenir.
         pending = self.pending_fence_ads_list
         self.pending_fence_ads_list = None
         if pending is None:
@@ -1395,7 +1442,7 @@ class MainWindow(QMainWindow):
 
     # --- Parametre yazma: sahiplik + teyit ---------------------------------
 
-    def _kamikaze_owns_vehicle(self) -> bool:
+    def is_kamikaze_happening(self) -> bool:
         return self.kamikaze_state != KamikazeState.IDLE
 
     def __send_param_writes(self, writes: list[tuple[bytes, float]]) -> None:
@@ -1433,7 +1480,7 @@ class MainWindow(QMainWindow):
         """
         if self.mavlink_connection is None:
             return
-        active_owner = ParamOwner.KAMIKAZE if self._kamikaze_owns_vehicle() else ParamOwner.BASELINE
+        active_owner = ParamOwner.KAMIKAZE if self.is_kamikaze_happening() else ParamOwner.BASELINE
         if owner is not active_owner:
             qWarning("Parametre yazısı engellendi (%s): sahip %s, isteyen %s"
                      % (key, active_owner.name, owner.name))
@@ -1465,7 +1512,7 @@ class MainWindow(QMainWindow):
             self._param_pending.clear()
             self._param_retry_timer.stop()
             return
-        active_owner = ParamOwner.KAMIKAZE if self._kamikaze_owns_vehicle() else ParamOwner.BASELINE
+        active_owner = ParamOwner.KAMIKAZE if self.is_kamikaze_happening() else ParamOwner.BASELINE
         for key in list(self._param_pending.keys()):
             entry = self._param_pending[key]
             # Sahiplik kontrolü tekrar gönderimde de geçerli. Bu olmadan,
@@ -1538,14 +1585,14 @@ class MainWindow(QMainWindow):
             qWarning("No UAV Connection, Can not Start Kamikaze")
             return
         try:
-            latitude: float = float(self.ui.kamikaze_latitude.text())
-            longitude: float = float(self.ui.kamikaze_longitude.text())
+            target_latitude: float = float(self.ui.kamikaze_latitude.text())
+            target_longitude: float = float(self.ui.kamikaze_longitude.text())
         except ValueError:
             qWarning("Invalid Kamikaze Coordinates")
             return
 
-        self.kamikaze_target_lat = latitude
-        self.kamikaze_target_lon = longitude
+        self.kamikaze_target_lat = target_latitude
+        self.kamikaze_target_lon = target_longitude
 
         self.next_telemetry.lock.lockForRead()
         self.kamikaze_start = self.next_telemetry.gps_saati
@@ -1593,7 +1640,7 @@ class MainWindow(QMainWindow):
         self.__apply_kamikaze_phase_params('hizalanma', KAMIKAZE_APPROACH_PARAMS)
 
         self.mavlink_connection.set_mode_apm(PLANE_MODE_GUIDED)
-        self._mode_change_cooldown.start()
+        self._mode_change_cooldown.hold()
         self.kamikaze_alt_history.clear()
         self.kamikaze_dive_sink_max = 0.0
         aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
@@ -1814,10 +1861,10 @@ class MainWindow(QMainWindow):
         # of it, so TECS's own lag lands on DIVE_ANGLE instead of under it.
         #
         # Uçulan açı pitch'ten alınıyor, irtifa türevinden değil: hücum açısı
-        # ölçülerek ~0 bulundu, yani pitch zaten uçuş yolu açısı ve çok daha
-        # temiz. Eskiden bu değer ±3 derece zıpladığı için talep de 24 ile 31
-        # m/s arasında salınıyordu; TECS'in 3 saniyelik zaman sabiti yarım
-        # saniyede bir değişen bir talebi zaten takip edemez.
+        # ölçülerek ~0 bulundu (2026-08-14), yani pitch zaten uçuş yolu açısı ve
+        # çok daha az gürültülü. İrtifa türevi ±3 derece zıplayıp talebi yarım
+        # saniyede bir 24-31 m/s arasında oynatıyor; TECS'in 3 saniyelik zaman
+        # sabiti böyle bir talebi zaten takip edemez.
         flown: float = max(0.0, -pitch)
         trim: float = KAMIKAZE_DIVE_TRIM_GAIN * (KAMIKAZE_DIVE_ANGLE - flown)
         commanded: float = KAMIKAZE_DIVE_ANGLE + clamp(trim, 0.0, KAMIKAZE_DIVE_TRIM_MAX)
@@ -1961,7 +2008,7 @@ class MainWindow(QMainWindow):
         self.ui.map_view.vehicle_locked = False
         if self.kamikaze_previous_mode is not None and self.kamikaze_previous_mode >= 0 and self.mavlink_connection is not None:
             self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
-            self._mode_change_cooldown.start()
+            self._mode_change_cooldown.hold()
         if self.server_connection.ip is not None:
             self.on_kamikaze_end(self.kamikaze_qr_text)
         self.waits_for_qr = False
@@ -2028,16 +2075,19 @@ class MainWindow(QMainWindow):
         else:
             self.apply_baseline_params()
             self.mavlink_connection.set_mode_apm(10)
-            self._mode_change_cooldown.start()
-            self.next_telemetry.lock.lockForWrite()
-            self.next_telemetry.iha_otonom = 1
-            self.next_telemetry.lock.unlock()
+            self._mode_change_cooldown.hold()
         self._create_warning("Task force-ended, returning to AUTO mission")
 
     def __get_kamikaze_coords(self):
         if self.server_connection.ip is None:
-            self.ui.kamikaze_latitude.setText("39.90448632092518")
-            self.ui.kamikaze_longitude.setText("41.23701348598452")
+            target = load_offline_test_target()
+            if target is None:
+                self._create_warning(
+                    "Sunucu bağlı değil; hedefi elle girin veya %s oluşturun" % OFFLINE_TEST_TARGET_FILE)
+                return
+            self.ui.kamikaze_latitude.setText(str(target[0]))
+            self.ui.kamikaze_longitude.setText(str(target[1]))
+            qInfo("Kamikaze hedefi yerel test dosyasından alındı: %s" % OFFLINE_TEST_TARGET_FILE)
             return
         try:
             qr_coords: QrCoords = get_kamikaze_coords(self.server_connection.get_address())
@@ -2051,7 +2101,7 @@ class MainWindow(QMainWindow):
         self.ui.kamikaze_longitude.setText(str(qr_coords.qrBoylam))
 
     def _change_index(self, index: int):
-        self._mode_change_cooldown.start()
+        self._mode_change_cooldown.hold()
         if self.kamikaze_state != KamikazeState.IDLE:
             # Only reached when the operator picks a mode by hand. The run has
             # to be called off here, otherwise it would drag the vehicle back
@@ -2070,9 +2120,6 @@ class MainWindow(QMainWindow):
             qDebug("Sending mode with index: %s" % index)
 
             self.mavlink_connection.set_mode_apm(index)
-            self.next_telemetry.lock.lockForWrite()
-            self.next_telemetry.iha_otonom = 1 if index == 10 else 0
-            self.next_telemetry.lock.unlock()
 
     def add_to_watch_list(self, e: TrackableDataEnum):
         if not TRACKABLE_DATA_ENUM_ACTIONS[e.value[0]].isEnabled():
@@ -2303,40 +2350,28 @@ class MainWindow(QMainWindow):
                 # unutulmuş bir parametre" ihtimalini tamamen kaldırıyor.
                 self.apply_baseline_params()
 
-    # Aşağıdaki iki metot da aracın bildirdiği durumu combobox'a yazar.
-    #
-    # setCurrentIndex geri besleme yapmaz: __setArmStatus ve _change_index
-    # `activated` sinyaline bağlı, onu da Qt SADECE operatör listeden seçim
-    # yaptığında yayıyor (programatik setCurrentIndex `currentIndexChanged`
-    # yayar, `activated` yaymaz). Yani buradan yazmak arm/mod komutu göndermez.
-    #
-    # Cooldown kontrolü bilerek burada, telemetri tarafında değil: araç komutu
-    # reddederse (mod değişimi kabul edilmezse) heartbeat eski değeri bildirmeye
-    # devam eder ve cooldown bittiğinde arayüzün gerçeğe geri dönmesi gerekir.
-    # Worker tarafında "değişmediyse yollama" filtresi konsaydı o düzeltme
-    # sinyali hiç gelmez, arayüz kalıcı olarak yanlış modda takılı kalırdı.
     def set_arm_mode(self, index: int):
+        # uav_is_armed her heartbeat'te güncellenir, combobox ise bekleme
+        # penceresi boyunca güncellenmez. Kamikaze'nin yerde başlamayı reddeden
+        # kontrolü aracın gerçek durumunu sormak zorunda, operatörün az önce
+        # tıkladığı değeri değil -- bu yüzden ayrı bir alan.
         self.uav_is_armed = bool(index)
-        if not self._arm_change_cooldown.isActive() and self.ui.arm_mode.currentIndex() != index:
-            self.ui.arm_mode.setCurrentIndex(index)
+        self._arm_change_cooldown.apply_reported(self.ui.arm_mode, index)
 
     def set_fly_mode(self, index: int):
-        # Otopilotun bildirdiği gerçek mod. Kamikaze koşusu sürerken buraya
-        # GUIDED dışında bir mod gelmesi, aracın kontrolünün dışarıdan alındığı
-        # anlamına gelir: çit ihlali, failsafe veya RC pilotu. Koşu bunu
-        # görmezden gelirse 2 saniyede bir DO_REPOSITION gönderip aracı GUIDED'a
-        # geri çeker ve iki taraf mod salınımına girer. Koşunun bırakılması bu
-        # yüzden burada yapılıyor: aşağıdaki combobox güncellemesi _change_index'i
-        # çalıştırmadığı için (bkz. set_arm_mode üstündeki not) dışarıdan gelen
-        # mod değişimini görebilecek başka bir yer yok.
-        if (self._kamikaze_owns_vehicle() and not self._mode_change_cooldown.isActive()
+        # Kamikaze koşusu sürerken GUIDED dışında bir mod bildirilmesi, aracın
+        # kontrolünün dışarıdan alındığı anlamına gelir: çit ihlali, failsafe
+        # veya RC pilotu. Koşu bunu görmezden gelirse 2 saniyede bir
+        # DO_REPOSITION gönderip aracı GUIDED'a geri çeker ve iki taraf mod
+        # salınımına girer. Combobox güncellemesi _change_index'i çalıştırmadığı
+        # için dışarıdan gelen mod değişimini görebilecek tek yer burası.
+        if (self.is_kamikaze_happening() and not self._mode_change_cooldown.isActive()
                 and index != Ardupilot_UAV_Modes.GUIDED.value[0]):
             self._create_warning("Uçuş modu dışarıdan değişti (%s), kamikaze bırakılıyor" % index)
             qWarning("External mode change to %s during kamikaze, releasing the vehicle" % index)
             self.kamikaze_previous_mode = None  # dışarısı sürüyor, moda karışma
             self.__finish_kamikaze()
-        if not self._mode_change_cooldown.isActive() and self.ui.fly_mode_combobox.currentIndex() != index:
-            self.ui.fly_mode_combobox.setCurrentIndex(index)
+        self._mode_change_cooldown.apply_reported(self.ui.fly_mode_combobox, index)
 
     def _update_time_with_mavlink(self):
         time_ns = QDateTime.currentDateTimeUtc().toMSecsSinceEpoch() * 1000000
@@ -2395,9 +2430,9 @@ class MainWindow(QMainWindow):
             # Tam bir bırakma yapılıyor. Bağlantı gittiği için parametreler
             # araca yazılamaz -- araç dalış zarfında kalır. Yeniden bağlanınca
             # __successful_uav_connection baseline'ın TAMAMINI yazdığı için o
-            # zarf orada kapanır. Eskiden burada sadece state sıfırlanıyordu ve
-            # -60 derece pitch tabanı, kapalı glide slope, SPDWEIGHT=0 uçuşun
-            # geri kalanı boyunca araçta kalıyordu.
+            # zarf orada kapanır. Yalnızca state sıfırlanırsa -60 derece pitch
+            # tabanı, kapalı glide slope ve SPDWEIGHT=0 uçuşun geri kalanı
+            # boyunca araçta kalır.
             #
             # Ertelenmiş HSS işleri önce temizleniyor: __finish_kamikaze sonunda
             # onları uygulamaya çalışır ve ölü bir bağlantıya fence yüklemeye
@@ -2535,11 +2570,9 @@ class MainWindow(QMainWindow):
         """
         Araca yüklenecek exclusion çemberleri — HER ZAMAN tamponlu.
 
-        Eskiden iki ayrı yol vardı: biri server_ads_data_model'deki HAM
-        yarıçapları yüklüyordu (harita için doğru, çit için 20 m dar), diğeri
-        tamponluyu. İkisi arka arkaya tetiklendiği için her HSS güncellemesinde
-        telsizden iki fence yüklemesi geçiyor ve arada araçta dar çit kalıyordu.
-        Artık tek tanım burası.
+        Araca yüklenecek çemberlerin tek tanımı burası. server_ads_data_model'in
+        HAM yarıçapları harita için doğru ama çit için 20 m dar; oradan doğrudan
+        yükleyen ikinci bir yol açılırsa araçta dar çit kalır.
         """
         ads_list: list[AdsData] = []
         for hss in self._hss_zones():
@@ -2571,7 +2604,7 @@ class MainWindow(QMainWindow):
         #      doldurup kritik parametre yazılarının düşmesine yol açar, rota
         #      yüklemesi de koşu bitince dönülecek AUTO görevini altından
         #      değiştirir. Anlık görüntü saklanır, koşu biter bitmez uygulanır.
-        if self._kamikaze_owns_vehicle():
+        if self.is_kamikaze_happening():
             first_deferral = self._deferred_snapshot is None
             self._deferred_snapshot = snapshot
             qDebug("[HSS] Kamikaze koşusu sürüyor, %d bölgelik güncelleme ertelendi" % len(zones))
@@ -2586,7 +2619,7 @@ class MainWindow(QMainWindow):
 
     def _flush_deferred_hss(self) -> None:
         """Kamikaze koşusu boyunca beklemeye alınan HSS işlerini uygular."""
-        if self._kamikaze_owns_vehicle():
+        if self.is_kamikaze_happening():
             return
         if self._deferred_snapshot is None and not self._deferred_manual_ads:
             return
@@ -2615,7 +2648,7 @@ class MainWindow(QMainWindow):
         """HSS listesini exclusion circle olarak ArduPilot'a yükler (R_hss + FENCE_BUFFER_M)."""
         if self.mavlink_connection is None:
             return
-        if self._kamikaze_owns_vehicle():
+        if self.is_kamikaze_happening():
             self._deferred_manual_ads = True
             return
         self._fence_upload_retries = 0
@@ -2628,7 +2661,7 @@ class MainWindow(QMainWindow):
         """Mission + HSS verisi mevcutsa rota yeniden hesapla ve haritada göster."""
         if not self._current_mission_waypoints:
             return
-        if self._kamikaze_owns_vehicle():
+        if self.is_kamikaze_happening():
             self._deferred_manual_ads = True
             return
         if self._plan_in_flight:
@@ -2662,7 +2695,7 @@ class MainWindow(QMainWindow):
             return
         # Hesap sürerken kamikaze başlamış olabilir: sonuç bayatlamadı ama
         # şu an araca yüklenemez, koşu sonunda yeniden planlanır.
-        if self._kamikaze_owns_vehicle():
+        if self.is_kamikaze_happening():
             self._deferred_manual_ads = True
             self._last_planned_hash = None
             return
@@ -2803,7 +2836,7 @@ class MainWindow(QMainWindow):
         if self.mavlink_connection is None:
             self._create_warning("UAV bağlı değil, rota yüklenemiyor")
             return
-        if self._kamikaze_owns_vehicle():
+        if self.is_kamikaze_happening():
             # Koşu sırasında görevi değiştirmek, koşu bitince dönülecek AUTO
             # rotasını ve current seq'i altından değiştirmek demek.
             self._deferred_manual_ads = True
@@ -2931,10 +2964,9 @@ class MainWindow(QMainWindow):
         """Upload sonrası görevi geri indirip waypoint sayısı + koordinat doğrulaması yapar."""
         if self.mavlink_connection is None:
             return
-        # request_mission_data üzerinden gidiyor: eskiden mission_request_list
-        # doğrudan gönderiliyordu ama requested_to_get_mission bayrağı set
-        # edilmediği için worker gelen MISSION_COUNT'u atıyordu, yani doğrulama
-        # hiçbir zaman çalışmıyordu.
+        # request_mission_data üzerinden gitmeli, doğrudan mission_request_list
+        # gönderilmemeli: worker gelen MISSION_COUNT'u ancak
+        # requested_to_get_mission bayrağı set edilmişse işliyor.
         if self.requested_to_get_mission:
             qWarning("[MissionUpload] Görev indirmesi zaten sürüyor, doğrulama atlandı")
             return
@@ -2944,7 +2976,7 @@ class MainWindow(QMainWindow):
 
     def _on_manual_ads_changed(self) -> None:
         """Manuel ADS ekleme/silme — fence güncelle + rotayı yeniden hesapla."""
-        if self._kamikaze_owns_vehicle():
+        if self.is_kamikaze_happening():
             self._deferred_manual_ads = True
             self._create_warning("Kamikaze sürüyor — ADS değişikliği koşu sonuna ertelendi")
             return
