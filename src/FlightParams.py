@@ -20,30 +20,45 @@ from src.RoutePreplanner import CRUISE_SPEED_MS
 # TKOFF_ALT is reached; only after it ends does CRUISE_THR_MAX take over.
 TAKEOFF_FULL_THROTTLE_TIME: float = 10.0
 
-# --- HSS güvenlik ağı (geofence) -------------------------------------------
-# Bunlar HSS katmanının malı ve HER ZAMAN yürürlükte: kamikaze koşusu bunları
-# devralmaz, bunların İÇİNE sığacak şekilde planlanır (bkz. KAMIKAZE_APPROACH_ALT).
-# Böylece güvenlik ağı en riskli fazda bile kapanmıyor.
-#
-# FENCE_TYPE bitleri: 1=AltMax, 2=Home merkezli daire (FENCE_RADIUS), 4=Polygon,
-# 8=AltMin. Sunucudan gelen HSS bölgeleri exclusion CIRCLE olarak yükleniyor ve
-# bunlar poly-fence yükleyicisine, yani bit2'ye (4) bağlı -- bit1 (2) DEĞİL.
-# Bit1 hiç set edilmemiş FENCE_RADIUS'u (varsayılan 300 m) kullanan eski
-# home-daire çiti; açık kalırsa uçak home'dan 300 m uzaklaşınca ihlal verir.
-# Bu yüzden 7 değil 5.
-# AltMin biti (8) bilerek kapalı: kamikaze dalışı FENCE_ALT_MIN'in üstünde
-# bitiyor ama yerde/kalkışta çit etkinken anında ihlal üretirdi. Açılacaksa
-# FENCE_AUTOENABLE ile birlikte değerlendirilmeli.
+# -------------------------------- HSS --------------------------------
+# Bunlar HSS ile ilgili parametreler ve HER ZAMAN yürürlükte
+# Kamikaze yapıldığında bunlardan etkilenmez,burada yazan sınırların içine sığacak şekilde planlanır (bkz. KAMIKAZE_APPROACH_ALT).
+
+
+# FENCE_TYPE bitleri: 1=AltMax, 4=Polygon
+
 FENCE_TYPE_BITS: float = 5.0
-# ArduPlane'de geçerli FENCE_ACTION değerleri 0 (sadece rapor), 1 (RTL),
-# 6 (Guided), 7 (GuidedThrottlePass). Copter'ın 4'ü Plane'de tanınmaz ve çiti
-# fiilen devre dışı bırakır. İstenen davranış ("en yakın rally noktasına git")
-# FENCE_ACTION=1 + FENCE_RET_RALLY=1 ile elde edilir.
+
+# FENCE_ACTION=1 + FENCE_RET_RALLY=1 ("en yakın rally noktasına git") 
+
 FENCE_ACTION_RTL: float = 1.0
 FENCE_ALT_MAX_M: float = 150.0   # Yarışma tavanı
 FENCE_ALT_MIN_M: float = 30.0    # Yarışma tabanı tahmini (bit kapalı, yukarı bak)
 FENCE_MARGIN_M: float = 5.0      # Çite yaklaşma marjı
 FENCE_LOITER_RADIUS_M: float = 60.0
+
+# HSS güvenlik ağı + rally + AUTO seyrüsefer parametreleri.Bunlar manevralarla
+# değişmediği için baseline'a dahil değil; bağlantı kurulduğunda bir kez yazılır.
+HSS_SAFETY_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
+    ('FENCE_ACTION',     [(b'FENCE_ACTION', FENCE_ACTION_RTL)]),
+    ('FENCE_TYPE',       [(b'FENCE_TYPE', FENCE_TYPE_BITS)]),
+
+    # Bit0=0: pilot/GCS fence ihlalinden sonra mod değiştirebilir.
+    ('FENCE_OPTIONS',    [(b'FENCE_OPTIONS', 0.0)]),
+    ('FENCE_MARGIN',     [(b'FENCE_MARGIN', FENCE_MARGIN_M)]),
+    ('FENCE_RET_RALLY',  [(b'FENCE_RET_RALLY', 1.0)]),
+    ('FENCE_ALT_MAX',    [(b'FENCE_ALT_MAX', FENCE_ALT_MAX_M)]),
+    ('FENCE_ALT_MIN',    [(b'FENCE_ALT_MIN', FENCE_ALT_MIN_M)]),
+    ('RALLY_LIMIT_KM',   [(b'RALLY_LIMIT_KM', 0.0)]), 
+    ('RALLY_INCL_HOME',  [(b'RALLY_INCL_HOME', 1.0)]),
+    ('MIS_RESTART',      [(b'MIS_RESTART', 0.0)]), #0(Resume),1(Restart)
+    ('WP_LOITER_RAD',    [(b'WP_LOITER_RAD', FENCE_LOITER_RADIUS_M)]),
+    ('WP_MAX_RADIUS',    [(b'WP_MAX_RADIUS', 0.0)]), #Maksimum Waypoint Yarıçapı
+    ('WP_RADIUS',        [(b'WP_RADIUS', 30.0)]), #Waypoint Kabul Yarıçapı
+    ('TKOFF_THR_MAX',    [(b'TKOFF_THR_MAX', 100.0)]),
+    ('TKOFF_THR_MAX_T',  [(b'TKOFF_THR_MAX_T', TAKEOFF_FULL_THROTTLE_TIME)]),
+]
+
 
 # --- Cruise / baseline zarfı -----------------------------------------------
 # "Araç normal, HSS'in planladığı hâlde" durumunun TEK tanımı BASELINE_PARAMS
@@ -366,34 +381,13 @@ BASELINE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('ALT_SLOPE_MIN',    [(b'ALT_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN),
                           (b'GLIDE_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN)]),
     # ArduPlane 4.4+ renamed TRIM_ARSPD_CM (cm/s) to AIRSPEED_CRUISE (m/s).
-    # NOTE the different units -- writing 1500 to AIRSPEED_CRUISE would command
-    # 1500 m/s. Old firmware ignores the new name and vice versa.
+
     ('AIRSPEED_CRUISE',  [(b'AIRSPEED_CRUISE', CRUISE_AIRSPEED_MS),
                           (b'TRIM_ARSPD_CM', CRUISE_AIRSPEED_MS * 100.0)]),
     ('NAVL1_PERIOD',     [(b'NAVL1_PERIOD', CRUISE_NAVL1_PERIOD)]),
 ]
 
-# HSS güvenlik ağı + rally + AUTO seyrüsefer parametreleri. Bunlar manevralarla
-# değişmediği için baseline'a dahil değil; bağlantı kurulduğunda bir kez yazılır.
-HSS_SAFETY_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
-    ('FENCE_ACTION',     [(b'FENCE_ACTION', FENCE_ACTION_RTL)]),
-    ('FENCE_TYPE',       [(b'FENCE_TYPE', FENCE_TYPE_BITS)]),
-    # Bit0=0: pilot/GCS fence ihlalinden sonra mod değiştirebilir. Kamikaze'nin
-    # dışarıdan gelen mod değişimine boyun eğmesi (set_fly_mode) buna bağlı.
-    ('FENCE_OPTIONS',    [(b'FENCE_OPTIONS', 0.0)]),
-    ('FENCE_MARGIN',     [(b'FENCE_MARGIN', FENCE_MARGIN_M)]),
-    ('FENCE_RET_RALLY',  [(b'FENCE_RET_RALLY', 1.0)]),
-    ('FENCE_ALT_MAX',    [(b'FENCE_ALT_MAX', FENCE_ALT_MAX_M)]),
-    ('FENCE_ALT_MIN',    [(b'FENCE_ALT_MIN', FENCE_ALT_MIN_M)]),
-    ('RALLY_LIMIT_KM',   [(b'RALLY_LIMIT_KM', 0.0)]),
-    ('RALLY_INCL_HOME',  [(b'RALLY_INCL_HOME', 1.0)]),
-    ('MIS_RESTART',      [(b'MIS_RESTART', 0.0)]),
-    ('WP_LOITER_RAD',    [(b'WP_LOITER_RAD', FENCE_LOITER_RADIUS_M)]),
-    ('WP_MAX_RADIUS',    [(b'WP_MAX_RADIUS', 0.0)]),
-    ('WP_RADIUS',        [(b'WP_RADIUS', 30.0)]),
-    ('TKOFF_THR_MAX',    [(b'TKOFF_THR_MAX', 100.0)]),
-    ('TKOFF_THR_MAX_T',  [(b'TKOFF_THR_MAX_T', TAKEOFF_FULL_THROTTLE_TIME)]),
-]
+
 
 # --- Kamikaze fazlarının parametreleri -------------------------------------
 # Koşunun üç fazı, BASELINE_PARAMS ile aynı biçimde. Buradaki HER kanonik isim

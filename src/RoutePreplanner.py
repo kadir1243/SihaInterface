@@ -1,23 +1,5 @@
-"""
-RoutePreplanner — Teğet Graf (Görünürlük Grafiği) Tabanlı Geometrik Rota Planlayıcı (v3)
 
-YÖNTEMİ: Lozano-Pérez & Wesley (1979) görünürlük grafiği + Dijkstra.
-  • Düğümler : başlangıç/hedef + her dairenin yüzeyi üzerinde N_ARC eşit aralıklı nokta
-  • Kenarlar : hiçbir güvenli bölgeyi kesmeyen her düğüm çifti arası düz segment +
-               aynı dairenin bitişik düğümleri arası yay (maliyet = yay uzunluğu)
-  • Yay noktaları: Dijkstra yolu bulunduktan sonra yay kenarlardaki ara noktalar
-                   RoutePoint olarak genişletilir → sabit kanatlı için uçulabilir rota.
-
-TAMPON HESABI (Yarışma günü ölçülüp LATENCY_BUDGET_S güncellenecek):
-  R_plan  = R_hss + R_turn(V_ground_max) + WP_RADIUS + σ_GPS + V_ground_max · t_latency
-          ≈ R_hss + 80 + 10 + 5 + 56 ≈ R_hss + 151 m          → AVOIDANCE_BUFFER_M
-  R_fence = R_hss + 20 m (acil çit, dar tampon)                 → FENCE_BUFFER_M
-
-KENAR DURUMLAR:
-  · WP bölge içinde    → RoutePlanResult.waypoints_inside_zone listesine eklenir, uyarı
-  · Başlangıç bölge içinde → radyal çıkış noktası üretilir
-  · İki bölge dar geçit    → union ile tek bölgeye birleştirilir
-"""
+#RoutePreplanner — Teğet Graf (Görünürlük Grafiği) Tabanlı Geometrik Rota Planlayıcı (v3)
 
 import heapq
 import math
@@ -29,9 +11,9 @@ from src.ServerConnection import ServerAdsData
 
 # Uçak / Ortam Parametreleri (Ortam parametreleri bulunulan konuma göre değişebilir)
 
-CRUISE_SPEED_MS     = 20.0    # m/s — hava hızı (KTR değeri)
+CRUISE_SPEED_MS     = 20.0    # m/s — hava hızı
 MAX_WIND_MS         = 8.0     # m/s — en kötü durum karşıt/yanlamasına bileşen
-GROUND_SPEED_MAX_MS = CRUISE_SPEED_MS + MAX_WIND_MS   # 28 m/s yer hızı
+GROUND_SPEED_MAX_MS = CRUISE_SPEED_MS + MAX_WIND_MS  
 
 MAX_BANK_DEG        = 45.0    # derece
 GRAVITY             = 9.81    # m/s²
@@ -44,11 +26,9 @@ MIN_TURN_RADIUS_M = (GROUND_SPEED_MAX_MS ** 2) / (
 WP_ACCEPT_RADIUS_M = 30.0   # ArduPlane WP_RADIUS (kabul yarıçapı)
 GPS_SIGMA_M        = 5.0    # GPS konum hatası tahmini
 LATENCY_BUDGET_S   = 2.0    # Sunucu→GCS→TCP→Jetson→MAVLink→otopilot
-# NOT: Seyir hızının araca yazılan değeri MainInterface.CRUISE_AIRSPEED_MS'tir
-# ve o da yukarıdaki CRUISE_SPEED_MS'ten türer. Burada ayrı bir TRIM_ARSPD_CM
-# sabiti vardı (15 m/s) ve bu hesapların varsaydığı 20 m/s ile çelişiyordu.
+# NOT:Seyir hızının araca yazılan değeri MainInterface.CRUISE_AIRSPEED_MS'tir
 
-# Planlama tamponu (Dönüş yarıçapı + Rüzgar + GPS hatası ≈ 80m)
+# Planlama tamponu
 AVOIDANCE_BUFFER_M = 45.0
 
 # Fence tamponu — dar,sadece gerçek ihlalde fence tetiklensin
@@ -58,12 +38,8 @@ FENCE_BUFFER_M = 20.0
 # Dar geçit eşiği: iki daire arası boşluk bu değerden azsa birleştir
 GAP_MIN_M = 0.75 * WP_ACCEPT_RADIUS_M
 
-# Bir leg çözülürken görünürlük grafiğine dahil edilecek bölgelerin, leg orta
-# noktasına olan azami uzaklığına eklenen pay. Görünürlük grafiği düğüm sayısı
-# bölge sayısıyla karesel, kenar taraması ise küresel büyüdüğü için (O(n²·Z))
-# 15+ HSS'te çözüm süresi saniyeler mertebesine çıkıyordu. Leg'ten bu kadar
-# uzaktaki bir bölgenin o leg'in kaçış yolunu engellemesi için, kaçışın leg
-# uzunluğu + bu pay kadar sapması gerekirdi; pratikte olmayacak bir durum.
+# Bir leg çözülürken görünürlük grafiğine dahil edilecek bölgelerin,leg orta
+# noktasına olan azami uzaklığına eklenen pay.
 PLANNER_ZONE_MARGIN_M = 500.0
 
 
@@ -639,14 +615,9 @@ def fence_radius_for_hss(hss_radius_m: float,
 
 # ---------------------------------------------------------------------------
 # Nokta/Doğru — HSS Testleri (kamikaze giriş kapısı ve GUIDED bacakları için)
-#
-# Rota planlayıcı sadece AUTO görevini düzeltir. Kamikaze koşusu GUIDED'da uçar
-# ve kendi hedef noktalarını üretir; o noktaların da aynı geometriden geçmesi
-# için bu iki yardımcı paylaşılır — böylece "bölge içinde mi" sorusunun tek bir
-# tanımı olur.
 # ---------------------------------------------------------------------------
 
-def point_hits_zone(lat: float, lon: float,
+def point_hits_zone(lat: float, lon: float, #buradaki nokta hss içinde mi diye bakar
                     hss_zones: list[ServerAdsData],
                     buffer_m: float = FENCE_BUFFER_M) -> ServerAdsData | None:
     """Nokta herhangi bir HSS bölgesinin (tampon dahil) içinde mi?"""
@@ -657,7 +628,7 @@ def point_hits_zone(lat: float, lon: float,
             return hss
     return None
 
-
+#burada verilen iki nokta arasında gidilen rota hss içine giriyor mu diye bakar.
 def segment_hits_zone(lat1: float, lon1: float, lat2: float, lon2: float,
                       hss_zones: list[ServerAdsData],
                       buffer_m: float = FENCE_BUFFER_M) -> ServerAdsData | None:

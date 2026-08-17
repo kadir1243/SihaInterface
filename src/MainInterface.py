@@ -104,14 +104,10 @@ class RoutePlanSignals(QObject):
         super().__init__(parent)
 
 class RoutePlanTask(QRunnable):
-    """
-    compute_safe_route'u havuz thread'inde çalıştırır.
+   
+   # compute_safe_route'u havuz thread'inde çalıştırır.
 
-    GUI thread'inde çalıştırılmamalı: görünürlük grafiği bölge sayısına göre
-    karesel büyüdüğü için kalabalık bir HSS listesi thread'i saniyelerce
-    kilitleyebilir. Kamikaze'nin dalışı kesme kararı da (kamikaze_timer) aynı
-    thread'de olduğundan, dalış sırasındaki bir kilitlenme yere çakılma demek.
-    """
+
     def __init__(self, waypoints: list, zones: list, plan_hash: int, signals: RoutePlanSignals):
         super().__init__()
         self._waypoints = waypoints
@@ -125,8 +121,10 @@ class RoutePlanTask(QRunnable):
             result = compute_safe_route(self._waypoints, self._zones)
         except Exception as e:
             qWarning("[RoutePreplanner] Rota hesabı başarısız: %s" % e)
-        # Hata durumunda da sinyal atılıyor: atılmazsa _plan_in_flight sonsuza
+
+        # Hata durumunda da sinyal atılıyor:atılmazsa _plan_in_flight sonsuza
         # kadar açık kalır ve bir daha hiç rota planlanmaz.
+
         self._signals.finished.emit(result, self._plan_hash)
 
 class MavlinkWorkerSignals(QObject):
@@ -545,8 +543,10 @@ class MavlinkWorker(QObject):
             elif msgID == MAVLINK_MSG_ID_MISSION_CURRENT:
                 self.mission_current_changed.emit(packet.seq)
             elif msgID == MAVLINK_MSG_ID_PARAM_VALUE:
-                # ArduPilot her PARAM_SET'e PARAM_VALUE ile cevap verir; bu
-                # MainWindow'daki bekleyen yazıların teyidi (bkz. __set_param).
+                #Bu kısım gelen telemetri paketleri arasından PARAM_VALUE mesajlarını yakalar ve 
+                # param_value_received sinyali ile MAINinterface'deki ilgili parametrenin değerini günceller.
+                #İHA'nın kritik parametre değişikliklerini kesin olarak aldığından emin olmak için kullanılır.
+
                 param_id = packet.param_id
                 if isinstance(param_id, bytes):
                     param_id = param_id.decode('ascii', 'replace')
@@ -623,6 +623,10 @@ class NoAccentStyle(QProxyStyle):
 
 class TimerHoldFixedValue(QTimer):
     """
+    Belirli bir süre boyunca bir değerin sabit kalmasını sağlar.
+    Bu sayede haberleşme gecikmeleri sebebiyle
+    kullanıcının seçtiği değerin değişmesi engellenmiş olur.
+
     Operatörün seçimini, araçtan gelen bildirime karşı bir süre korur.
 
     Operatör combobox'tan arm/mod seçtiğinde komut araca gider, ama araç onu
@@ -676,14 +680,11 @@ class MainWindow(QMainWindow):
     _current_mission_waypoints: list = []
     _pixhawk_current_seq: int = 0
     _last_planned_hash = None
-    # Kamikaze koşusu aracın sahibiyken gelen HSS anlık görüntüsü buraya
-    # bırakılır ve koşu biter bitmez uygulanır. Bkz. _on_hss_updated.
-    _deferred_snapshot: HssSnapshot | None = None
-    _deferred_manual_ads: bool = False
-    _plan_in_flight: bool = False
-    _fence_upload_retries: int = 0
-    # Doğrulama amaçlı görev indirmesi rota planlamasını yeniden tetiklemesin.
-    _awaiting_mission_verification: bool = False
+    _deferred_snapshot: HssSnapshot | None = None #Kamikaze yapılırken gelen hss verileri rota planlamayı tetiklemesi 
+    _deferred_manual_ads: bool = False #ve araca yeni yükleme yapılmasını engellemek için kullanılır.
+    _plan_in_flight: bool = False #Aynı anda birden fazla rota planlanmasını engellemek için kullanılır.
+    _fence_upload_retries: int = 0 
+    _awaiting_mission_verification: bool = False # Doğrulama amaçlı görev indirmesi rota planlamasını yeniden tetiklemesin.
     _param_pending: dict
     _param_retry_timer: QTimer
     _route_plan_signals: RoutePlanSignals
@@ -728,8 +729,8 @@ class MainWindow(QMainWindow):
         self._param_pending = {}
         self._param_retry_timer = QTimer(self, interval=PARAM_ACK_TIMEOUT)
         self._param_retry_timer.timeout.connect(self.__retry_pending_params)
-        self._route_plan_signals = RoutePlanSignals(self)
-        self._route_plan_signals.finished.connect(self._on_route_plan_ready)
+        self._route_plan_signals = RoutePlanSignals(self) #Rota planlama için gerekli sinyaller
+        self._route_plan_signals.finished.connect(self._on_route_plan_ready) #Rota planlama bittiğinde çağrılacak fonksiyon
         self._mode_change_cooldown = TimerHoldFixedValue(self)
         self._arm_change_cooldown = TimerHoldFixedValue(self)
         self._gcs_heartbeat_timer = QTimer(self, interval=1000)
@@ -912,9 +913,7 @@ class MainWindow(QMainWindow):
                     continue
                 self._current_mission_waypoints.append(pos)
             if self._awaiting_mission_verification:
-                # Bu indirme, az önce yüklediğimiz düzeltilmiş rotanın teyidi.
-                # Yeniden planlamayı tetiklemek yükle→indir→planla→yükle
-                # döngüsüne yol açardı.
+                # Bu indirme az önce yüklediğimiz düzeltilmiş rotanın teyidi.
                 self._awaiting_mission_verification = False
                 self._create_warning("Rota doğrulandı: araçta %d waypoint var"
                                      % len(self._current_mission_waypoints))
@@ -2591,18 +2590,16 @@ class MainWindow(QMainWindow):
 
         self._current_snapshot = snapshot
         zones = list(snapshot.zones)
-
-        # 1. Haritayı güncelle (kırmızı HSS çemberleri). notify=False: çiti
-        #    aşağıda kendimiz, tamponlu yarıçaplarla yüklüyoruz.
+        # Haritayı güncelle (kırmızı HSS çemberleri). notify=False: çiti
+        # aşağıda kendimiz, tamponlu yarıçaplarla yüklüyoruz.
         self.ui.map_view.update_server_ads_data(zones, notify=False)
-        # 2. Tampon bölge çemberlerini güncelle (turuncu)
+        # Tampon bölge çemberlerini güncelle (turuncu)
         self._update_buffer_zones(zones)
-
-        # 3-4. Çit yüklemesi ve rota planlaması araca komut vermek demek.
-        #      Kamikaze koşusu sürerken bu iş yapılmaz: fence yüklemesi telsizi
-        #      doldurup kritik parametre yazılarının düşmesine yol açar, rota
-        #      yüklemesi de koşu bitince dönülecek AUTO görevini altından
-        #      değiştirir. Anlık görüntü saklanır, koşu biter bitmez uygulanır.
+        # Çit yüklemesi ve rota planlaması araca komut vermek demek.
+        # Kamikaze koşusu sürerken bu iş yapılmaz: fence yüklemesi telsizi
+        # doldurup kritik parametre yazılarının düşmesine yol açar, rota
+        # yüklemesi de koşu bitince dönülecek AUTO görevini altından
+        # değiştirir. Anlık görüntü saklanır, koşu biter bitmez uygulanır.
         if self.is_kamikaze_happening():
             first_deferral = self._deferred_snapshot is None
             self._deferred_snapshot = snapshot
@@ -2842,15 +2839,9 @@ class MainWindow(QMainWindow):
             self._create_warning("Kamikaze sürüyor — rota yüklemesi koşu sonuna ertelendi")
             return
 
-        # Seyir hızı artık BASELINE_PARAMS'ın parçası ve rota planlayıcının
-        # varsaydığı hızla (RoutePreplanner.CRUISE_SPEED_MS) aynı. Buradaki eski
-        # tek seferlik TRIM_ARSPD_CM=1500 yazısı hiçbir zaman geri alınmıyordu,
-        # planlayıcının kendi tampon hesabıyla da çelişiyordu.
-
         if self.mavlink_worker._mission_upload_state > 0:
             self._create_warning("Rota yükleme devam ediyor, lütfen bekleyin")
             return
-
         # Yeşil rotanın waypoint'lerini al
         corrected_coords = []
         geopath = self.ui.map_view.avoidance_route_geopath.mission_geopath_v
