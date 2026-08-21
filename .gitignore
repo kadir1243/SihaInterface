@@ -715,3 +715,5 @@ ui_files/*
 
 # Sunucusuz denemelerde kullanilan yerel kamikaze hedefi
 kamikaze_test_target.json
+
+*.patch
