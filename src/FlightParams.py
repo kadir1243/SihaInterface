@@ -99,8 +99,15 @@ CRUISE_NAVL1_PERIOD: float = 14.0
 # bunu göremez. Kritik yazılar PARAM_VALUE ile teyit edilip, gelmezse
 # tekrarlanıyor. Kurtarmadaki THR_MAX yazısının düşmesi motorsuz tırmanış
 # demek olduğu için bu isteğe bağlı bir iyileştirme değil.
-PARAM_ACK_TIMEOUT: int = 700       # ms
+#
+# Süreler telemetri linkine göre: 700 ms, USB kablosunda doğru ama telsizde
+# değil. Bağlantıda 28 parametre tek seferde gönderilince araç PARAM_VALUE
+# cevaplarını ~3 saniyede yetiştiriyor, 700x4 = 2.1 saniyelik bütçe dolduğu
+# için hepsi "yazılamadı" diye raporlanıyordu -- oysa çoğu yazılmıştı.
+PARAM_ACK_TIMEOUT: int = 1500      # ms, tek bir yazının cevap bekleme süresi
 PARAM_MAX_ATTEMPTS: int = 4
+PARAM_MAX_IN_FLIGHT: int = 5       # aynı anda cevabı beklenen yazı sayısı
+PARAM_PUMP_INTERVAL: int = 200     # ms, kuyruğun ne sıklıkta işlendiği
 
 # --- Kamikaze run ----------------------------------------------------------
 # The whole run is flown in GUIDED: the autopilot keeps navigating itself, so
@@ -121,7 +128,7 @@ PARAM_MAX_ATTEMPTS: int = 4
 # run-in on the fence boundary, where a breach fights the 2 s DO_REPOSITION
 # refresh for control of the vehicle.
 KAMIKAZE_ALT_FENCE_HEADROOM: float = 20.0
-KAMIKAZE_APPROACH_ALT: float = FENCE_ALT_MAX_M - FENCE_MARGIN_M - KAMIKAZE_ALT_FENCE_HEADROOM
+KAMIKAZE_APPROACH_ALT: float = min(100.0, FENCE_ALT_MAX_M - FENCE_MARGIN_M - KAMIKAZE_ALT_FENCE_HEADROOM)
 # How far below APPROACH_ALT the dive is still allowed to start from. Diving
 # from lower means less altitude to spend and less time to rotate into the
 # angle, which is what makes a run started right after a previous one come out
@@ -150,8 +157,8 @@ KAMIKAZE_AIM_OVERSHOOT: float = 500.0
 # pull-out, and the altitude the recovery climb has to reach before the run is
 # over.
 KAMIKAZE_DIVE_ANGLE: float = 45.0
-KAMIKAZE_MIN_ALT: float = 70.0
-KAMIKAZE_RECOVER_ALT: float = 100.0
+KAMIKAZE_MIN_ALT: float = 50.0
+KAMIKAZE_RECOVER_ALT: float = 90.0
 # The dive is broken off early enough that MIN_ALT is where the vehicle bottoms
 # out, not where it starts pulling: how much further it sinks after the
 # recovery is commanded, as a time at the current sink rate.
@@ -176,6 +183,14 @@ KAMIKAZE_PULLOUT_PEAK_WINDOW: float = 1.5
 # leaving it there lets TECS keep the nose down through the pull-out and eat
 # altitude it does not need to. Clamping it at level makes the recovery as
 # tight as the airframe allows, which is what keeps MIN_ALT honest.
+#
+# Bu taban ayrıca TECS'in hız kaybına verebileceği tek doğru cevabı (burnu
+# ufkun altına indirip hız toplamak) kapatıyor, yani kendi başına bir stall
+# riski. BİLEREK 0'da bırakıldı: aşağıdaki KAMIKAZE_RECOVER_PARAMS artık
+# tırmanışı seyir TECS'iyle uçuruyor, dolayısıyla TECS hızı yiyecek kadar sert
+# çekmiyor ve burnu indirmeye ihtiyaç duymaması bekleniyor. 50 metrede burun
+# aşağı yetkisi vermemek operatör kararıdır (2026-08-21). Uçuş ölçümünde hava
+# hızı yine de düşüyorsa önce buraya bakın.
 KAMIKAZE_RECOVER_PITCH_MIN: float = 0.0
 # Time window (s) the sink rate is measured over. NOT a sample count: the loop
 # ticks at KAMIKAZE_TICK_INTERVAL but GLOBAL_POSITION_INT arrives far slower
@@ -188,9 +203,18 @@ KAMIKAZE_RECOVER_PITCH_MIN: float = 0.0
 KAMIKAZE_SINK_WINDOW: float = 0.6
 KAMIKAZE_TICK_INTERVAL: int = 100
 # Motor power (%) during the run-in, the dive and the recovery climb.
+#
+# Kurtarma gazı bilerek CRUISE_THR_MAX'ın TA KENDİSİ, ayrı bir sayı değil.
+# Eskiden 90'dı ve iki ayrı sorun üretiyordu. Birincisi giriş: dalış gazı 0
+# olduğu için pervane tek adımda 0'dan %90'a çıkıyor, bu da yüksek hücum
+# açısında tork/P-faktör ile uçağı sola yuvarlayan en büyük tek darbe.
+# İkincisi çıkış: koşu bitince THR_MAX 90'dan 60'a düşüyor, yani uçak alçak
+# irtifada tırmanırken gücü kesiliyordu. Seyir tavanıyla aynı olunca iki geçiş
+# de yumuşuyor ve koşu biterken gaz tarafında HİÇBİR adım kalmıyor.
+# Aşağıdaki TECS_CLMB_MAX (5 m/s) bu güçle rahat tırmanılan bir taleptir.
 KAMIKAZE_APPROACH_THR_MAX: float = 60.0
 KAMIKAZE_DIVE_THR_MAX: float = 0.0
-KAMIKAZE_RECOVER_THR_MAX: float = 90.0
+KAMIKAZE_RECOVER_THR_MAX: float = CRUISE_THR_MAX
 # Bank limit (deg) for the run-in. More than the planned-route baseline because
 # the run-in has to line up on the target bearing; released back to
 # CRUISE_ROLL_LIMIT at the end.
@@ -198,9 +222,16 @@ KAMIKAZE_APPROACH_ROLL_LIMIT: float = 55.0
 # Bank limit (deg) for the recovery. The dive pins it at DIVE_ROLL_LIMIT, which
 # is too tight to steer around an HSS zone, but the run-in value is too loose
 # for the bottom of the pull-out: banking hard while already pulling g stacks
-# the load factor. This is enough to fly the largest heading offset
-# KAMIKAZE_RECOVER_HEADING_OFFSETS asks for and no more.
-KAMIKAZE_RECOVER_ROLL_LIMIT: float = 35.0
+# the load factor.
+#
+# 35 iken KAMIKAZE_RECOVER_HEADING_OFFSETS'in istediği en büyük sapmayı tam
+# uçacak kadardı; 25'te o sapmalar da uçuluyor, sadece daha geniş yarıçapla --
+# kurtarmanın işi tırmanmak olduğu için hizalanmanın birkaç saniye uzaması
+# sorun değil. Buna karşılık yatışın stall hızına katkısı 35'te 1.10x iken
+# 25'te 1.05x'e iniyor; uçağın tüm uçuştaki en yavaş anı burası olduğu için
+# o fark doğrudan marj demek. Yatış yetkisi koşu bitince 45'e (CRUISE_ROLL_
+# LIMIT) açılıyor -- o geçiş hâlâ ani, bkz. MainWindow.__finish_kamikaze.
+KAMIKAZE_RECOVER_ROLL_LIMIT: float = 25.0
 # Bank limit (deg) while diving. L1 gets very twitchy about bearing as the
 # target gets close, and a wing drop points the camera off the QR code, so the
 # dive is flown with barely enough roll authority to hold the line.
@@ -303,6 +334,14 @@ CRUISE_TECS_VERT_ACC: float = 7.0
 # shallower than the line to the QR point, so the QR sits below the nose. This
 # spends the rotation before the QR comes onto the nose instead of during it.
 KAMIKAZE_DIVE_ROTATION_LEAD: float = 40.0
+# Kamikaze video kaydı dalıştan bu kadar saniye ÖNCE başlar; kayıt uçak
+# kurtarma tırmanışına geçtiği anda kapanır. Zaman değil mesafe üzerinden
+# tetikleniyor: dalış tetiği "hedefe kalan mesafe" ile veriliyor, o yüzden
+# tetik mesafesi bir saniyelik yol (yer hızı x bu değer) kadar dışarı alınıyor.
+# Böylece kayıt, dalış başlamadan önceki düz uçuşu da içeriyor -- hem hakem
+# incelemesi için başlangıç anını belgeliyor, hem de burnun aşağı dönüşünü
+# baştan yakaladığı için dalış davranışını çözümlemeye yarıyor.
+KAMIKAZE_VIDEO_LEAD_TIME: float = 1.0
 # Pitch floor headroom (deg) below the dive angle. Pinning the floor at exactly
 # DIVE_ANGLE leaves nothing for establishing the dive: the nose has to go past
 # the flight path angle for a moment to get there, and without that margin the
@@ -440,9 +479,40 @@ KAMIKAZE_DIVE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
 # Kurtarma tırmanışı. Pitch tabanı seviyeye çekiliyor: dalışın -60'ı burada
 # kalırsa TECS burnu aşağıda tutup gereksiz irtifa yiyor ve MIN_ALT tutmuyor.
 # Yatış yetkisi kısmen geri veriliyor -- bkz. KAMIKAZE_RECOVER_ROLL_LIMIT.
+#
+# Bu tablo eskiden yalnızca gaz, SPDWEIGHT, pitch tabanı ve yatışa dokunuyordu.
+# Dalışın ve yaklaşmanın açtığı TECS zarfı ise olduğu gibi kalıyordu, yani
+# tırmanış dalışın agresif ayarlarıyla uçuluyordu: ALT_SLOPE_MIN=0 ("hedef
+# irtifayı mesafeye yayma, HEMEN iste"), TECS_CLMB_MAX=15, TECS_VERT_ACC=10,
+# TECS_TIME_CONST=3. Dördü birlikte "APPROACH_ALT'a olabildiğince sert çek"
+# demek ve bunu uçağın tüm uçuştaki en yavaş anında, motorsuz bir dalıştan
+# hemen sonra istiyordu. Üstüne pitch tabanı 0 olduğu için uçak hız kaybını
+# burnunu indirerek telafi de edemiyordu. 2026-08-21 uçuşunda dalıştan
+# çıkarken 40-50 m'de sola yatıp takla atmasının en olası açıklaması bu.
+#
+# Artık kurtarma seyir TECS'iyle uçuluyor. Özellikle ALT_SLOPE_MIN'in geri
+# verilmesi belirleyici: irtifa farkı hedefe olan mesafeye yayıldığı için
+# tırmanış bir basamak talebi değil, yumuşak bir rampa oluyor. Kurtarma hedef
+# irtifasına bu yüzden dokunulmadı -- eğim geri açıkken hedefi düşürmeye gerek
+# yok, düşürmek ayrıca koşunun çıkış şartıyla (RECOVER_ALT) çakışırdı.
+#
+# Buradaki her kanonik isim BASELINE_PARAMS'ta da var, yani koşu bitince
+# hepsi kapanıyor; dosyanın sonundaki assert bunu garanti ediyor.
 KAMIKAZE_RECOVER_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('THR_MAX',          [(b'THR_MAX', KAMIKAZE_RECOVER_THR_MAX)]),
     ('TECS_SPDWEIGHT',   [(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)]),
+    # Tırmanışı şekillendiren dört ayar. Dalış/yaklaşma değerlerinde
+    # bırakılmaları koşunun en sert komutlarını en kritik faza taşıyordu.
+    ('ALT_SLOPE_MIN',    [(b'ALT_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN),
+                          (b'GLIDE_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN)]),
+    ('TECS_CLMB_MAX',    [(b'TECS_CLMB_MAX', CRUISE_TECS_CLMB_MAX)]),
+    ('TECS_VERT_ACC',    [(b'TECS_VERT_ACC', CRUISE_TECS_VERT_ACC)]),
+    ('TECS_TIME_CONST',  [(b'TECS_TIME_CONST', CRUISE_TECS_TIME_CONST)]),
+    # Dalış boyunca MainWindow.__update_dive_sink_rate bunu 30-40'a kadar
+    # yazıyor. Tavan olduğu için tırmanışı doğrudan etkilemez, ama açık
+    # bırakmak TECS'e kurtarma sırasında hiç ihtiyaç duymadığı bir alçalma
+    # serbestliği tanıyor; seyir değeri zarfı tamamen kapatıyor.
+    ('TECS_SINK_MAX',    [(b'TECS_SINK_MAX', CRUISE_TECS_SINK_MAX)]),
     ('PTCH_LIM_MIN_DEG', [(b'PTCH_LIM_MIN_DEG', KAMIKAZE_RECOVER_PITCH_MIN),
                           (b'LIM_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN * 100.0)]),
     ('TECS_PITCH_MIN',   [(b'TECS_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN)]),

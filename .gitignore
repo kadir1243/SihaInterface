@@ -717,3 +717,6 @@ ui_files/*
 kamikaze_test_target.json
 
 *.patch
+
+# Kamikaze dalis kayitlari (CameraWidget.KAMIKAZE_RECORDING_DIR)
+kamikaze_kayitlari/

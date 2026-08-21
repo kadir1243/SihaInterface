@@ -1,17 +1,113 @@
+import os
 import struct
+import time
+from datetime import datetime
 from enum import Enum
 
 import cv2
 import lz4.block
 import numpy
 from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal, QSize, QPointF, \
-    QPoint, QProcess, QByteArray
+    QPoint, QProcess, QByteArray, QMutex
 from PySide6.QtGui import QImage, QPixmap, QPaintEvent, QPainterPath, QPainter, QPen
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket, QTcpSocket
 from PySide6.QtWidgets import QWidget, QLabel, QGridLayout
 
 from src.CommonUtils import KamikazeState
 from src.barcode import RobustDetector, resolve_engine, draw_results
+
+# --- Kamikaze dalış kaydı ---------------------------------------------------
+# Kayıt klasörü ve dosya adı; her koşu kendi dosyasını açar.
+KAMIKAZE_RECORDING_DIR: str = "kamikaze_kayitlari"
+# cv2.VideoWriter açılırken bir kare hızı istiyor, ama gelen akışın gerçek
+# hızını önceden bilmenin bir yolu yok (üç protokolün hiçbiri bildirmiyor).
+# Dosya bu nominal değerle yazılıyor, gerçek hız ise kayıt biterken ölçülüp
+# loglanıyor. Oynatma hızı tutmuyorsa buradaki sabiti log'daki ölçülen değere
+# çekin -- kareler doğru, yalnızca zaman damgası ölçekli.
+KAMIKAZE_RECORDING_FPS: float = 30.0
+
+class KamikazeRecorder:
+    """
+    Dalış anının video kaydı.
+
+    Kareler kamera thread'inden (AbstractProtocolWrapper.emit_camera_data),
+    başlat/bitir komutları ise ana thread'den (MainWindow'un kamikaze döngüsü)
+    geliyor. writer bu yüzden bir mutex'in arkasında.
+
+    start() ve stop() idempotent olmak ZORUNDA: start her tick'te çağrılıyor
+    (tetik mesafe şartı, tek seferlik bir olay değil) ve stop hem kurtarmaya
+    geçerken hem de __finish_kamikaze'nin emniyet ağından geliyor.
+    """
+
+    def __init__(self) -> None:
+        self._writer: cv2.VideoWriter | None = None
+        self._mutex: QMutex = QMutex()
+        self._path: str = ""
+        self._frames: int = 0
+        self._started_at: float = 0.0
+
+    def start(self, width: int, height: int) -> None:
+        self._mutex.lock()
+        try:
+            if self._writer is not None:
+                return
+            if width <= 0 or height <= 0:
+                qWarning("Kamikaze kaydı açılamadı: kare boyutu bilinmiyor (%sx%s)" % (width, height))
+                return
+            try:
+                os.makedirs(KAMIKAZE_RECORDING_DIR, exist_ok=True)
+            except OSError as e:
+                qWarning("Kamikaze kayıt klasörü oluşturulamadı: %s" % e)
+                return
+            path: str = os.path.join(
+                KAMIKAZE_RECORDING_DIR,
+                "kamikaze_%s.mp4" % datetime.now().strftime("%Y%m%d_%H%M%S"))
+            writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"),
+                                     KAMIKAZE_RECORDING_FPS, (width, height))
+            if not writer.isOpened():
+                qWarning("Kamikaze kaydı açılamadı, kodek veya yol desteklenmiyor: %s" % path)
+                return
+            self._writer = writer
+            self._path = path
+            self._frames = 0
+            self._started_at = time.monotonic()
+            qInfo("Kamikaze kaydı başladı: %s (%sx%s)" % (path, width, height))
+        finally:
+            self._mutex.unlock()
+
+    def write(self, raw_image: bytes, width: int, height: int) -> None:
+        self._mutex.lock()
+        try:
+            if self._writer is None:
+                return
+            if len(raw_image) != width * height * 3:
+                return
+            frame = numpy.frombuffer(raw_image, dtype=numpy.uint8).reshape((height, width, 3))
+            # Akıştaki kareler RGB, VideoWriter ise BGR bekliyor. Çevrilmezse
+            # kayıt mavi-kırmızı ters çıkar.
+            self._writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+            self._frames += 1
+        except Exception as e:
+            # Kayıt yan iş: bir kare yazılamadı diye kamera akışı ya da QR
+            # okuma durmamalı.
+            qWarning("Kamikaze karesi yazılamadı: %s" % e)
+        finally:
+            self._mutex.unlock()
+
+    def stop(self) -> None:
+        self._mutex.lock()
+        try:
+            if self._writer is None:
+                return
+            elapsed: float = max(1e-3, time.monotonic() - self._started_at)
+            self._writer.release()
+            self._writer = None
+            qInfo("Kamikaze kaydı bitti: %s — %d kare, %.1f sn, ölçülen %.1f fps "
+                  "(dosyaya %.1f fps ile yazıldı)"
+                  % (self._path, self._frames, elapsed, self._frames / elapsed,
+                     KAMIKAZE_RECORDING_FPS))
+        finally:
+            self._mutex.unlock()
 
 class AbstractProtocolWrapper(QObject):
     socket: QAbstractSocket | None
@@ -41,6 +137,7 @@ class AbstractProtocolWrapper(QObject):
     def emit_camera_data(self, raw_image: bytes):
         waits_qr: bool = self.parentWidget.waits_qr()
         lock_enabled: bool = self.parentWidget.lock_enabled
+        shown_image: bytes = raw_image
         if waits_qr or lock_enabled:
             width = self.parentWidget.camera_server_info.width
             height = self.parentWidget.camera_server_info.height
@@ -57,9 +154,16 @@ class AbstractProtocolWrapper(QObject):
                             self.parentWidget.qr_successfully_readed.emit(data)
                             self.qr_read_timer.start()
 
-            self.update_camera_in_ui.emit(frame.tobytes())
-        else:
-            self.update_camera_in_ui.emit(raw_image)
+            shown_image = frame.tobytes()
+        # Kayda operatörün gördüğü kare gidiyor, ham kare değil: dalış boyunca
+        # waits_qr açık olduğu için QR kutusu da çizili oluyor ve kayıt, kodun
+        # QR'ı hangi karede gördüğünü de belgeliyor. Kayıt kapalıyken bu çağrı
+        # mutex'i alıp hemen dönüyor.
+        self.parentWidget.kamikaze_recorder.write(
+            shown_image,
+            self.parentWidget.camera_server_info.width,
+            self.parentWidget.camera_server_info.height)
+        self.update_camera_in_ui.emit(shown_image)
 
 class ProtocolKadirSocketWrapper(AbstractProtocolWrapper):
     def __init__(self, parentWidget: CameraWidget):
@@ -333,9 +437,11 @@ class CameraWidget(QWidget):
     qr_successfully_readed: Signal = Signal(str)
     label: LabelWithRectangle
     lock_enabled: bool
+    kamikaze_recorder: KamikazeRecorder
 
     def __init__(self, parent: QWidget | None = None):
         QWidget.__init__(self, parent=parent)
+        self.kamikaze_recorder = KamikazeRecorder()
         self.gridLayout = QGridLayout(self)
         self.gridLayout.setSpacing(0)
         self.gridLayout.setContentsMargins(0, 0, 0, 0)
@@ -351,6 +457,21 @@ class CameraWidget(QWidget):
 
     def change_lock_state(self, lock_state: bool):
         self.lock_enabled = lock_state
+
+    def start_kamikaze_recording(self) -> None:
+        """
+        Dalış kaydını başlatır. Kamikaze döngüsünden her tick'te çağrılabilir;
+        zaten kayıt varsa hiçbir şey yapmaz. Kamera yapılandırılmamışsa kare
+        de gelmeyeceği için sessizce geçilir.
+        """
+        info: CameraServerInfo = self.camera_server_info
+        if not info.ip:
+            return
+        self.kamikaze_recorder.start(info.width, info.height)
+
+    def stop_kamikaze_recording(self) -> None:
+        """Dalış kaydını kapatır. Kayıt yoksa hiçbir şey yapmaz."""
+        self.kamikaze_recorder.stop()
 
     def set_mainwindow_reference(self, widget):
         self.mainwindow = widget

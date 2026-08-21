@@ -35,7 +35,7 @@ from pymavlink.dialects.v20.all import MAVLink_gps_raw_int_message, MAVLink_atti
     MAV_CMD_SET_MESSAGE_INTERVAL, MAV_MISSION_TYPE_MISSION, MAV_RESULT_TEMPORARILY_REJECTED, MAV_CMD_DO_SET_MODE, \
     MAV_MODE_FLAG_AUTO_ENABLED, MAV_AUTOPILOT_PX4, MAV_AUTOPILOT_ARDUPILOTMEGA, MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, \
     MAV_RESULT_FAILED, MAV_RESULT_ACCEPTED, MAV_CMD_REQUEST_MESSAGE, MAVLINK_MSG_ID_MISSION_CURRENT, MAV_TYPE_GCS, \
-    MAVLINK_MSG_ID_PARAM_VALUE
+    MAVLINK_MSG_ID_PARAM_VALUE, MAVLINK_MSG_ID_HEARTBEAT
 from pymavlink.mavutil import mavfile, all_printable, mavtcp, mavudp, mavserial
 
 from src.AddADSInterface import AddADSInterface
@@ -90,7 +90,8 @@ from src.FlightParams import (
     KAMIKAZE_MIN_VALID_SPEED, KAMIKAZE_PULLOUT_PEAK_WINDOW, KAMIKAZE_PULLOUT_TIME, KAMIKAZE_RECOVER_ALT,
     KAMIKAZE_RECOVER_HEADING_OFFSETS, KAMIKAZE_RECOVER_LEAD, KAMIKAZE_RECOVER_LEAD_FRACTIONS,
     KAMIKAZE_RECOVER_PARAMS, KAMIKAZE_SINK_STEP, KAMIKAZE_SINK_WINDOW, KAMIKAZE_TARGET_REFRESH,
-    KAMIKAZE_TECS_SINK_MAX, KAMIKAZE_TICK_INTERVAL, PARAM_ACK_TIMEOUT, PARAM_MAX_ATTEMPTS, ParamOwner
+    KAMIKAZE_TECS_SINK_MAX, KAMIKAZE_TICK_INTERVAL, KAMIKAZE_VIDEO_LEAD_TIME,
+    PARAM_ACK_TIMEOUT, PARAM_MAX_ATTEMPTS, PARAM_MAX_IN_FLIGHT, PARAM_PUMP_INTERVAL, ParamOwner
 )
 
 
@@ -187,8 +188,11 @@ class TrackableDataUpdate:
         return datetime.toString()
     @staticmethod
     def update_battery_percentage(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_battery_status_message) -> str:
-        telemetry.iha_batarya = packet.battery_remaining
-        return str(packet.battery_remaining) + "%"
+        remaining: int = packet.battery_remaining
+        telemetry.iha_batarya = clamp(remaining, 0, 100)
+        if remaining < 0:
+            return ""
+        return str(remaining) + "%"
     @staticmethod
     def update_arm_status(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_heartbeat_message) -> str:
         arm: int = 1 if (packet.base_mode & MAV_MODE_FLAG_SAFETY_ARMED) != 0 else 0
@@ -221,7 +225,12 @@ class TrackableDataUpdate:
             else:
                 qWarning("Don't know how to handle this custom mode data")
         else:
-            qWarning("Unknown pilot type, fly mode unsupported")
+            header = packet.get_header()
+            qWarning("Unknown pilot type, fly mode unsupported "
+                     "(autopilot=%s, type=%s, base_mode=%s, custom_mode=%s, "
+                     "srcSystem=%s, srcComponent=%s)"
+                     % (packet.autopilot, packet.type, packet.base_mode,
+                        packet.custom_mode, header.srcSystem, header.srcComponent))
         return ""
 
     @staticmethod
@@ -404,7 +413,7 @@ class MavlinkWorker(QObject):
                 self._mission_last_activity_time = time.monotonic()
 
             if self._mission_upload_state > 0:
-                if time.monotonic() - self._mission_last_activity_time > 2.0:
+                if time.monotonic() - self._mission_last_activity_time > 3.0:
                     if self._mission_upload_state <= 0:
                         return
                     self._mission_upload_retry_count += 1
@@ -414,6 +423,7 @@ class MavlinkWorker(QObject):
                     else:
                         qWarning(
                             f"[MavlinkWorker] Timeout at state {self._mission_upload_state}, retrying ({self._mission_upload_retry_count}/3)")
+                        self._mission_last_activity_time = time.monotonic()
                         if self._mission_upload_state == 1:
                             self._send_mission_clear_all()
                         elif self._mission_upload_state == 2:
@@ -575,6 +585,9 @@ class MavlinkWorker(QObject):
                 if isinstance(param_id, bytes):
                     param_id = param_id.decode('ascii', 'replace')
                 self.param_value_received.emit(param_id.rstrip('\x00'), float(packet.param_value))
+            elif msgID == MAVLINK_MSG_ID_HEARTBEAT and not self.mavlink_connection.probably_vehicle_heartbeat(packet):
+                # Otopilot dışı bir düğümün heartbeat'i (ADS-B modülü vb.).
+                pass
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
                 e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
                 data_enum_values = e.value[4]
@@ -622,17 +635,50 @@ class ConnectionWaitWrapper(QObject):
         qInfo("Successfully Connected with mavlink, Target System: %s, Target component: %s" % (self.mavlink_connection.target_system, self.mavlink_connection.target_component))
 
         try:
-            msg: MAVLink_heartbeat_message = self.mavlink_connection.wait_heartbeat(timeout=10)
+            msg: MAVLink_heartbeat_message = self.__wait_autopilot_heartbeat(10.0)
             if msg is None:
                 raise Exception("Connection failed")
 
-            qInfo("Successfully Received first heartbeat")
+            # Hedef kimliği otopilotun heartbeat'inden alınıyor. pymavlink
+            # target_system'ı yalnızca "araç gibi görünen" bir heartbeat'te
+            # kilitliyor, target_component'ı ise hiç ayarlamıyor -- ikisi de 0
+            # kalırsa bütün komutlar broadcast gidiyor ve araç dışındaki
+            # düğümler de dinliyor.
+            self.mavlink_connection.target_system = msg.get_srcSystem()
+            self.mavlink_connection.target_component = msg.get_srcComponent()
+            qInfo("Successfully Received first heartbeat "
+                  "(sysid=%s, compid=%s, autopilot=%s, type=%s)"
+                  % (msg.get_srcSystem(), msg.get_srcComponent(), msg.autopilot, msg.type))
             self.setup_for_autopilot.emit(msg.autopilot)
             self.after_heartbeat_successfully_received.emit(self.mavlink_connection)
         except:
             self.after_heartbeat_not_received.emit(self.mavlink_connection)
         self.__parent.connection_wait_wrapper = None
         self.con_thread.quit()
+
+    def __wait_autopilot_heartbeat(self, timeout: float) -> MAVLink_heartbeat_message | None:
+        """
+        Otopilotun heartbeat'ini bekler, hattaki diğer düğümlerinkini atlar.
+
+        wait_heartbeat() ilk gelen heartbeat'i döndürüyor; araçta ADS-B modülü
+        varsa çoğu zaman ilk gelen o oluyor ve arayüz otopilot tipini onun
+        alanından (MAV_AUTOPILOT_INVALID) kuruyordu. setup_for_autopilot buna
+        bakıp uçuş modu listesini hiç doldurmadığı için mod kutusu boş kalıyor
+        ve "Unknown pilot type, fly mode unsupported" düşüyordu.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            msg = self.mavlink_connection.wait_heartbeat(timeout=remaining)
+            if msg is None:
+                return None
+            if self.mavlink_connection.probably_vehicle_heartbeat(msg):
+                return msg
+            qDebug("Otopilot olmayan heartbeat atlandı "
+                   "(autopilot=%s, type=%s, srcSystem=%s, srcComponent=%s)"
+                   % (msg.autopilot, msg.type, msg.get_srcSystem(), msg.get_srcComponent()))
 
 class NoAccentStyle(QProxyStyle):
     def __init__(self, style: QStyle):
@@ -756,8 +802,8 @@ class MainWindow(QMainWindow):
         self._kamikaze_target_cooldown = QTimer(self, singleShot=True, interval=KAMIKAZE_TARGET_REFRESH)
         self.waits_for_qr = False
         self._param_pending = {}
-        self._param_retry_timer = QTimer(self, interval=PARAM_ACK_TIMEOUT)
-        self._param_retry_timer.timeout.connect(self.__retry_pending_params)
+        self._param_retry_timer = QTimer(self, interval=PARAM_PUMP_INTERVAL)
+        self._param_retry_timer.timeout.connect(self.__pump_param_queue)
         self._route_plan_signals = RoutePlanSignals(self) #Rota planlama için gerekli sinyaller
         self._route_plan_signals.finished.connect(self._on_route_plan_ready) #Rota planlama bittiğinde çağrılacak fonksiyon
         self._mode_change_cooldown = TimerHoldFixedValue(self)
@@ -819,7 +865,9 @@ class MainWindow(QMainWindow):
         self.fence_upload_timout.timeout.connect(self.fence_upload_reset)
         self.fence_download_timout = QTimer(self, singleShot=True, interval=10000)
         self.fence_download_timout.timeout.connect(self.request_fence_data_timeout)
-        self.mission_download_timout = QTimer(self, singleShot=True, interval=10000)
+        self.mission_download_retries = 0
+        self.waypoint_mission_count = -1
+        self.mission_download_timout = QTimer(self, singleShot=True, interval=1000)
         self.mission_download_timout.timeout.connect(self.request_mission_data_timeout)
         self.ui.download_missions.clicked.connect(self.request_mission_data)
         self.ui.download_fence_data.clicked.connect(self.request_fence_data)
@@ -887,10 +935,24 @@ class MainWindow(QMainWindow):
             qDebug("Tried to get missions when already getting missions from uav")
             return
         self.requested_to_get_mission = True
+        self.mission_download_retries = 0
+        self.waypoint_mission_count = -1
         self.mavlink_connection.mav.mission_request_list_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_MISSION)
         self.mission_download_timout.start()
 
     def request_mission_data_timeout(self):
+        if self.mavlink_connection is not None and self.mission_download_retries < 10:
+            self.mission_download_retries = self.mission_download_retries + 1
+            if self.waypoint_mission_count == -1:
+                self.mavlink_connection.mav.mission_request_list_send(self.mavlink_connection.target_system, self.mavlink_connection.target_component, MAV_MISSION_TYPE_MISSION)
+            else:
+                self.mavlink_connection.mav.mission_request_int_send(self.mavlink_connection.target_system,
+                                                                     self.mavlink_connection.target_component, self.next_mission_order_seq_id,
+                                                                     MAV_MISSION_TYPE_MISSION)
+            self.mission_download_timout.start()
+            qDebug(f"[Mission Download] Retry {self.mission_download_retries} for seq {self.next_mission_order_seq_id}")
+            return
+            
         self._create_warning("Mission Download taking really long, probably vehicle connection has been lost")
         self.next_mission_order_seq_id = 0
         self.requested_to_get_mission = False
@@ -904,6 +966,7 @@ class MainWindow(QMainWindow):
         koordinat bilgisi de harita modeline eklenir (UI katmanı)."""
         if not self.requested_to_get_mission or count == 0:
             return
+        self.waypoint_mission_count = count
         seq = item.seq
         qDebug("Mission received with (%.6f, %.6f, %.1f) cmd=%d frame=%d seq=%d"
                % (item.x, item.y, item.z, item.command, item.frame, seq))
@@ -924,6 +987,7 @@ class MainWindow(QMainWindow):
         coord_data.coord_type = 1
         self.ui.map_view.mission_coords_data_model.m_datas.append(coord_data)
         self.ui.map_view.mission_geopath.add_pos(coord)
+        self.mission_download_retries = 0
         self.mission_download_timout.start()
         if seq + 1 != count:
             if use_int:
@@ -1507,11 +1571,13 @@ class MainWindow(QMainWindow):
             qWarning("Parametre gönderilemedi, bağlantı düşmüş olabilir: %s" % e)
 
     def __set_param(self, name: bytes, value: float,
-                    owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True) -> None:
-        self.__set_param_group(name.decode('ascii'), [(name, value)], owner, verify)
+                    owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True,
+                    urgent: bool = False) -> None:
+        self.__set_param_group(name.decode('ascii'), [(name, value)], owner, verify, urgent)
 
     def __set_param_group(self, key: str, writes: list[tuple[bytes, float]],
-                          owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True) -> None:
+                          owner: ParamOwner = ParamOwner.BASELINE, verify: bool = True,
+                          urgent: bool = False) -> None:
         """
         Tek bir mantıksal parametreyi yazar. writes birden fazla mavlink ismi
         içerebilir (eski/yeni firmware alias'ları); teyit için HERHANGİ birinden
@@ -1522,6 +1588,15 @@ class MainWindow(QMainWindow):
         katmanından (veya başka bir yerden) gelen bir yazı sessizce uygulanmaz,
         engellenir ve loglanır -- iki katmanın aynı anda parametre yazmasının
         önündeki tek gerçek engel bu.
+
+        Yazı hemen gönderilmez, kuyruğa girer: aynı anda kaç yazının cevabının
+        beklendiği PARAM_MAX_IN_FLIGHT ile sınırlı (bkz. __pump_param_queue).
+
+        urgent=True olan yazı bu sınırı deler ve kuyruğun önüne geçer. Tek
+        kullanıcısı dalışın sink rate denetimi: KAMIKAZE_DIVE_PARAMS tam 5
+        kalem, yani dalışa girerken kuyruk kapasitesini dolduruyor ve hemen
+        ardından gelen TECS_SINK_MAX yazısı bir cevap süresi (1.5 sn) boyunca
+        sırada bekleyecekti -- dalışın en kritik saniyesinde.
         """
         if self.mavlink_connection is None:
             return
@@ -1530,17 +1605,21 @@ class MainWindow(QMainWindow):
             qWarning("Parametre yazısı engellendi (%s): sahip %s, isteyen %s"
                      % (key, active_owner.name, owner.name))
             return
-        self.__send_param_writes(writes)
         if not verify:
+            # Teyit istenmiyorsa kuyruğun sırasını beklemesinin anlamı yok.
             self._param_pending.pop(key, None)
+            self.__send_param_writes(writes)
             return
         # owner da saklanıyor: tekrar gönderim sırasında aracın sahibi
         # değişmişse bu yazı bayattır ve gönderilmemeli.
-        self._param_pending[key] = {'writes': writes, 'attempts': 1, 'owner': owner}
+        self._param_pending[key] = {'writes': writes, 'attempts': 0,
+                                    'owner': owner, 'sent_at': 0.0, 'urgent': urgent}
         if not self._param_retry_timer.isActive():
             self._param_retry_timer.start()
+        self.__pump_param_queue()
 
     def _on_param_value(self, name: str, value: float) -> None:
+        confirmed = False
         for key in list(self._param_pending.keys()):
             entry = self._param_pending[key]
             for param_name, expected in entry['writes']:
@@ -1548,16 +1627,30 @@ class MainWindow(QMainWindow):
                     continue
                 if abs(value - expected) <= max(1e-3, abs(expected) * 1e-4):
                     del self._param_pending[key]
+                    confirmed = True
                 break
         if not self._param_pending:
             self._param_retry_timer.stop()
+        elif confirmed:
+            # Hatta yer açıldı; sıradakini timer tikini beklemeden yolla.
+            self.__pump_param_queue()
 
-    def __retry_pending_params(self) -> None:
+    def __pump_param_queue(self) -> None:
+        """
+        Bekleyen parametre yazılarını linkin taşıyabileceği hızda gönderir.
+
+        Aynı anda en fazla PARAM_MAX_IN_FLIGHT yazı havada; biri teyit
+        alınca ya da PARAM_ACK_TIMEOUT dolunca sıradaki gidiyor.
+        """
         if self.mavlink_connection is None:
             self._param_pending.clear()
             self._param_retry_timer.stop()
             return
         active_owner = ParamOwner.KAMIKAZE if self.is_kamikaze_happening() else ParamOwner.BASELINE
+        now = time.monotonic()
+        ack_timeout = PARAM_ACK_TIMEOUT / 1000.0
+        in_flight = 0
+        ready: list[str] = []
         for key in list(self._param_pending.keys()):
             entry = self._param_pending[key]
             # Sahiplik kontrolü tekrar gönderimde de geçerli. Bu olmadan,
@@ -1570,12 +1663,26 @@ class MainWindow(QMainWindow):
                        % (key, entry['owner'].name, active_owner.name))
                 del self._param_pending[key]
                 continue
+            if entry['attempts'] > 0 and now - entry['sent_at'] < ack_timeout:
+                in_flight += 1
+                continue
             if entry['attempts'] >= PARAM_MAX_ATTEMPTS:
                 del self._param_pending[key]
                 self._create_warning("Parametre yazılamadı: %s — otopilot teyit vermedi!" % key)
                 continue
+            ready.append(key)
+        # Acil yazılar öne; sıralama kararlı olduğu için gerisi kuyruk sırasını
+        # korur. Acil olan sınırı da deliyor, sırasını beklemiyor.
+        ready.sort(key=lambda k: not self._param_pending[k]['urgent'])
+        for key in ready:
+            entry = self._param_pending[key]
+            if in_flight >= PARAM_MAX_IN_FLIGHT and not entry['urgent']:
+                break
             entry['attempts'] += 1
-            qDebug("Parametre tekrar gönderiliyor: %s (deneme %d)" % (key, entry['attempts']))
+            entry['sent_at'] = now
+            in_flight += 1
+            if entry['attempts'] > 1:
+                qDebug("Parametre tekrar gönderiliyor: %s (deneme %d)" % (key, entry['attempts']))
             self.__send_param_writes(entry['writes'])
         if not self._param_pending:
             self._param_retry_timer.stop()
@@ -1758,8 +1865,16 @@ class MainWindow(QMainWindow):
             # lead, but never closer than the configured minimum.
             dive_at: float = max(KAMIKAZE_DIVE_START_DISTANCE,
                                  current_alt / math.tan(math.radians(KAMIKAZE_DIVE_ANGLE)) + KAMIKAZE_DIVE_ROTATION_LEAD)
+            high_enough: bool = current_alt >= KAMIKAZE_APPROACH_ALT - KAMIKAZE_APPROACH_ALT_TOLERANCE
+            # Kayıt dalıştan KAMIKAZE_VIDEO_LEAD_TIME saniye önce başlasın diye
+            # tetik mesafesi bir saniyelik yol kadar dışarı alınıyor. İrtifa
+            # şartı burada da aranıyor: yetmiyorsa dalış olmayacak, uçak tur
+            # atacak demektir ve o turu kaydetmenin anlamı yok -- irtifa hiç
+            # yetmezse koşu watchdog'a kadar sürebiliyor.
+            if high_enough and distance <= dive_at + ground_speed * KAMIKAZE_VIDEO_LEAD_TIME:
+                self.ui.camera_view.start_kamikaze_recording()
             if distance <= dive_at:
-                if current_alt < KAMIKAZE_APPROACH_ALT - KAMIKAZE_APPROACH_ALT_TOLERANCE:
+                if not high_enough:
                     if not self._kamikaze_climb_warned:
                         self._kamikaze_climb_warned = True
                         self._create_warning("Only at %.0fm of the %.0fm dive altitude, going around"
@@ -1925,7 +2040,7 @@ class MainWindow(QMainWindow):
         # gönderilmez. 5 m/s tavan ~12 m/s yer hızında 22 derecelik bir dalış
         # demek. Teyit kuyruğu parametre adına göre tutulduğu için burada
         # birikme olmaz: yeni yazı eskisinin yerine geçer.
-        self.__set_param(b'TECS_SINK_MAX', wanted, ParamOwner.KAMIKAZE)
+        self.__set_param(b'TECS_SINK_MAX', wanted, ParamOwner.KAMIKAZE, urgent=True)
 
     def __enter_dive(self, current_lat: float, current_lon: float, current_alt: float, distance: float, ground_speed: float, pitch: float):
         self.next_telemetry.lock.lockForRead()
@@ -1955,6 +2070,10 @@ class MainWindow(QMainWindow):
         self.kamikaze_state = KamikazeState.DIVING
 
     def __enter_recovery(self, current_lat: float, current_lon: float):
+        # "Kalkışa geçtiği an": dalışın bittiği, tırmanışın başladığı nokta.
+        # Buraya konması iki giriş yolunu da kapsıyor -- irtifa tetiği ve
+        # dalış sırasında QR okunması (on_qr_found).
+        self.ui.camera_view.stop_kamikaze_recording()
         self.next_telemetry.lock.lockForRead()
         self.kamikaze_recover_heading = self.next_telemetry.iha_yonelme
         self.next_telemetry.lock.unlock()
@@ -2042,6 +2161,11 @@ class MainWindow(QMainWindow):
         yeniden bağlanınca apply_baseline_params() araca doğru durumu yazar.
         """
         self.kamikaze_timer.stop()
+        # Emniyet ağı: kayıt normalde kurtarmaya geçerken kapanıyor, ama koşu
+        # dalışa hiç girmeden ya da dalışın ortasında iptal edilebiliyor
+        # (watchdog, mod değişimi, bağlantı kopması). O yollarda kapatılmazsa
+        # dosya açık kalır. stop() idempotent, kayıt yoksa hiçbir şey yapmaz.
+        self.ui.camera_view.stop_kamikaze_recording()
         # Önce sahiplik bırakılır, sonra yazılır: __set_param_group sahibe
         # bakıyor, sıra ters olsa baseline yazıları kendi kilidimize takılırdı.
         self.kamikaze_state = KamikazeState.IDLE
@@ -2055,7 +2179,10 @@ class MainWindow(QMainWindow):
             self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
             self._mode_change_cooldown.hold()
         if self.server_connection.ip is not None:
-            self.on_kamikaze_end(self.kamikaze_qr_text)
+            if self.kamikaze_qr_text:
+                self.on_kamikaze_end(self.kamikaze_qr_text)
+            else:
+                self._create_warning("QR okunamadı — kamikaze paketi sunucuya gönderilmedi")
         self.waits_for_qr = False
         # The numbers the dive is tuned against, on the status bar rather than
         # only in the log: the angle it actually reached, how long it had to
@@ -2323,6 +2450,15 @@ class MainWindow(QMainWindow):
             pass
         self.ui.map_view.mavlink_connection = None
 
+    def __request_message_interval(self, message_id: int, interval_us: int) -> None:
+        self.mavlink_connection.mav.command_long_send(self.mavlink_connection.target_system,
+                                                      self.mavlink_connection.target_component,
+                                                      MAV_CMD_SET_MESSAGE_INTERVAL,
+                                                      0,
+                                                      message_id,
+                                                      interval_us,
+                                                      0, 0, 0, 0, 0)
+
     def __successful_uav_connection(self, mav_connection: mavfile):
         if self.uav_connection_dialog is not None:
             self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
@@ -2331,17 +2467,15 @@ class MainWindow(QMainWindow):
             self.mavlink_connection.target_system,
             self.mavlink_connection.target_component,
             MAV_DATA_STREAM_ALL,
-            10,
-            1
+            0,
+            0
         )
         for e in TrackableDataPacketTimer:
-            self.mavlink_connection.mav.command_long_send(self.mavlink_connection.target_system,
-                                                            self.mavlink_connection.target_component,
-                                                            MAV_CMD_SET_MESSAGE_INTERVAL,
-                                                            0,
-                                                            e.value[0],
-                                                            e.value[3],
-                                                            0, 0, 0, 0, 0)
+            self.__request_message_interval(e.value[0], e.value[3])
+        # MISSION_CURRENT hiçbir TrackableDataPacketTimer'a bağlı değil ama
+        # _pixhawk_current_seq onunla güncelleniyor; blanket stream isteği
+        # kalktığı için artık açıkça istenmesi gerekiyor.
+        self.__request_message_interval(MAVLINK_MSG_ID_MISSION_CURRENT, 500000)
         self._enable_fence()
         self._update_time_with_mavlink()
         # Bağlantı kurulduğunda araç HER ZAMAN bilinen bir duruma çekilir. Bu,

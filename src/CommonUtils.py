@@ -18,14 +18,14 @@ class KamikazeState(Enum):
 
 class TrackableDataPacketTimer(Enum):
     # (msg id, msg name, type, update interval (microsecond), watch value ids that uses this packet)
-    BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 1000000, [10])
-    ATTITUDE = (30, "ATTITUDE", MAVLink_attitude_message, 100000, [3, 4, 5])
-    GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 100000, [1, 8, 9])
-    VFR_HUD = (74, "VFR_HUD", MAVLink_vfr_hud_message, 100000, [0, 6])
-    HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 100000, [11, 14])
-    GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 100000, [2, 12])
-    SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 1000000, [7])
-    FENCE_STATUS = (162, "FENCE_STATUS", MAVLink_fence_status_message, 1000000, [13])
+    BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 500000, [10])
+    ATTITUDE = (30, "ATTITUDE", MAVLink_attitude_message, 250000, [3, 4, 5])
+    GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 500000, [1, 8, 9])
+    VFR_HUD = (74, "VFR_HUD", MAVLink_vfr_hud_message, 250000, [0, 6])
+    HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 1000000, [11, 14])
+    GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 250000, [2, 12])
+    SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 500000, [7])
+    FENCE_STATUS = (162, "FENCE_STATUS", MAVLink_fence_status_message, 500000, [13])
 
 MSG_ID_2_TRACKABLE_DATA_TYPE: dict[int, TrackableDataPacketTimer] = {}
 
