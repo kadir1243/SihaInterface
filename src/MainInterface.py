@@ -52,7 +52,7 @@ from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
 from src.HSSPollingWorker import HSSPollingWorker
 from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss, point_hits_zone, segment_hits_zone, \
-    RoutePlanResult
+    RoutePlanResult, RoutePoint, MissionItem
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -108,17 +108,20 @@ class RoutePlanTask(QRunnable):
    # compute_safe_route'u havuz thread'inde çalıştırır.
 
 
-    def __init__(self, waypoints: list, zones: list, plan_hash: int, signals: RoutePlanSignals):
+    def __init__(self, waypoints: list, zones: list, commands: list[int],
+                 plan_hash: int, signals: RoutePlanSignals):
         super().__init__()
         self._waypoints = waypoints
         self._zones = zones
+        self._commands = commands  # Orijinal MAV_CMD komut kodları listesi
         self._plan_hash = plan_hash
         self._signals = signals
 
     def run(self):
         result = None
         try:
-            result = compute_safe_route(self._waypoints, self._zones)
+            result = compute_safe_route(self._waypoints, self._zones,
+                                        commands=self._commands)
         except Exception as e:
             qWarning("[RoutePreplanner] Rota hesabı başarısız: %s" % e)
 
@@ -300,8 +303,10 @@ class MavlinkWorker(QObject):
     waypoint_mission_count: int
     mission_fence_item_received = Signal(int, float, float, int, float, int)
     mission_fence_item_int_received = Signal(int, float, float, int, float, int)
-    mission_waypoint_item_received = Signal(int, float, float, float, int, int)
-    mission_waypoint_item_int_received = Signal(int, float, float, float, int, int)
+    # Görev öğesi indirme sinyali — MissionItem nesnesini ve toplam sayıyı taşır
+    # Komut tipinden bağımsız: TÜM MAVLink alanları MissionItem içinde korunur
+    mission_waypoint_item_received = Signal(object, int)      # (MissionItem, count)
+    mission_waypoint_item_int_received = Signal(object, int)  # (MissionItem, count)
     send_fence_mission_data = Signal(int, bool)
     mission_upload_success = Signal(int)  # count
     mission_upload_failed = Signal(str)
@@ -347,30 +352,30 @@ class MavlinkWorker(QObject):
         qDebug(f"[MavlinkWorker] Sent MISSION_COUNT: {len(self._mission_upload_items)}")
 
     def _send_mission_item_int(self, seq: int) -> None:
+        """Görev öğesini ArduPilot'a gönderir.
+        MissionItem'ın TÜM orijinal alanlarını (frame, command, param1-4, autocontinue)
+        olduğu gibi koruyarak yazar — hiçbir hardcode yok."""
         if seq >= len(self._mission_upload_items):
             return
-        coord = self._mission_upload_items[seq]
-        alt = coord.altitude()
-        from pymavlink.dialects.v20.all import MAV_FRAME_GLOBAL_INT, MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, MAV_CMD_NAV_WAYPOINT
-        frame_int = MAV_FRAME_GLOBAL_INT if seq == 0 else MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+        mi = self._mission_upload_items[seq]  # MissionItem nesnesi
         self.mavlink_connection.mav.mission_item_int_send(
             self.mavlink_connection.target_system,
             self.mavlink_connection.target_component,
             seq,
-            frame_int,
-            MAV_CMD_NAV_WAYPOINT,
-            0,   # current
-            1,   # autocontinue
-            0,   # param1
-            5.0, # param2
-            0,   # param3
-            float('nan'), # param4
-            int(coord.latitude() * 1e7),
-            int(coord.longitude() * 1e7),
-            alt,
+            mi.frame,           # Orijinal referans çerçevesi korunuyor
+            mi.command,         # Orijinal komut tipi korunuyor
+            mi.current,         # Aktif görev bayrağı
+            mi.autocontinue,    # Otomatik devam bayrağı
+            mi.param1,          # Komuta özel parametre 1
+            mi.param2,          # Komuta özel parametre 2
+            mi.param3,          # Komuta özel parametre 3
+            mi.param4,          # Komuta özel parametre 4 (yaw vb.)
+            int(mi.x * 1e7),    # Enlem: derece → INT formatına geri dönüşüm
+            int(mi.y * 1e7),    # Boylam: derece → INT formatına geri dönüşüm
+            mi.z,               # İrtifa (frame'e bağlı: AMSL veya AGL)
             MAV_MISSION_TYPE_MISSION
         )
-        qDebug(f"[MavlinkWorker] Sent MISSION_ITEM_INT for seq {seq}")
+        qDebug(f"[MavlinkWorker] Sent MISSION_ITEM_INT for seq {seq} (CMD: {mi.command}, frame: {mi.frame})")
 
     def trigger_update_value(self, e: TrackableDataEnum, packet: MAVLink_message):
         length: int = self.watch_list.rowCount()
@@ -495,13 +500,32 @@ class MavlinkWorker(QObject):
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
                     self.mission_fence_item_int_received.emit(packet.command, packet.x / 1e7, packet.y / 1e7, packet.seq, packet.param1, self.fence_mission_count)
                 elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
-                    self.mission_waypoint_item_int_received.emit(packet.command, packet.x / 1e7, packet.y / 1e7, packet.z, packet.seq, self.waypoint_mission_count)
+                    # Paketin TÜM alanlarını MissionItem'a dönüştür — hiçbir veri kaybı yok
+                    item = MissionItem(
+                        seq=packet.seq, frame=packet.frame,
+                        command=packet.command, current=packet.current,
+                        autocontinue=packet.autocontinue,
+                        param1=packet.param1, param2=packet.param2,
+                        param3=packet.param3, param4=packet.param4,
+                        x=packet.x / 1e7, y=packet.y / 1e7, z=packet.z
+                    )
+                    self.mission_waypoint_item_int_received.emit(item, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_MISSION_ITEM:
                 packet: MAVLink_mission_item_message = packet
                 if packet.mission_type == MAV_MISSION_TYPE_FENCE:
                     self.mission_fence_item_received.emit(packet.command, packet.x, packet.y, packet.seq, packet.param1, self.fence_mission_count)
                 elif packet.mission_type == MAV_MISSION_TYPE_MISSION:
-                    self.mission_waypoint_item_received.emit(packet.command, packet.x, packet.y, packet.z, packet.seq, self.waypoint_mission_count)
+                    # MISSION_ITEM (eski format) — aynı MissionItem dönüşümü
+                    # x/y zaten derece cinsinden, 1e7 çarpımı yok
+                    item = MissionItem(
+                        seq=packet.seq, frame=packet.frame,
+                        command=packet.command, current=packet.current,
+                        autocontinue=packet.autocontinue,
+                        param1=packet.param1, param2=packet.param2,
+                        param3=packet.param3, param4=packet.param4,
+                        x=packet.x, y=packet.y, z=packet.z
+                    )
+                    self.mission_waypoint_item_received.emit(item, self.waypoint_mission_count)
             elif msgID == MAVLINK_MSG_ID_COMMAND_ACK:
                 command: int = packet.command
                 result: int = packet.result
@@ -678,8 +702,13 @@ class MainWindow(QMainWindow):
     _hss_polling_thread: QThread | None = None
     _current_snapshot: HssSnapshot | None = None
     _current_mission_waypoints: list = []
+    # İndirilen görevin TÜM MAVLink detaylarını tutan ham liste (MissionItem[])
+    # Rota yükleme sırasında orijinal frame, param, autocontinue değerlerini
+    # geri yüklemek için kullanılır.
+    _raw_mission_items: list[MissionItem] = []
     _pixhawk_current_seq: int = 0
     _last_planned_hash = None
+    _last_corrected_route: list[RoutePoint] = []
     _deferred_snapshot: HssSnapshot | None = None #Kamikaze yapılırken gelen hss verileri rota planlamayı tetiklemesi 
     _deferred_manual_ads: bool = False #ve araca yeni yükleme yapılmasını engellemek için kullanılır.
     _plan_in_flight: bool = False #Aynı anda birden fazla rota planlanmasını engellemek için kullanılır.
@@ -869,16 +898,27 @@ class MainWindow(QMainWindow):
         self.ui.map_view.mission_coords_data_model.layoutChanged.emit()
         self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
-    def mission_waypoint_received(self, coord: QGeoCoordinate, command: int, seq: int, use_int: bool, count: int):
+    def mission_waypoint_received(self, item: MissionItem, use_int: bool, count: int):
+        """ArduPilot'tan indirilen tek bir görev öğesini işler.
+        MissionItem'ın TÜM alanları _raw_mission_items listesine kaydedilir,
+        koordinat bilgisi de harita modeline eklenir (UI katmanı)."""
         if not self.requested_to_get_mission or count == 0:
             return
-        qDebug("Mission received with %s coords, %s command, %s seq" % (coord, command, seq))
+        seq = item.seq
+        qDebug("Mission received with (%.6f, %.6f, %.1f) cmd=%d frame=%d seq=%d"
+               % (item.x, item.y, item.z, item.command, item.frame, seq))
         if self.next_mission_order_seq_id != seq:
             qDebug("Out of order mission")
             return
         if seq == 0:
             self.ui.map_view.mission_coords_data_model.m_datas.clear()
             self.ui.map_view.mission_geopath.clear()
+            # Yeni görev indirmesi — ham MissionItem listesini sıfırla
+            self._raw_mission_items = []
+        # MissionItem'ı ham listeye kaydet (TÜM MAVLink alanları korunuyor)
+        self._raw_mission_items.append(item)
+        # Koordinatı harita modeline ekle (UI katmanı — mevcut davranış korunuyor)
+        coord = QGeoCoordinate(item.x, item.y, item.z)
         coord_data: SpecialCoordsData = SpecialCoordsData()
         coord_data.position = coord
         coord_data.coord_type = 1
@@ -904,14 +944,21 @@ class MainWindow(QMainWindow):
             self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
             # HSS entegrasyonu: indirilen mission kaydedilir, rota düzeltme tetiklenir
-            # Outlier filtreleme: (0.0, 0.0) koordinatlı noktaları rota planlamasından çıkar
-            all_positions = [d.position for d in self.ui.map_view.mission_coords_data_model.m_datas]
+            # Outlier filtreleme: (0.0, 0.0) koordinatlı noktaları hem
+            # _current_mission_waypoints hem de _raw_mission_items'dan çıkar
             self._current_mission_waypoints = []
-            for i, pos in enumerate(all_positions):
-                if abs(pos.latitude()) < 0.01 and abs(pos.longitude()) < 0.01:
-                    qDebug("[Mission] Filtering outlier WP %d at (%.4f, %.4f)" % (i, pos.latitude(), pos.longitude()))
+            filtered_raw: list[MissionItem] = []
+            for mi in self._raw_mission_items:
+                if abs(mi.x) < 0.01 and abs(mi.y) < 0.01:
+                    qDebug("[Mission] Filtering outlier WP seq=%d at (%.4f, %.4f)"
+                           % (mi.seq, mi.x, mi.y))
                     continue
-                self._current_mission_waypoints.append(pos)
+                self._current_mission_waypoints.append(
+                    QGeoCoordinate(mi.x, mi.y, mi.z)
+                )
+                filtered_raw.append(mi)
+            self._raw_mission_items = filtered_raw
+
             if self._awaiting_mission_verification:
                 # Bu indirme az önce yüklediğimiz düzeltilmiş rotanın teyidi.
                 self._awaiting_mission_verification = False
@@ -924,13 +971,13 @@ class MainWindow(QMainWindow):
             self._last_planned_hash = None
             self._trigger_route_replanning()
 
-    def mission_waypoint_item_received(self, command: int, x: float, y: float, z: float, seq: int, count: int):
-        coord: QGeoCoordinate = QGeoCoordinate(x, y, z)
-        self.mission_waypoint_received(coord, command, seq, False, count)
+    def mission_waypoint_item_received(self, item: MissionItem, count: int):
+        """MISSION_ITEM (eski format) slotu — MissionItem'ı ilet."""
+        self.mission_waypoint_received(item, False, count)
 
-    def mission_waypoint_item_int_received(self, command: int, x: float, y: float, z: float, seq: int, count: int):
-        coord: QGeoCoordinate = QGeoCoordinate(x, y, z)
-        self.mission_waypoint_received(coord, command, seq, True, count)
+    def mission_waypoint_item_int_received(self, item: MissionItem, count: int):
+        """MISSION_ITEM_INT slotu — MissionItem'ı ilet."""
+        self.mission_waypoint_received(item, True, count)
 
     def request_fence_data(self):
         if self.mavlink_connection is None:
@@ -2678,10 +2725,12 @@ class MainWindow(QMainWindow):
 
         # Hesap havuz thread'inde yapılıyor; sonuç _on_route_plan_ready'e
         # sinyalle geliyor. Bkz. RoutePlanTask.
+        # _raw_mission_items'dan orijinal komut kodlarını çıkar (komut-agnostik aktarım)
+        mission_commands = [mi.command for mi in self._raw_mission_items]
         self._plan_in_flight = True
         QThreadPool.globalInstance().start(RoutePlanTask(
             list(self._current_mission_waypoints), combined_hss,
-            current_hash, self._route_plan_signals))
+            mission_commands, current_hash, self._route_plan_signals))
 
     def _on_route_plan_ready(self, result: RoutePlanResult | None, plan_hash) -> None:
         self._plan_in_flight = False
@@ -2702,6 +2751,7 @@ class MainWindow(QMainWindow):
         # Yeşil alternatif rotayı haritada güncelle
         avoidance_geopath = self.ui.map_view.avoidance_route_geopath
         avoidance_geopath.clear()
+        self._last_corrected_route = result.corrected_waypoints
         for rp in result.corrected_waypoints:
             coord = QGeoCoordinate(rp.lat, rp.lon)
             coord.setAltitude(rp.alt)
@@ -2828,7 +2878,12 @@ class MainWindow(QMainWindow):
         return False
 
     def _upload_corrected_route(self) -> None:
-        """Yeşil kaçınma rotasını MAVLink mission protokolü ile Pixhawk'a yükler."""
+        """Yeşil kaçınma rotasını MAVLink mission protokolü ile Pixhawk'a yükler.
+
+        RoutePoint listesindeki origin_idx alanı sayesinde orijinal MissionItem'lara
+        referans kurulur. Orijinal noktaların TÜM MAVLink alanları (frame, command,
+        param1-4, autocontinue) birebir korunur. Bypass (kaçınma) noktaları ise
+        en yakın orijinal noktanın frame bilgisini miras alır."""
         if self.mavlink_connection is None:
             self._create_warning("UAV bağlı değil, rota yüklenemiyor")
             return
@@ -2842,11 +2897,8 @@ class MainWindow(QMainWindow):
         if self.mavlink_worker._mission_upload_state > 0:
             self._create_warning("Rota yükleme devam ediyor, lütfen bekleyin")
             return
-        # Yeşil rotanın waypoint'lerini al
-        corrected_coords = []
-        geopath = self.ui.map_view.avoidance_route_geopath.mission_geopath_v
-        for i in range(geopath.size()):
-            corrected_coords.append(geopath.coordinateAt(i))
+        # Yeşil rotanın waypoint'lerini bellekteki Model'den al
+        corrected_coords = self._last_corrected_route
 
         if not corrected_coords:
             self._create_warning("Düzeltilmiş rota bulunamadı, önce görev indirin ve HSS verisinin gelmesini bekleyin")
@@ -2854,18 +2906,64 @@ class MainWindow(QMainWindow):
 
         # İrtifa doğrulama — Home (0) ve son nokta (muhtemel iniş) haricindeki sıfır veya negatif irtifaları engelle
         for i, p in enumerate(corrected_coords):
-            if p.altitude() <= 0:
+            if p.alt <= 0:
                 if i == 0 or i == len(corrected_coords) - 1:
                     continue
                 self._create_warning("HATA: Rotada (WP %d) irtifası 0 olan nokta var, yükleme iptal!" % i)
                 qWarning("[MissionUpload] Altitude validation failed at WP %d" % i)
                 return
 
-        self.mavlink_worker._mission_upload_items = corrected_coords
+        # RoutePoint → MissionItem birleştirme
+        # Orijinal noktalar: origin_idx üzerinden _raw_mission_items'a erişilir,
+        #   TÜM alanlar korunur, sadece koordinat (x, y, z) güncellenir.
+        # Bypass noktaları: en yakın orijinalin frame'i miras alınır,
+        #   komut olarak WAYPOINT (16) atanır.
+        upload_items: list[MissionItem] = []
+        raw = self._raw_mission_items
+
+        # Bypass noktaları için varsayılan frame belirleme:
+        # Eğer ham mission listesinde en az 2 öğe varsa (Home + ilk uçuş noktası),
+        # ikinci öğenin frame'ini kullan (uçuş noktalarının frame'i).
+        # Yoksa GLOBAL_RELATIVE_ALT_INT (6) varsayılanı kullan.
+        default_bypass_frame = raw[1].frame if len(raw) > 1 else 6
+
+        for seq, rp in enumerate(corrected_coords):
+            if rp.origin_idx is not None and rp.origin_idx < len(raw):
+                # Orijinal görev öğesi — TÜM MAVLink alanları korunuyor
+                orig = raw[rp.origin_idx]
+                mi = MissionItem(
+                    seq=seq,
+                    frame=orig.frame,           # Orijinal frame korunuyor
+                    command=orig.command,        # Orijinal komut korunuyor
+                    current=0,
+                    autocontinue=orig.autocontinue,
+                    param1=orig.param1,          # Orijinal parametreler korunuyor
+                    param2=orig.param2,
+                    param3=orig.param3,
+                    param4=orig.param4,
+                    x=rp.lat,                   # Koordinat güncellenmiş olabilir (radyal çıkış)
+                    y=rp.lon,
+                    z=rp.alt
+                )
+            else:
+                # Bypass / kaçınma ara noktası — yeni MissionItem oluştur
+                # Komşu orijinal noktanın frame'ini miras al
+                mi = MissionItem(
+                    seq=seq,
+                    frame=default_bypass_frame,  # Uçuş noktalarının frame'i
+                    command=16,                  # MAV_CMD_NAV_WAYPOINT
+                    current=0,
+                    autocontinue=1,
+                    param1=0.0, param2=0.0, param3=0.0, param4=0.0,
+                    x=rp.lat, y=rp.lon, z=rp.alt
+                )
+            upload_items.append(mi)
+
+        self.mavlink_worker._mission_upload_items = upload_items
         self.mavlink_worker._start_mission_upload = True
 
-        qDebug("[MissionUpload] Delegated corrected route upload to worker thread: %d waypoints" % len(corrected_coords))
-        self._create_warning("Düzeltilmiş rota arka planda yükleniyor (%d waypoint)..." % len(corrected_coords))
+        qDebug("[MissionUpload] Delegated corrected route upload to worker thread: %d waypoints" % len(upload_items))
+        self._create_warning("Düzeltilmiş rota arka planda yükleniyor (%d waypoint)..." % len(upload_items))
 
     def _on_mission_upload_success(self, count: int) -> None:
         """MavlinkWorker arka planda rota yüklemeyi bitirdiğinde çağrılır."""

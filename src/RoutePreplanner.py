@@ -47,6 +47,38 @@ PLANNER_ZONE_MARGIN_M = 500.0
 # Veri Yapıları
 # ---------------------------------------------------------------------------
 
+@dataclass(slots=True)
+class MissionItem:
+    """ArduPilot'tan indirilen tek bir görev öğesinin TÜM MAVLink alanlarını
+    birebir tutan evrensel veri yapısı. Komut tipinden bağımsız çalışır —
+    WAYPOINT, TAKEOFF, LAND, DO_JUMP, LOITER, ROI vb. fark etmeksizin
+    her şeyi olduğu gibi saklar ve geri yükler.
+
+    Alanlar:
+        seq:          Görev sıra numarası (0 = Home)
+        frame:        MAV_FRAME referans çerçevesi (0=GLOBAL/AMSL, 3=RELATIVE_ALT/AGL, ...)
+        command:      MAV_CMD komut kodu (16=WAYPOINT, 21=LAND, 22=TAKEOFF, 177=DO_JUMP, ...)
+        current:      Şu an aktif görev öğesi mi (genelde 0)
+        autocontinue: Otomatik devam bayrağı (genelde 1)
+        param1-4:     Komuta özel parametreler (her MAV_CMD için farklı anlam taşır)
+        x:            Enlem (derece cinsinden — INT formatından dönüştürülmüş)
+        y:            Boylam (derece cinsinden — INT formatından dönüştürülmüş)
+        z:            İrtifa (frame'e bağlı olarak AMSL veya AGL)
+    """
+    seq:          int
+    frame:        int
+    command:      int
+    current:      int
+    autocontinue: int
+    param1:       float
+    param2:       float
+    param3:       float
+    param4:       float
+    x:            float   # enlem (derece)
+    y:            float   # boylam (derece)
+    z:            float   # irtifa
+
+
 @dataclass(frozen=True, slots=True)
 class RoutePoint:
     lat: float
@@ -587,8 +619,12 @@ def compute_safe_route(
             orig_idx = min(orig_idx + 1, len(wp_altitudes) - 1)
         else:
             # Bypass / yay ara noktası — önceki ve sonraki WP irtifasının yükseği
-            prev_alt = wp_altitudes[max(0, orig_idx - 1)]
-            next_alt = wp_altitudes[min(len(wp_altitudes) - 1, orig_idx)]
+            # BUG FIX: wp_altitudes[0] (Home) MAV_FRAME_GLOBAL (AMSL) formatındadır. 
+            # Diğer tüm noktalar MAV_FRAME_GLOBAL_RELATIVE_ALT (AGL) formatındadır.
+            # AMSL ve AGL değerlerini "max()" ile kıyaslamak İHA'yı uzaya (1855m AGL) gönderir!
+            # Bu yüzden Home noktasını atlıyoruz, en az WP 1 (index 1) irtifasını kullanıyoruz.
+            prev_alt = wp_altitudes[max(1, orig_idx - 1)]
+            next_alt = wp_altitudes[max(1, min(len(wp_altitudes) - 1, orig_idx))]
             corrected_points.append(
                 RoutePoint(lat=lat, lon=lon, alt=max(prev_alt, next_alt),
                            command=16, origin_idx=None) # MAV_CMD_NAV_WAYPOINT (16)
