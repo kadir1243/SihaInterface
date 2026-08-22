@@ -52,7 +52,7 @@ from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
 from src.HSSPollingWorker import HSSPollingWorker
 from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss, point_hits_zone, segment_hits_zone, \
-    RoutePlanResult, RoutePoint, MissionItem, _NON_SPATIAL_COMMANDS
+    RoutePlanResult, RoutePoint, MissionItem, _NON_SPATIAL_COMMANDS, _SPATIAL_RESUME_VALID_COMMANDS
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -766,6 +766,10 @@ class MainWindow(QMainWindow):
     _deferred_snapshot: HssSnapshot | None = None #Kamikaze yapılırken gelen hss verileri rota planlamayı tetiklemesi 
     _deferred_manual_ads: bool = False #ve araca yeni yükleme yapılmasını engellemek için kullanılır.
     _plan_in_flight: bool = False #Aynı anda birden fazla rota planlanmasını engellemek için kullanılır.
+    # Spatial Resume: önceki uçuş modunu takip eder. AUTO moduna yeniden
+    # girildiğinde (GUIDED→AUTO, RTL→AUTO, MANUAL→AUTO vb.) spatial resume
+    # tetiklenir. -1 = henüz heartbeat alınmadı (ilk başlatımda tetikleme yok).
+    _previous_flight_mode: int = -1
     _fence_upload_retries: int = 0 
     _awaiting_mission_verification: bool = False # Doğrulama amaçlı görev indirmesi rota planlamasını yeniden tetiklemesin.
     _param_pending: dict
@@ -2542,6 +2546,21 @@ class MainWindow(QMainWindow):
             qWarning("External mode change to %s during kamikaze, releasing the vehicle" % index)
             self.kamikaze_previous_mode = None  # dışarısı sürüyor, moda karışma
             self.__finish_kamikaze()
+
+        # -- Spatial Resume: AUTO moduna yeniden giriş algılama --
+        # HER türlü mod geçişinden (GUIDED, RTL, MANUAL, FBWA, LOITER...)
+        # AUTO'ya dönüldüğünde tetiklenir. Kapsanan kritik senaryolar:
+        #   • Kamikaze (GUIDED → AUTO): loiter noktasına dönmek yerine ileriye gider
+        #   • HSS/RTL (RTL → AUTO): rally point'ten döndükten sonra en yakın WP
+        #   • Pilot müdahalesi (MANUAL/FBWA → AUTO): farklı konumdan devam
+        _AUTO = Ardupilot_UAV_Modes.AUTO.value[0]  # custom_mode = 10
+        if (index == _AUTO
+                and self._previous_flight_mode != _AUTO
+                and self._previous_flight_mode >= 0
+                and self._is_airborne()):
+            self._spatial_resume_to_nearest_wp()
+
+        self._previous_flight_mode = index
         self._mode_change_cooldown.apply_reported(self.ui.fly_mode_combobox, index)
 
     def _update_time_with_mavlink(self):
@@ -3236,3 +3255,96 @@ class MainWindow(QMainWindow):
         self._last_planned_hash = None
         self._trigger_route_replanning()
 
+    # -----------------------------------------------------------------------
+    # Spatial Resume — En Yakın Waypoint'e Devam Etme
+    # -----------------------------------------------------------------------
+
+    def _spatial_resume_to_nearest_wp(self) -> None:
+        """AUTO moduna yeniden girildiğinde çağrılır.
+
+        Aracın anlık GPS konumuna 3D mesafece en yakın GEÇERLİ waypoint'i
+        bulur ve görev dizisini oradan devam ettirir (MISSION_SET_CURRENT).
+
+        Güvenlik filtreleri:
+          • Home (seq=0) asla seçilmez — yer seviyesinde tehlikeli
+          • TAKEOFF/LAND/RTL/DO_* komutları atlanır
+          • LOITER_TURNS/TIME atlanır — kesilen loiter'a dönmek sonsuz döngü riski
+          • >50 km mesafe → GPS hatası, mevcut seq korunur
+
+        Tetiklenen senaryolar:
+          • Kamikaze sonrası (GUIDED → AUTO)
+          • HSS kaçınma sonrası (RTL → AUTO)
+          • Pilot müdahalesi sonrası (MANUAL/FBWA → AUTO)
+        """
+        if self.mavlink_connection is None:
+            return
+
+        if not self._raw_mission_items:
+            qDebug("[SpatialResume] Görev listesi boş, resume atlandı")
+            return
+
+        # -- 1. Anlık GPS konumunu al --
+        self.next_telemetry.lock.lockForRead()
+        try:
+            current_lat = self.next_telemetry.iha_enlem
+            current_lon = self.next_telemetry.iha_boylam
+            current_alt = self.next_telemetry.iha_irtifa
+        finally:
+            self.next_telemetry.lock.unlock()
+
+        # GPS verisi geçerli mi? (0,0) = veri yok veya bağlantı kopuk
+        if abs(current_lat) < 0.01 and abs(current_lon) < 0.01:
+            qWarning("[SpatialResume] GPS verisi geçersiz (0,0), resume atlandı")
+            return
+
+        aircraft_pos = QGeoCoordinate(current_lat, current_lon, current_alt)
+
+        # -- 2. Tüm geçerli uzamsal waypoint'lere 3D mesafe hesapla --
+        best_seq: int = -1
+        best_dist: float = float('inf')
+
+        for mi in self._raw_mission_items:
+            # Home noktasını (seq=0) asla seçme — yer seviyesi, uçuşta tehlikeli
+            if mi.seq == 0:
+                continue
+
+            # Sadece güvenli uzamsal komutları değerlendir (NAV_WAYPOINT).
+            # LOITER_TURNS/TIME hariç: kesilen loiter'a dönmek sonsuz döngü riski.
+            # LAND hariç: erken iniş dizisine girmek tehlikeli.
+            # TAKEOFF/DO_*/RTL: _NON_SPATIAL_COMMANDS'ta zaten filtrelenmiş.
+            if mi.command not in _SPATIAL_RESUME_VALID_COMMANDS:
+                continue
+
+            wp_pos = QGeoCoordinate(mi.x, mi.y, mi.z)
+            dist = aircraft_pos.distanceTo(wp_pos)
+
+            if dist < best_dist:
+                best_dist = dist
+                best_seq = mi.seq
+
+        # -- 3. Sonuç doğrulama --
+        if best_seq < 0:
+            qWarning("[SpatialResume] Geçerli waypoint bulunamadı, resume atlandı")
+            return
+
+        # 50 km eşiği: bu kadar uzaklık GPS hatası veya veri tutarsızlığı işareti.
+        # Yanlış bir WP'ye atlamamak için mevcut seq korunur.
+        if best_dist > 50_000:
+            qWarning("[SpatialResume] En yakın WP %.0fm uzakta — "
+                     "GPS hatası olabilir, mevcut seq korunuyor" % best_dist)
+            return
+
+        # -- 4. ArduPilot'a SET_CURRENT gönder --
+        self.mavlink_connection.mav.mission_set_current_send(
+            self.mavlink_connection.target_system,
+            self.mavlink_connection.target_component,
+            best_seq
+        )
+
+        self._create_warning(
+            "Spatial Resume: WP %d'ye yönlendiriliyor (%.0fm)" % (best_seq, best_dist)
+        )
+        qDebug("[SpatialResume] Önceki mod=%d | En yakın WP: seq=%d, "
+               "mesafe=%.1fm | Araç: (%.6f, %.6f, %.1f)"
+               % (self._previous_flight_mode, best_seq, best_dist,
+                  current_lat, current_lon, current_alt))

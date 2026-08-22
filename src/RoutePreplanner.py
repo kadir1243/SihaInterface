@@ -58,6 +58,18 @@ _NON_SPATIAL_COMMANDS: frozenset[int] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
+# Spatial Resume İçin Geçerli Hedef Komutları
+# ---------------------------------------------------------------------------
+# AUTO moduna yeniden girildiğinde,en yakın waypoint hesabında YALNIZCA bu
+# komutlar aday olarak değerlendirilir.
+_SPATIAL_RESUME_VALID_COMMANDS: frozenset[int] = frozenset({
+    16,   # MAV_CMD_NAV_WAYPOINT       — standart waypoint
+    17,   # MAV_CMD_NAV_LOITER_UNLIM   — sınırsız loiter (belirli konum)
+    18,   # MAV_CMD_NAV_LOITER_TURNS   — dönüşlü loiter (belirli konum)
+    19,   # MAV_CMD_NAV_LOITER_TIME    — zamanlı loiter (belirli konum)
+})
+
+# ---------------------------------------------------------------------------
 # Veri Yapıları
 # ---------------------------------------------------------------------------
 
