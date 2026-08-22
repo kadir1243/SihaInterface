@@ -188,10 +188,22 @@ class TrackableDataUpdate:
         return datetime.toString()
     @staticmethod
     def update_battery_percentage(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_battery_status_message) -> str:
+        # BATTERY_STATUS.battery_remaining bir int8_t ve otopilot bataryayı
+        # ölçemiyorsa MAVLink'in "bilinmiyor" sentinel'i olan -1 gelir
+        # (BATT_MONITOR kapalı, kalibre edilmemiş ya da sensör düşmüş).
+        #
+        # Haberleşme dokümanı iha_batarya'yı yüzde olarak istiyor ve pakette
+        # TEK bir alan aralık dışındaysa telemetri paketinin TAMAMI hatalı
+        # sayılıyor. Yani kırpılmazsa, kalibre edilmemiş bir batarya monitörü
+        # bütün uçuşun telemetrisini sessizce çöpe atar -- arayüzde görülen tek
+        # şey "Can not send telemetry" olur.
+        #
+        # Sunucuya kırpılmış değer gidiyor, izleme listesi ise gerçeği
+        # gösteriyor: operatör -1'i görüp BATT_MONITOR'ü açabilsin diye.
         remaining: int = packet.battery_remaining
         telemetry.iha_batarya = clamp(remaining, 0, 100)
         if remaining < 0:
-            return ""
+            return "Bilinmiyor (BATT_MONITOR?)"
         return str(remaining) + "%"
     @staticmethod
     def update_arm_status(worker_signals: MavlinkWorkerSignals, telemetry: TelemetryData, packet: MAVLink_heartbeat_message) -> str:
@@ -225,6 +237,11 @@ class TrackableDataUpdate:
             else:
                 qWarning("Don't know how to handle this custom mode data")
         else:
+            # Buraya artık yalnızca gerçek bir otopilotun desteklenmeyen tipi
+            # düşebilir: otopilot dışı düğümlerin heartbeat'i MavlinkWorker'da
+            # süzülüyor (bkz. probably_vehicle_heartbeat). Yine de kaynağı
+            # basıyoruz, çünkü uyarının tek başına anlamı yok -- hangi düğüm,
+            # hangi tip.
             header = packet.get_header()
             qWarning("Unknown pilot type, fly mode unsupported "
                      "(autopilot=%s, type=%s, base_mode=%s, custom_mode=%s, "
@@ -587,6 +604,12 @@ class MavlinkWorker(QObject):
                 self.param_value_received.emit(param_id.rstrip('\x00'), float(packet.param_value))
             elif msgID == MAVLINK_MSG_ID_HEARTBEAT and not self.mavlink_connection.probably_vehicle_heartbeat(packet):
                 # Otopilot dışı bir düğümün heartbeat'i (ADS-B modülü vb.).
+                # Aracın mod/arm durumunu sürmesin: araçtaki ADS-B modülü de
+                # 1 Hz heartbeat yayınlıyor ve base_mode'u SABİT 4, yani
+                # MAV_MODE_FLAG_AUTO_ENABLED açık. Süzülmezse update_fly_mode
+                # iha_otonom'u araç manuel uçarken bile 1 yapar; aynı pakette
+                # SAFETY_ARMED kapalı olduğu için update_arm_status da arm
+                # göstergesini saniyede bir "disarmed"a düşürür.
                 pass
             elif msgID in MSG_ID_2_TRACKABLE_DATA_TYPE:
                 e = MSG_ID_2_TRACKABLE_DATA_TYPE[msgID]
@@ -813,6 +836,19 @@ class MainWindow(QMainWindow):
         self._kamikaze_climb_warned = False
         self._kamikaze_target_cooldown = QTimer(self, singleShot=True, interval=KAMIKAZE_TARGET_REFRESH)
         self.waits_for_qr = False
+        # Sunucuya giden başlangıç/bitiş zamanları dalışa göre yakalanıyor:
+        # başlangıç dalışa girmeden hemen önce (KAMIKAZE_VIDEO_LEAD_TIME kadar),
+        # bitiş dalışın bittiği -- kurtarmaya geçilen -- an. Bkz. __kamikaze_loop
+        # ve __enter_recovery. _kamikaze_reported paketin koşu başına yalnızca
+        # bir kez gitmesini garanti eder (haberleşme dokümanı §9).
+        self.kamikaze_start = None
+        self.kamikaze_start_captured = False
+        self.kamikaze_end_time = None
+        self._kamikaze_reported = False
+        # Sunucu saati - yerel UTC farkı (ms); değerlendirme videosu overlay'i için.
+        self.server_time_offset_ms = 0
+        # Son kaydedilen değerlendirme videosunun yolu (sunucuya gönderim için).
+        self._last_eval_video_path = None
         self._param_pending = {}
         self._param_retry_timer = QTimer(self, interval=PARAM_PUMP_INTERVAL)
         self._param_retry_timer.timeout.connect(self.__pump_param_queue)
@@ -867,6 +903,7 @@ class MainWindow(QMainWindow):
         self.ui.add_ads.clicked.connect(self.__add_ads_button_clicked)
         self.plane_on_map_update_timer.timeout.connect(self.__update_plane_on_map_without_server)
         self.ui.start_stop_camera_view.toggled.connect(self.__start_stop_camera_view)
+        self.ui.record_button.toggled.connect(self.__toggle_eval_record)
         self.ui.actionConfigurate_Camera_Stream.triggered.connect(self._actionConfigurateCameraServer)
         self.ui.remove_ads.clicked.connect(self._remove_ads)
         self.ui.map_view.coords_for_geofence.upload_geofence_data.connect(lambda: self.update_geofence_data(self.ui.map_view.server_ads_data_model.m_datas + self.ui.map_view.user_ads_data_model.m_datas))
@@ -1218,6 +1255,14 @@ class MainWindow(QMainWindow):
             self.ui.record_button.setCheckable(False)
 
     def disconnect_from_cam_server(self):
+        # Kamera kapanırken açık bir değerlendirme kaydı varsa düzgünce kapat
+        # (ffmpeg'i sonlandır, mp4 finalize olsun), yoksa dosya bozuk kalır.
+        if self.ui.camera_view.eval_recorder.is_recording():
+            path = self.ui.camera_view.stop_eval_recording()
+            if path:
+                self._last_eval_video_path = path
+                self._create_warning("Kamera kapandı, kayıt kaydedildi → %s" % path)
+        self.ui.record_button.setChecked(False)
         self.ui.camera_view.disconnect_from_server()
         self.ui.camera_view.set_no_connection_image()
         self.ui.camera_view.camera_server_info.ip = None
@@ -1232,6 +1277,22 @@ class MainWindow(QMainWindow):
             self.ui.camera_view.on_play()
         else:
             self.ui.camera_view.on_pause()
+
+    def __toggle_eval_record(self, on: bool) -> None:
+        """Kayıt düğmesi: değerlendirme videosunu masaüstüne başlat/durdur."""
+        if on:
+            path = self.ui.camera_view.start_eval_recording()
+            if path:
+                qInfo("Değerlendirme kaydı: %s" % path)
+                self._create_warning("Kayıt başladı → %s" % path)
+            else:
+                self._create_warning("Kayıt başlatılamadı: kamera bağlı ve çözünürlük ayarlı mı?")
+                self.ui.record_button.setChecked(False)
+        else:
+            path = self.ui.camera_view.stop_eval_recording()
+            if path:
+                self._last_eval_video_path = path
+                self._create_warning("Kayıt kaydedildi → %s" % path)
 
     def retranslateWatcher(self):
         length: int = self.ui.watch_list.rowCount()
@@ -1531,7 +1592,10 @@ class MainWindow(QMainWindow):
     def __reset_geofence_dialog(self):
         self.geofence_dialog = None
 
-    kamikaze_start: GpsSaati
+    kamikaze_start: GpsSaati | None
+    kamikaze_start_captured: bool
+    kamikaze_end_time: GpsSaati | None
+    _kamikaze_reported: bool
     kamikaze_state: KamikazeState
     kamikaze_original_alt: float
     kamikaze_target_lat: float
@@ -1635,7 +1699,12 @@ class MainWindow(QMainWindow):
         """
         Bekleyen parametre yazılarını linkin taşıyabileceği hızda gönderir.
 
-        Aynı anda en fazla PARAM_MAX_IN_FLIGHT yazı havada; biri teyit
+        Eskiden bekleyen HER yazı her tikte yeniden gönderiliyordu: bağlantıda
+        28 parametre (alias'larla 33 paket) 700 ms'de bir topluca gidiyor,
+        aracın cevapları da aynı dolu hattan dönmeye çalışıyordu. Sonuç, yazının
+        kendisinin teyidini boğmasıydı.
+
+        Şimdi aynı anda en fazla PARAM_MAX_IN_FLIGHT yazı havada; biri teyit
         alınca ya da PARAM_ACK_TIMEOUT dolunca sıradaki gidiyor.
         """
         if self.mavlink_connection is None:
@@ -1743,7 +1812,9 @@ class MainWindow(QMainWindow):
         self.kamikaze_target_lon = target_longitude
 
         self.next_telemetry.lock.lockForRead()
-        self.kamikaze_start = self.next_telemetry.gps_saati
+        # Başlangıç zamanı burada -- hizalanma başında -- DEĞİL, dalışa girmeden
+        # hemen önce yakalanıyor (aşağıda __kamikaze_loop). Doküman §9 kamikaze
+        # başlangıcını istiyor; hizalanma turu kamikazenin kendisi değil.
         self.kamikaze_original_alt = self.next_telemetry.iha_irtifa
         current_lat: float = self.next_telemetry.iha_enlem
         current_lon: float = self.next_telemetry.iha_boylam
@@ -1794,8 +1865,15 @@ class MainWindow(QMainWindow):
         aim_lat, aim_lon = self.__kamikaze_aim_point(current_lat, current_lon)
         self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_APPROACH_ALT)
         self._kamikaze_target_cooldown.start()
-        self.waits_for_qr = True
+        # QR tespiti hizalanma boyunca kapalı; yalnızca dalış sırasında açık
+        # (__enter_dive açar, __enter_recovery kapatır). Böylece kamera hedefe
+        # bakmadan boşa QR aramaz ve hizalanmada kazara okunan bir kod
+        # kamikazeyi yanlış bitirmez.
+        self.waits_for_qr = False
         self.kamikaze_qr_text = ""
+        self.kamikaze_start_captured = False
+        self.kamikaze_end_time = None
+        self._kamikaze_reported = False
         qDebug("Kamikaze Started")
 
     def __send_guided_target(self, latitude: float, longitude: float, altitude: float):
@@ -1869,6 +1947,13 @@ class MainWindow(QMainWindow):
             # yetmezse koşu watchdog'a kadar sürebiliyor.
             if high_enough and distance <= dive_at + ground_speed * KAMIKAZE_VIDEO_LEAD_TIME:
                 self.ui.camera_view.start_kamikaze_recording()
+                # Sunucuya giden "kamikaze başlangıç" zamanı: dalışa girmeden
+                # KAMIKAZE_VIDEO_LEAD_TIME saniye önce, kayıtla aynı an. Koşu
+                # başına bir kez yakalanır (mesafe tekrar tekrar tetikleyebilir).
+                # SUNUCU saati kullanılıyor (video overlay ile aynı kaynak).
+                if not self.kamikaze_start_captured:
+                    self.kamikaze_start = self._server_now()
+                    self.kamikaze_start_captured = True
             if distance <= dive_at:
                 if not high_enough:
                     if not self._kamikaze_climb_warned:
@@ -2064,12 +2149,21 @@ class MainWindow(QMainWindow):
         self.__send_guided_target(aim_lat, aim_lon, KAMIKAZE_MIN_AIM_ALT)
         qDebug("Diving from %.1fm at %.1fm out, %.1fm/s ground speed" % (current_alt, distance, ground_speed))
         self.kamikaze_state = KamikazeState.DIVING
+        # QR tespiti dalışla birlikte başlar; kamera ancak burada hedefe bakar.
+        self.waits_for_qr = True
 
     def __enter_recovery(self, current_lat: float, current_lon: float):
         # "Kalkışa geçtiği an": dalışın bittiği, tırmanışın başladığı nokta.
         # Buraya konması iki giriş yolunu da kapsıyor -- irtifa tetiği ve
         # dalış sırasında QR okunması (on_qr_found).
         self.ui.camera_view.stop_kamikaze_recording()
+        # Dalış bitti: QR tespiti kapanır ve sunucuya gidecek "kamikaze bitiş"
+        # zamanı tam bu an -- kurtarmaya geçilen an -- yakalanır. Tırmanış
+        # kamikazenin kendisi değil, o yüzden bitiş __finish_kamikaze'de
+        # (tırmanış sonunda) değil burada damgalanıyor.
+        self.waits_for_qr = False
+        # Bitiş zamanı SUNUCU saatiyle (video overlay ile aynı kaynak) yakalanır.
+        self.kamikaze_end_time = self._server_now()
         self.next_telemetry.lock.lockForRead()
         self.kamikaze_recover_heading = self.next_telemetry.iha_yonelme
         self.next_telemetry.lock.unlock()
@@ -2081,6 +2175,12 @@ class MainWindow(QMainWindow):
         lead_lat, lead_lon = self.__kamikaze_recover_lead(current_lat, current_lon)
         self.__send_guided_target(lead_lat, lead_lon, KAMIKAZE_APPROACH_ALT)
         self.kamikaze_state = KamikazeState.RECOVERING
+        # Kurtarma komutu (yukarıdaki guided hedef) verildi; araç zaten toparlıyor.
+        # Paketi ŞİMDİ gönder ki dalış bitişinden itibaren 2 sn sınırına girsin.
+        # (Gönderim senkron bir HTTP POST; kurtarma komutu önce çıktığı için
+        # araç güvende. Sunucu yavaşsa arayüz kısa süre donabilir -- gerekirse
+        # bunu arka plana almak ayrı bir iyileştirme.)
+        self.__report_kamikaze()
 
     def __kamikaze_recover_lead(self, current_lat: float, current_lon: float) -> tuple[float, float]:
         """
@@ -2174,11 +2274,19 @@ class MainWindow(QMainWindow):
         if self.kamikaze_previous_mode is not None and self.kamikaze_previous_mode >= 0 and self.mavlink_connection is not None:
             self.mavlink_connection.set_mode_apm(self.kamikaze_previous_mode)
             self._mode_change_cooldown.hold()
-        if self.server_connection.ip is not None:
-            if self.kamikaze_qr_text:
-                self.on_kamikaze_end(self.kamikaze_qr_text)
-            else:
-                self._create_warning("QR okunamadı — kamikaze paketi sunucuya gönderilmedi")
+        # Haberleşme dokümanı: kamikaze paketi "başarılı kamikaze görevi
+        # ardından" ve her kamikaze için YALNIZCA BİR kez gönderilir. Oysa
+        # __finish_kamikaze iptalde, watchdog'da, dışarıdan mod değişiminde ve
+        # bağlantı kopmasında da çalışıyor. Boş qrMetni ile paket atmak, o tek
+        # hakkı okunamamış bir görev için harcamak demek.
+        # Paket normalde dalış bitişinde (__enter_recovery) gitti. Buradaki çağrı
+        # emniyet ağı: kurtarmaya hiç girmeden biten koşular için (mavlink kopuk
+        # QR okuması, watchdog, force-end) son bir gönderim şansı. _kamikaze_reported
+        # koşu başına tek paketi garanti eder (doküman §9). QR hiç okunmadıysa
+        # başarılı kamikaze yoktur ve operatör uyarılır.
+        self.__report_kamikaze()
+        if self.server_connection.ip is not None and not self._kamikaze_reported:
+            self._create_warning("QR okunamadı — kamikaze paketi sunucuya gönderilmedi")
         self.waits_for_qr = False
         # The numbers the dive is tuned against, on the status bar rather than
         # only in the log: the angle it actually reached, how long it had to
@@ -2219,13 +2327,43 @@ class MainWindow(QMainWindow):
             self.kamikaze_dive_duration = time.monotonic() - self.kamikaze_dive_started_at
             self.__enter_recovery(current_lat, current_lon)
 
+    def __report_kamikaze(self) -> None:
+        """
+        Kamikaze paketini sunucuya gönderir -- koşu başına YALNIZCA bir kez.
+
+        Şartname 6.2: paket dalışın bitiminden en geç 2 saniye sonra gitmeli.
+        Bu yüzden gönderim kurtarma tırmanışının sonunda (__finish_kamikaze)
+        DEĞİL, dalış biter bitmez (__enter_recovery) tetikleniyor -- tırmanış
+        birkaç saniye sürüyor ve o kadar beklemek 2 sn sınırını aşardı.
+
+        QR okunmadıysa (boş metin) başarılı bir kamikaze yoktur; paket
+        gönderilmez (doküman §9 + şartname 6.2: boş paket "hatalı kamikaze
+        tespiti" cezası riski).
+        """
+        if self._kamikaze_reported:
+            return
+        if self.server_connection.ip is None:
+            return
+        if not self.kamikaze_qr_text:
+            return
+        self._kamikaze_reported = True
+        self.on_kamikaze_end(self.kamikaze_qr_text)
+
     def on_kamikaze_end(self, qr_text: str) -> None:
-        self.next_telemetry.lock.lockForRead()
-        kamikaze_end = self.next_telemetry.gps_saati
-        self.next_telemetry.lock.unlock()
+        # Başlangıç dalış öncesi, bitiş dalış sonu (kurtarmaya geçiş) anında
+        # yakalanmış olarak gelir. Bir QR okunduysa dalış mutlaka olmuştur, yani
+        # ikisi de doludur; yine de emniyet için şimdiki zamana düşülür.
+        kamikaze_start: GpsSaati = self.kamikaze_start
+        kamikaze_end: GpsSaati | None = self.kamikaze_end_time
+        if kamikaze_start is None or kamikaze_end is None:
+            now: GpsSaati = self._server_now()
+            if kamikaze_start is None:
+                kamikaze_start = now
+            if kamikaze_end is None:
+                kamikaze_end = now
         try:
-            send_kamikaze(self.server_connection.get_address(), self.kamikaze_start, kamikaze_end, qr_text)
-            qInfo("Kamikaze information sent with start: %s, end: %s, text: %s" % (self.kamikaze_start, kamikaze_end, qr_text))
+            send_kamikaze(self.server_connection.get_address(), kamikaze_start, kamikaze_end, qr_text)
+            qInfo("Kamikaze information sent with start: %s, end: %s, text: %s" % (kamikaze_start, kamikaze_end, qr_text))
         except Exception as e:
             self._create_warning("Could not send kamikaze info to server: %s" % e)
 
@@ -2459,6 +2597,19 @@ class MainWindow(QMainWindow):
         if self.uav_connection_dialog is not None:
             self.uav_connection_dialog.ui.device_connection_text.setText(QCoreApplication.translate("UAVConnection", "Device Connected :)", None))
         self.mavlink_connection = mav_connection
+        # Önce hattı boşalt: bütün stream'leri durdur, sonra yalnızca
+        # kullandığımız mesajları geri aç.
+        #
+        # Burada eskiden MAV_DATA_STREAM_ALL 10 Hz isteniyordu. "Hepsi" gerçekten
+        # hepsi: RAW_IMU, SCALED_PRESSURE, RC_CHANNELS, SERVO_OUTPUT_RAW...
+        # Hiçbirini okumuyoruz ama telemetri linkini dolduruyorlardı ve araç
+        # cevaplarını (PARAM_VALUE, COMMAND_ACK) saniyelerce geciktiriyordu.
+        # Kullandığımız her mesajın aşağıda kendi SET_MESSAGE_INTERVAL'ı var,
+        # bu yüzden blanket istek yalnızca zarardı.
+        #
+        # Durdurma isteği ŞART, "istemeyi bırakmak" yetmiyor: ArduPilot stream
+        # hızlarını SR*_ parametrelerine kaydediyor, yani önceki koşuda yazılan
+        # 10 Hz araçta duruyor ve biz hiçbir şey göndermeden hat dolu başlıyor.
         self.mavlink_connection.mav.request_data_stream_send(
             self.mavlink_connection.target_system,
             self.mavlink_connection.target_component,
@@ -2962,6 +3113,10 @@ class MainWindow(QMainWindow):
     update_plane_data_signal = Signal(TelemetryData, TelemetryResponseData)
     is_processing_plane_data = False
     def __update_plane_data(self, our_data: TelemetryData, telemetry_response: TelemetryResponseData):
+        # Sunucu saati offset'i her cevapta güncellenir (kayıt overlay'i bunu
+        # kullanır). Guard'dan ÖNCE, çünkü bu kare atlansa da saat tazelenmeli.
+        if telemetry_response is not None and telemetry_response.sunucusaati:
+            self._update_server_time_offset(telemetry_response.sunucusaati)
         if self.is_processing_plane_data:
             return
         self.is_processing_plane_data = True
@@ -2969,6 +3124,38 @@ class MainWindow(QMainWindow):
             self.ui.map_view.update_plane_data(our_data, telemetry_response)
         finally:
             self.is_processing_plane_data = False
+
+    def _update_server_time_offset(self, sunucusaati: dict) -> None:
+        """
+        Sunucu saati ile yerel UTC arasındaki farkı (ms) günceller.
+
+        Değerlendirme videosunda sağ üste yazılacak "sunucu saati", yerel UTC +
+        bu offset ile üretiliyor; böylece PC saati sunucuya kalibre olmasa bile
+        overlay doğru sunucu saatini gösterir (şartname: yanlış saat = video
+        değerlendirilmez). Gün içi kabul ediliyor (gün sarması yok sayılıyor).
+        """
+        try:
+            server_ms = (int(sunucusaati["saat"]) * 3600000
+                         + int(sunucusaati["dakika"]) * 60000
+                         + int(sunucusaati["saniye"]) * 1000
+                         + int(sunucusaati["milisaniye"]))
+        except (KeyError, TypeError, ValueError):
+            return
+        now = QDateTime.currentDateTimeUtc().time()
+        local_ms = (now.hour() * 3600000 + now.minute() * 60000
+                    + now.second() * 1000 + now.msec())
+        self.server_time_offset_ms = server_ms - local_ms
+
+    def _server_now(self) -> GpsSaati:
+        """
+        Şu anki SUNUCU saatini GpsSaati olarak verir (yerel UTC + offset).
+
+        Kamikaze paket zamanları da (haberleşme §9: "sunucu saati türünde")
+        değerlendirme videosu overlay'i de AYNI bu saati kullanır. Böylece
+        şartnamenin "dalış bitiş zamanı ±1 sn video" kontrolü, sunucu UTC
+        olmasa bile saat kaymasından etkilenmez.
+        """
+        return GpsSaati(QDateTime.currentDateTimeUtc().addMSecs(self.server_time_offset_ms))
 
     def _server_disconnect(self):
         if self.server_connection.telemetry_thread:

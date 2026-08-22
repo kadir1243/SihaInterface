@@ -1,5 +1,6 @@
 import os
 import struct
+import subprocess
 import time
 from datetime import datetime
 from enum import Enum
@@ -8,7 +9,7 @@ import cv2
 import lz4.block
 import numpy
 from PySide6.QtCore import QTimer, qWarning, qInfo, QThread, Qt, qDebug, QObject, Signal, QSize, QPointF, \
-    QPoint, QProcess, QByteArray, QMutex
+    QPoint, QProcess, QByteArray, QMutex, QStandardPaths, QDateTime
 from PySide6.QtGui import QImage, QPixmap, QPaintEvent, QPainterPath, QPainter, QPen
 from PySide6.QtNetwork import QUdpSocket, QHostAddress, QAbstractSocket, QTcpSocket
 from PySide6.QtWidgets import QWidget, QLabel, QGridLayout
@@ -17,26 +18,19 @@ from src.CommonUtils import KamikazeState
 from src.barcode import RobustDetector, resolve_engine, draw_results
 
 # --- Kamikaze dalış kaydı ---------------------------------------------------
-# Kayıt klasörü ve dosya adı; her koşu kendi dosyasını açar.
 KAMIKAZE_RECORDING_DIR: str = "kamikaze_kayitlari"
-# cv2.VideoWriter açılırken bir kare hızı istiyor, ama gelen akışın gerçek
-# hızını önceden bilmenin bir yolu yok (üç protokolün hiçbiri bildirmiyor).
-# Dosya bu nominal değerle yazılıyor, gerçek hız ise kayıt biterken ölçülüp
-# loglanıyor. Oynatma hızı tutmuyorsa buradaki sabiti log'daki ölçülen değere
-# çekin -- kareler doğru, yalnızca zaman damgası ölçekli.
+# Akışın gerçek kare hızını önceden bilmenin yolu yok (protokoller bildirmiyor),
+# dosya bu nominal değerle yazılıyor; gerçek hız kayıt biterken loglanıyor.
+# Oynatma hızı tutmuyorsa bunu log'daki ölçülen değere çekin.
 KAMIKAZE_RECORDING_FPS: float = 30.0
 
 class KamikazeRecorder:
     """
     Dalış anının video kaydı.
 
-    Kareler kamera thread'inden (AbstractProtocolWrapper.emit_camera_data),
-    başlat/bitir komutları ise ana thread'den (MainWindow'un kamikaze döngüsü)
-    geliyor. writer bu yüzden bir mutex'in arkasında.
-
-    start() ve stop() idempotent olmak ZORUNDA: start her tick'te çağrılıyor
-    (tetik mesafe şartı, tek seferlik bir olay değil) ve stop hem kurtarmaya
-    geçerken hem de __finish_kamikaze'nin emniyet ağından geliyor.
+    Kareler kamera thread'inden, başlat/bitir ana thread'den geldiği için writer
+    mutex arkasında. start()/stop() idempotent olmak ZORUNDA: start her tick'te
+    çağrılıyor (tetik mesafe şartı) ve stop iki ayrı yoldan geliyor.
     """
 
     def __init__(self) -> None:
@@ -83,13 +77,11 @@ class KamikazeRecorder:
             if len(raw_image) != width * height * 3:
                 return
             frame = numpy.frombuffer(raw_image, dtype=numpy.uint8).reshape((height, width, 3))
-            # Akıştaki kareler RGB, VideoWriter ise BGR bekliyor. Çevrilmezse
-            # kayıt mavi-kırmızı ters çıkar.
+            # Akış RGB, VideoWriter BGR bekliyor; çevrilmezse renkler ters çıkar.
             self._writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
             self._frames += 1
         except Exception as e:
-            # Kayıt yan iş: bir kare yazılamadı diye kamera akışı ya da QR
-            # okuma durmamalı.
+            # Kayıt yan iş: bir kare yazılamadı diye akış ya da QR okuma durmamalı.
             qWarning("Kamikaze karesi yazılamadı: %s" % e)
         finally:
             self._mutex.unlock()
@@ -106,6 +98,149 @@ class KamikazeRecorder:
                   "(dosyaya %.1f fps ile yazıldı)"
                   % (self._path, self._frames, elapsed, self._frames / elapsed,
                      KAMIKAZE_RECORDING_FPS))
+        finally:
+            self._mutex.unlock()
+
+# --- Değerlendirme (FTP) videosu -------------------------------------------
+# Şartname: sabit kare hızı, H264/MP4, min 640x480, sağ üstte ms hassasiyetinde
+# SUNUCU SAATİ (yoksa video değerlendirilmez), ekran kaydı DEĞİL.
+EVAL_RECORDING_FPS: float = 30.0
+# İsim formatı: [MüsabakaNo]_[TakımAdı]_[Tarih(gg_aa_yyyy)] -- Türkçe/özel karakter
+# YOK. Yarışmadan önce doldurun; müsabaka no her tur değişebilir.
+EVAL_TEAM_NUMBER: str = "0"
+EVAL_TEAM_NAME: str = "ARES"
+
+class EvalVideoRecorder:
+    """
+    Değerlendirme (FTP) videosunu masaüstüne kaydeder.
+
+    Kareler kamera thread'inden (emit_camera_data), başlat/durdur ana thread'den
+    (kayıt düğmesi) geliyor -- writer bir mutex arkasında. Kodlama ffmpeg'e boru
+    ile yaptırılıyor: OpenCV'nin Windows'ta H264 desteği güvenilmez, ffmpeg zaten
+    kurulu ve garanti H264/MP4 (yuv420p, +faststart) üretiyor. Her kareye sağ üst
+    köşede sunucu saati (yerel UTC + sunucu offset'i) yazılıyor.
+    """
+
+    def __init__(self, get_server_offset_ms) -> None:
+        self._proc: subprocess.Popen | None = None
+        self._mutex: QMutex = QMutex()
+        self._path: str = ""
+        self._w: int = 0
+        self._h: int = 0
+        self._frames: int = 0
+        self._get_offset = get_server_offset_ms  # callable -> int (ms)
+
+    @staticmethod
+    def _desktop_dir() -> str:
+        d = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
+        return d if d else os.path.expanduser("~")
+
+    def is_recording(self) -> bool:
+        self._mutex.lock()
+        try:
+            return self._proc is not None
+        finally:
+            self._mutex.unlock()
+
+    def start(self, width: int, height: int) -> str | None:
+        self._mutex.lock()
+        try:
+            if self._proc is not None:
+                return self._path
+            if width <= 0 or height <= 0:
+                qWarning("Değerlendirme kaydı açılamadı: kare boyutu bilinmiyor (%sx%s)" % (width, height))
+                return None
+            base: str = "%s_%s_%s" % (EVAL_TEAM_NUMBER, EVAL_TEAM_NAME,
+                                      datetime.now().strftime("%d_%m_%Y"))
+            desktop: str = self._desktop_dir()
+            path: str = os.path.join(desktop, base + ".mp4")
+            # Aynı gün ikinci kayıt varsa üstüne yazma.
+            i: int = 2
+            while os.path.exists(path):
+                path = os.path.join(desktop, "%s_%d.mp4" % (base, i))
+                i += 1
+            args = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-s", "%dx%d" % (width, height),
+                "-framerate", str(EVAL_RECORDING_FPS),
+                "-i", "pipe:0",
+                "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+                "-r", str(EVAL_RECORDING_FPS), "-movflags", "+faststart",
+                path,
+            ]
+            try:
+                self._proc = subprocess.Popen(
+                    args, stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError as e:
+                qWarning("ffmpeg başlatılamadı (değerlendirme kaydı): %s" % e)
+                self._proc = None
+                return None
+            self._path = path
+            self._w = width
+            self._h = height
+            self._frames = 0
+            qInfo("Değerlendirme kaydı başladı: %s (%dx%d)" % (path, width, height))
+            return path
+        finally:
+            self._mutex.unlock()
+
+    def _server_time_text(self) -> str:
+        try:
+            offset = int(self._get_offset())
+        except Exception:
+            offset = 0
+        t = QDateTime.currentDateTimeUtc().addMSecs(offset).time()
+        return "%02d:%02d:%02d.%03d" % (t.hour(), t.minute(), t.second(), t.msec())
+
+    def write(self, raw_image: bytes, width: int, height: int) -> None:
+        self._mutex.lock()
+        try:
+            if self._proc is None or self._proc.stdin is None:
+                return
+            if len(raw_image) != width * height * 3 or width != self._w or height != self._h:
+                return
+            frame = numpy.frombuffer(raw_image, dtype=numpy.uint8).reshape((height, width, 3)).copy()
+            text: str = self._server_time_text()
+            # Sağ üst köşe; beyaz metin + siyah kenarlık kanal sırasından bağımsız.
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            scale: float = max(0.5, width / 1280.0)
+            thick: int = max(1, int(round(scale * 2)))
+            (tw, th), _ = cv2.getTextSize(text, font, scale, thick)
+            x: int = max(0, width - tw - int(10 * scale))
+            y: int = th + int(10 * scale)
+            cv2.putText(frame, text, (x, y), font, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
+            cv2.putText(frame, text, (x, y), font, scale, (255, 255, 255), thick, cv2.LINE_AA)
+            try:
+                self._proc.stdin.write(frame.tobytes())
+                self._frames += 1
+            except (BrokenPipeError, OSError) as e:
+                qWarning("Değerlendirme karesi yazılamadı: %s" % e)
+        except Exception as e:
+            qWarning("Değerlendirme karesi işlenemedi: %s" % e)
+        finally:
+            self._mutex.unlock()
+
+    def stop(self) -> str:
+        self._mutex.lock()
+        try:
+            if self._proc is None:
+                return ""
+            path: str = self._path
+            try:
+                if self._proc.stdin:
+                    self._proc.stdin.close()
+                self._proc.wait(timeout=10)
+            except Exception as e:
+                qWarning("Değerlendirme kaydı kapatılırken sorun: %s" % e)
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            qInfo("Değerlendirme kaydı bitti: %s — %d kare" % (path, self._frames))
+            self._proc = None
+            return path
         finally:
             self._mutex.unlock()
 
@@ -155,12 +290,16 @@ class AbstractProtocolWrapper(QObject):
                             self.qr_read_timer.start()
 
             shown_image = frame.tobytes()
-        # Kayda operatörün gördüğü kare gidiyor, ham kare değil: dalış boyunca
-        # waits_qr açık olduğu için QR kutusu da çizili oluyor ve kayıt, kodun
-        # QR'ı hangi karede gördüğünü de belgeliyor. Kayıt kapalıyken bu çağrı
-        # mutex'i alıp hemen dönüyor.
+        # Kamikaze kaydına operatörün gördüğü kare gidiyor: QR kutusu da çizili
+        # olduğu için kayıt, kodun QR'ı hangi karede gördüğünü belgeliyor.
         self.parentWidget.kamikaze_recorder.write(
             shown_image,
+            self.parentWidget.camera_server_info.width,
+            self.parentWidget.camera_server_info.height)
+        # Değerlendirme videosuna HAM kare gidiyor: şartname çizim yasaklıyor,
+        # yalnızca recorder'ın eklediği sunucu saati overlay'i var.
+        self.parentWidget.eval_recorder.write(
+            raw_image,
             self.parentWidget.camera_server_info.width,
             self.parentWidget.camera_server_info.height)
         self.update_camera_in_ui.emit(shown_image)
@@ -169,33 +308,8 @@ class ProtocolKadirSocketWrapper(AbstractProtocolWrapper):
     def __init__(self, parentWidget: CameraWidget):
         super().__init__(parentWidget)
 
-    # My Internal Server Code
-    #def split_bylen(item, maxlen):  # I don't remember where i copied this from, but thanks for answer in stackoverflow :D
-    #    '''
-    #    Requires item to be sliceable (with __getitem__ defined)
-    #    '''
-    #    return [item[ind:ind + maxlen] for ind in range(0, len(item), maxlen)]
-    ## Reminder for myself
-    ## header                                          Binary Frame Data
-    ## [4 Byte Integer][4 Byte Integer][4 Byte Integer][4 Byte Integer][1 Byte Integer][Byte Array]
-    ## [Part of frame][Amount Of Parts][Index of frame][Size of Frame ][Random number ][Data]
-    #def start_server():
-    #    random_id = random.randint(0, 255)
-    #    address = ('127.0.0.1', 8000)
-    #    sock = socket.socket(type=socket.SOCK_DGRAM)
-    #    webcam = Webcam(w=640, h=480)
-    #    i: int = 0
-    #    for frame in webcam:
-    #        d = lz4.block.compress(frame.tobytes())
-    #        size = len(d)
-    #        split = split_bylen(d, 5000)
-    #        length = len(split)
-    #        for j, e in enumerate(split):
-    #            sock.sendto(struct.pack("!IIIIB", j + 1, length, i, size, random_id) + e, address)
-    #            time.sleep(1 / 100000)
-    #        i = i + 1
-    #if __name__ == '__main__':
-    #    start_server()
+    # Paket başlığı: [parça no][parça sayısı][kare no][kare boyutu][sunucu id] + veri
+    # (!IIIIB, 17 bayt), ardından lz4 ile sıkıştırılmış kare parçası.
 
     last_index_of_frame: int
     last_amount_of_parts: int
@@ -438,10 +552,12 @@ class CameraWidget(QWidget):
     label: LabelWithRectangle
     lock_enabled: bool
     kamikaze_recorder: KamikazeRecorder
+    eval_recorder: EvalVideoRecorder
 
     def __init__(self, parent: QWidget | None = None):
         QWidget.__init__(self, parent=parent)
         self.kamikaze_recorder = KamikazeRecorder()
+        self.eval_recorder = EvalVideoRecorder(self._server_offset_ms)
         self.gridLayout = QGridLayout(self)
         self.gridLayout.setSpacing(0)
         self.gridLayout.setContentsMargins(0, 0, 0, 0)
@@ -467,11 +583,26 @@ class CameraWidget(QWidget):
         info: CameraServerInfo = self.camera_server_info
         if not info.ip:
             return
-        self.kamikaze_recorder.start(info.width, info.height)
+        self.kamikaze_recorder.start(getattr(info, "width", 0), getattr(info, "height", 0))
 
     def stop_kamikaze_recording(self) -> None:
         """Dalış kaydını kapatır. Kayıt yoksa hiçbir şey yapmaz."""
         self.kamikaze_recorder.stop()
+
+    def _server_offset_ms(self) -> int:
+        """Değerlendirme kaydının overlay'i için sunucu saati offset'i (ms)."""
+        return getattr(getattr(self, "mainwindow", None), "server_time_offset_ms", 0)
+
+    def start_eval_recording(self) -> str | None:
+        """Değerlendirme (FTP) videosunu başlatır; kayıt yolunu döner, olmazsa None."""
+        info: CameraServerInfo = self.camera_server_info
+        if not info.ip:
+            return None
+        return self.eval_recorder.start(getattr(info, "width", 0), getattr(info, "height", 0))
+
+    def stop_eval_recording(self) -> str:
+        """Değerlendirme kaydını kapatır; dosya yolunu döner, kayıt yoksa boş string."""
+        return self.eval_recorder.stop()
 
     def set_mainwindow_reference(self, widget):
         self.mainwindow = widget

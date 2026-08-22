@@ -2,54 +2,42 @@
 Uçuş zarfı sabitleri ve parametre tabloları.
 
 Sabitler, onları araca yazan BASELINE_PARAMS/KAMIKAZE_*_PARAMS tablolarıyla
-aynı dosyada tutuluyor: bir manevranın açtığı parametrenin baseline'da
-karşılığı yoksa, manevra bittiğinde o değer araçta kalır. İkisi bir arada
-olduğu için bu eksiklik hem gözle görülür hem de dosyanın sonundaki assert
-ile import anında yakalanır.
-
-Her sabitin üstündeki yorum değerin neden o olduğunu anlatır; uçuş
-ölçümüne dayananlarda ölçüm tarihiyle birlikte yazılıdır.
+aynı dosyada: bir manevranın açtığı parametrenin baseline'da karşılığı yoksa
+manevra bittiğinde o değer araçta kalır. Dosyanın sonundaki assert bunu
+import anında yakalar.
 """
 from enum import Enum
 
 from src.MapWidget import CRUISE_THR_MAX, CRUISE_ROLL_LIMIT
 from src.RoutePreplanner import CRUISE_SPEED_MS
 
-# Seconds of forced full power at the start of the takeoff run (TKOFF_THR_MAX_T,
-# which ArduPlane caps at 10). The takeoff stage itself keeps running until
-# TKOFF_ALT is reached; only after it ends does CRUISE_THR_MAX take over.
+# TKOFF_THR_MAX_T: kalkış koşusunun başındaki tam gaz süresi (ArduPlane 10 s'de
+# sınırlıyor). Kalkış fazı TKOFF_ALT'a kadar sürer, sonra CRUISE_THR_MAX devralır.
 TAKEOFF_FULL_THROTTLE_TIME: float = 10.0
 
 # -------------------------------- HSS --------------------------------
-# Bunlar HSS ile ilgili parametreler ve HER ZAMAN yürürlükte
-# Kamikaze yapıldığında bunlardan etkilenmez,burada yazan sınırların içine sığacak şekilde planlanır (bkz. KAMIKAZE_APPROACH_ALT).
+# HER ZAMAN yürürlükte; kamikaze bunlardan etkilenmez, sınırların içine
+# sığacak şekilde planlanır (bkz. KAMIKAZE_APPROACH_ALT).
 
-
-# FENCE_TYPE bitleri: 1=AltMax, 4=Polygon
-
-FENCE_TYPE_BITS: float = 5.0
-
-# FENCE_ACTION=1 + FENCE_RET_RALLY=1 ("en yakın rally noktasına git") 
-
-FENCE_ACTION_RTL: float = 1.0
+FENCE_TYPE_BITS: float = 5.0     # 1=AltMax, 4=Polygon
+FENCE_ACTION_RTL: float = 1.0    # FENCE_RET_RALLY=1 ile: en yakın rally noktasına git
 FENCE_ALT_MAX_M: float = 150.0   # Yarışma tavanı
 FENCE_ALT_MIN_M: float = 30.0    # Yarışma tabanı tahmini (bit kapalı, yukarı bak)
 FENCE_MARGIN_M: float = 5.0      # Çite yaklaşma marjı
 FENCE_LOITER_RADIUS_M: float = 60.0
 
-# HSS güvenlik ağı + rally + AUTO seyrüsefer parametreleri.Bunlar manevralarla
-# değişmediği için baseline'a dahil değil; bağlantı kurulduğunda bir kez yazılır.
+# HSS güvenlik ağı + rally + AUTO seyrüsefer. Manevralarla değişmediği için
+# baseline'a dahil değil; bağlantı kurulduğunda bir kez yazılır.
 HSS_SAFETY_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('FENCE_ACTION',     [(b'FENCE_ACTION', FENCE_ACTION_RTL)]),
     ('FENCE_TYPE',       [(b'FENCE_TYPE', FENCE_TYPE_BITS)]),
-
     # Bit0=0: pilot/GCS fence ihlalinden sonra mod değiştirebilir.
     ('FENCE_OPTIONS',    [(b'FENCE_OPTIONS', 0.0)]),
     ('FENCE_MARGIN',     [(b'FENCE_MARGIN', FENCE_MARGIN_M)]),
     ('FENCE_RET_RALLY',  [(b'FENCE_RET_RALLY', 1.0)]),
     ('FENCE_ALT_MAX',    [(b'FENCE_ALT_MAX', FENCE_ALT_MAX_M)]),
     ('FENCE_ALT_MIN',    [(b'FENCE_ALT_MIN', FENCE_ALT_MIN_M)]),
-    ('RALLY_LIMIT_KM',   [(b'RALLY_LIMIT_KM', 0.0)]), 
+    ('RALLY_LIMIT_KM',   [(b'RALLY_LIMIT_KM', 0.0)]),
     ('RALLY_INCL_HOME',  [(b'RALLY_INCL_HOME', 1.0)]),
     ('MIS_RESTART',      [(b'MIS_RESTART', 0.0)]), #0(Resume),1(Restart)
     ('WP_LOITER_RAD',    [(b'WP_LOITER_RAD', FENCE_LOITER_RADIUS_M)]),
@@ -61,202 +49,117 @@ HSS_SAFETY_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
 
 
 # --- Cruise / baseline zarfı -----------------------------------------------
-# "Araç normal, HSS'in planladığı hâlde" durumunun TEK tanımı BASELINE_PARAMS
-# tablosu (bu dosyanın altında). Zarfı açan her manevra (kamikaze, reposition)
-# onu apply_baseline_params() ile geri vermek zorunda; kendi literal'ini yazmak
-# yasak. Manevra bitişine literal yazılırsa HSS'in belirlediği limit ilk
-# koşudan sonra sessizce kaybolur.
+# "Araç normal" durumunun TEK tanımı BASELINE_PARAMS (dosyanın altında). Zarfı
+# açan her manevra onu apply_baseline_params() ile geri vermek zorunda; bitişe
+# literal yazılırsa HSS'in belirlediği limit ilk koşudan sonra kaybolur.
 CRUISE_PITCH_MIN: float = -25.0
-# Araca yazılan seyir hava hızı. Tek tanımı burasıdır: rota yükleme ve bağlantı
-# kurma yolları da bu değeri kullanmak zorunda, yoksa araç plandan farklı bir
-# hızda uçar.
+# Araca yazılan seyir hava hızı; tek tanımı burasıdır (rota yükleme ve bağlantı
+# kurma da bunu kullanır). HER ZAMAN CRUISE_SPEED_MS'ten küçük veya eşit olmalı:
+# yavaş uçmak dönüş yarıçapını küçültür, plan tamponları güvenli tarafta kalır.
 #
-# Rota planlayıcının varsaydığı hızdan (RoutePreplanner.CRUISE_SPEED_MS = 20)
-# BİLEREK düşük. Planlayıcı tamponlarını 20 m/s hava hızı + 8 m/s rüzgâr = 28
-# m/s yer hızı üzerinden boyutluyor; daha yavaş uçmak dönüş yarıçapını
-# küçültüyor, yani planın tamponları fazladan güvenli tarafta kalıyor.
-# Değişmez kural: bu değer HER ZAMAN CRUISE_SPEED_MS'ten küçük veya eşit olmalı.
-# Büyütülürse plan gerçekten daha keskin dönen bir uçak varsayıyor demektir ve
-# HSS tamponları yetersiz kalır.
-#
-# Kamikaze açısından kritik: yaklaşma bu hızda uçuluyor, dalışa bu hızla
-# giriliyor. Düşürmek dalış açısını ARTIRMAZ, azaltır. "Yavaş giriş = düşük yer
-# hızı = aynı alçalma hızıyla daha dik açı" ilişkisi yalnızca oturmuş dalış için
-# geçerli; dalış TECS_TIME_CONST'tan kısa sürdüğü için hiç oturmuyor.
-# Belirleyici olan geçiş rejimi, yani burnun ne kadar hızlı aşağı dönebildiği --
-# o da hava hızıyla artan elevator otoritesine bağlı. 15 m/s ölçümünde açı
-# 38'den 22'ye düştü (2026-08-14). Hız düşürülecekse
-# dalış süresi de uzatılmalı (irtifa bütçesi).
+# Dalışa bu hızla giriliyor ve düşürmek dalış açısını ARTIRMAZ, azaltır: dalış
+# oturmadığı için belirleyici olan burnun dönme hızı, o da hava hızıyla artan
+# elevator otoritesine bağlı. 15 m/s'de açı 38'den 22'ye düştü (2026-08-14).
 CRUISE_AIRSPEED_MS: float = 20.0
 assert CRUISE_AIRSPEED_MS <= CRUISE_SPEED_MS, \
     "Seyir hızı rota planlayıcının varsaydığı hızı aşamaz, HSS tamponları yetersiz kalır"
-# RoutePreplanner.compute_safe_route içindeki turn_dist hesabı bu değeri
-# varsayıyor; ikisi birlikte değişmeli.
+# RoutePreplanner.compute_safe_route'taki turn_dist bunu varsayıyor; birlikte değişmeli.
 CRUISE_NAVL1_PERIOD: float = 14.0
 
 # --- Parametre yazma güvenilirliği -----------------------------------------
-# param_set_send tek yönlü; paket düşerse araç eski değerde kalır ve arayüz
-# bunu göremez. Kritik yazılar PARAM_VALUE ile teyit edilip, gelmezse
-# tekrarlanıyor. Kurtarmadaki THR_MAX yazısının düşmesi motorsuz tırmanış
-# demek olduğu için bu isteğe bağlı bir iyileştirme değil.
-#
-# Süreler telemetri linkine göre: 700 ms, USB kablosunda doğru ama telsizde
-# değil. Bağlantıda 28 parametre tek seferde gönderilince araç PARAM_VALUE
-# cevaplarını ~3 saniyede yetiştiriyor, 700x4 = 2.1 saniyelik bütçe dolduğu
-# için hepsi "yazılamadı" diye raporlanıyordu -- oysa çoğu yazılmıştı.
+# param_set_send tek yönlü; paket düşerse araç eski değerde kalır. Kritik yazılar
+# PARAM_VALUE ile teyit edilip gelmezse tekrarlanıyor (kurtarmadaki THR_MAX
+# yazısının düşmesi motorsuz tırmanış demek). Süreler telsiz linkine göre; havada
+# duran yazı sayısı da sınırlı, yoksa toplu gönderim linki kendi cevaplarına
+# kapatıyor (28 parametrelik açılış yazımında cevaplar ~3 saniye sürüyordu).
 PARAM_ACK_TIMEOUT: int = 1500      # ms, tek bir yazının cevap bekleme süresi
 PARAM_MAX_ATTEMPTS: int = 4
 PARAM_MAX_IN_FLIGHT: int = 5       # aynı anda cevabı beklenen yazı sayısı
 PARAM_PUMP_INTERVAL: int = 200     # ms, kuyruğun ne sıklıkta işlendiği
 
 # --- Kamikaze run ----------------------------------------------------------
-# The whole run is flown in GUIDED: the autopilot keeps navigating itself, so
-# the heartbeat keeps reporting MAV_MODE_FLAG_AUTO_ENABLED and the run counts
-# as autonomous. Altitude the run-in is flown at, and the distance to the
-# target the dive is started from.
+# Koşunun tamamı GUIDED'da uçuluyor: otopilot kendi seyrüsefer yaptığı için
+# heartbeat MAV_MODE_FLAG_AUTO_ENABLED bildiriyor ve koşu otonom sayılıyor.
 #
-# The approach altitude is not free: the pull-out at the bottom of a DIVE_ANGLE
-# dive costs (V^2/(g*(n-1)))*(1-cos(DIVE_ANGLE)) of altitude on its own, which
-# is around 30 m at the ~35 m/s a zero-throttle 45 degree dive builds up. So
-# APPROACH_ALT has to clear MIN_ALT by that pull-out plus however much dive is
-# actually wanted in between.
-#
-# It is also capped from above by the altitude fence, which is NOT suspended for
-# the run: the run-in and the recovery climb both level off at this altitude, so
-# it has to sit below FENCE_ALT_MAX by the fence margin plus enough room for
-# TECS to arrest the climb. Setting it at FENCE_ALT_MAX would put the whole
-# run-in on the fence boundary, where a breach fights the 2 s DO_REPOSITION
-# refresh for control of the vehicle.
+# Yaklaşma irtifası iki taraftan sıkışık. Alttan: dip toparlanması tek başına
+# (V^2/(g*(n-1)))*(1-cos(DIVE_ANGLE)) ≈ 30 m yiyor. Üstten: irtifa çiti koşu için
+# askıya ALINMIYOR ve hem hizalanma hem kurtarma bu irtifada seviyeleniyor, yani
+# FENCE_ALT_MAX'ın altında çit marjı + TECS'in tırmanışı durdurma payı kalmalı.
 KAMIKAZE_ALT_FENCE_HEADROOM: float = 20.0
 KAMIKAZE_APPROACH_ALT: float = min(100.0, FENCE_ALT_MAX_M - FENCE_MARGIN_M - KAMIKAZE_ALT_FENCE_HEADROOM)
-# How far below APPROACH_ALT the dive is still allowed to start from. Diving
-# from lower means less altitude to spend and less time to rotate into the
-# angle, which is what makes a run started right after a previous one come out
-# shallower. Below this the run-in simply carries on: the destination is
-# recomputed from the current bearing to the QR point every
-# KAMIKAZE_TARGET_REFRESH, so overflying the target turns the vehicle around
-# for another pass while it keeps climbing. Set it large to dive from whatever
-# altitude is available instead of going around.
+# Dalışın APPROACH_ALT'ın ne kadar altından başlayabileceği. Daha alçaktan
+# dalmak hem irtifa hem açıya dönme süresi bırakmaz. Bunun altında hizalanma
+# devam eder: hedef her KAMIKAZE_TARGET_REFRESH'te yeniden hesaplandığı için
+# uçak tırmanmaya devam ederken tur atar.
 KAMIKAZE_APPROACH_ALT_TOLERANCE: float = 15.0
-# Closest the dive may ever start to the QR point. The dive actually starts at
-# whichever is further out, this or the distance that puts the QR straight
-# ahead on the nose: in a DIVE_ANGLE descent the nose points at a spot
-# altitude/tan(DIVE_ANGLE) ahead, so at 45 degrees the dive has to start as far
-# out as the vehicle is high or the camera never looks at the QR code.
+# Dalışın QR noktasına en yakın başlayabileceği mesafe. Gerçek başlangıç bununla
+# "QR'ın burnun tam önüne düştüğü mesafe"nin uzak olanı: DIVE_ANGLE'lık alçalmada
+# burun altitude/tan(DIVE_ANGLE) ileriyi gösterir, yani 45 derecede dalış uçak ne
+# kadar yüksekse o kadar uzaktan başlamalı, yoksa kamera QR'a hiç bakmaz.
 KAMIKAZE_DIVE_START_DISTANCE: float = 150.0
-# The destination handed to GUIDED is put this far past the QR point, along the
-# line the vehicle is already running in on. ModeGuided always navigates with
-# update_loiter() -- set_guided_WP() clears auto_state.crosstrack, so ArduPlane
-# never uses straight waypoint navigation in GUIDED. L1's circle capture term
-# is Kx*(distance-radius) - Kv*closing_speed, which goes negative roughly 100 m
-# outside the loiter circle and banks the vehicle away from it. Aiming well
-# beyond the target keeps that term positive, which is what makes L1 fall back
-# to its capture law and fly a straight line through the QR point instead.
+# GUIDED'a verilen hedef, uçağın üzerinde geldiği hattın QR noktasından bu kadar
+# ilerisine konur. ModeGuided her zaman update_loiter() ile seyrediyor (GUIDED'da
+# düz waypoint seyrüseferi hiç kullanılmıyor). L1'in çember yakalama terimi loiter
+# çemberinin ~100 m dışında negatife dönüp uçağı çemberden uzağa yatırıyor; hedefi
+# çok ileriye koymak terimi pozitif tutuyor ve L1 QR noktasının üstünden düz hat
+# uçuyor.
 KAMIKAZE_AIM_OVERSHOOT: float = 500.0
-# Dive angle, the lowest altitude the vehicle may reach at the bottom of the
-# pull-out, and the altitude the recovery climb has to reach before the run is
-# over.
+# Dalış açısı, dip toparlanmada inilebilecek en alçak irtifa ve koşunun bitmesi
+# için kurtarma tırmanışının ulaşması gereken irtifa.
 KAMIKAZE_DIVE_ANGLE: float = 45.0
 KAMIKAZE_MIN_ALT: float = 50.0
 KAMIKAZE_RECOVER_ALT: float = 90.0
-# The dive is broken off early enough that MIN_ALT is where the vehicle bottoms
-# out, not where it starts pulling: how much further it sinks after the
-# recovery is commanded, as a time at the current sink rate.
-#
-# This was a circular pull-out arc, V^2/(g*(n-1))*(1-cos(angle)), which at any
-# sane load factor predicts 20-30 m. Measured in flight it is nothing like
-# that: clamping the pitch floor to level at recovery makes the pull so tight
-# that a 22 m/s dive only sank about 3 m more, so the arc term is dropped and
-# what is left is the response delay. Tune it against the altitude the run
-# reports bottoming out at when it ends -- below MIN_ALT means raise this,
-# well above it means the dive is still being cut short.
-#
-# Ölçüm (2026-08-14): tetik 79.6 m'de, alçalma 14.9 m/s, örnek yaşı 0.44 s,
-# dip 67.0 m. Toplam kayıp 12.6 m = 0.85 s; yaş telafisi düşülünce aracın
-# gerçek tepki gecikmesi 0.41 s çıkıyor. Yaş artık ayrıca hesaba katıldığı
-# için bu sabit SADECE o gecikmeyi temsil ediyor.
+# Dalış, MIN_ALT dibe vurulan yer olacak kadar erken kesiliyor: kurtarma
+# komutundan sonra uçağın o anki alçalma hızıyla ne kadar daha battığı. Dairesel
+# toparlanma yayı değil sadece tepki gecikmesi -- pitch tabanı seviyeye çekilince
+# 22 m/s'lik dalış yalnızca ~3 m battı. Ölçüm (2026-08-14): tetik 79.6 m, alçalma
+# 14.9 m/s, örnek yaşı 0.44 s, dip 67.0 m -> yaş düşülünce 0.41 s. Koşunun
+# raporladığı dip irtifaya göre ayarlayın.
 KAMIKAZE_PULLOUT_TIME: float = 0.40
 # Pull-out tahmininde kullanılan alçalma hızı, bu kadar saniyelik pencerenin
 # TEPESİ. Bkz. MainWindow.__recent_peak_sink.
 KAMIKAZE_PULLOUT_PEAK_WINDOW: float = 1.5
-# Pitch floor (deg) during the recovery. The dive opens the floor to -45, and
-# leaving it there lets TECS keep the nose down through the pull-out and eat
-# altitude it does not need to. Clamping it at level makes the recovery as
-# tight as the airframe allows, which is what keeps MIN_ALT honest.
-#
-# Bu taban ayrıca TECS'in hız kaybına verebileceği tek doğru cevabı (burnu
-# ufkun altına indirip hız toplamak) kapatıyor, yani kendi başına bir stall
-# riski. BİLEREK 0'da bırakıldı: aşağıdaki KAMIKAZE_RECOVER_PARAMS artık
-# tırmanışı seyir TECS'iyle uçuruyor, dolayısıyla TECS hızı yiyecek kadar sert
-# çekmiyor ve burnu indirmeye ihtiyaç duymaması bekleniyor. 50 metrede burun
-# aşağı yetkisi vermemek operatör kararıdır (2026-08-21). Uçuş ölçümünde hava
-# hızı yine de düşüyorsa önce buraya bakın.
+# Kurtarmadaki pitch tabanı (derece). Dalışın -45'i burada kalırsa TECS burnu
+# aşağıda tutup gereksiz irtifa yer; seviyeye çekmek MIN_ALT'ı tutturan şey.
+# TECS'in hız kaybına verebileceği tek cevabı (burnu indirip hız toplamak)
+# kapattığı için kendi başına stall riski; 50 metrede burun aşağı yetkisi
+# vermemek operatör kararıdır (2026-08-21). Hava hızı düşüyorsa önce buraya bakın.
 KAMIKAZE_RECOVER_PITCH_MIN: float = 0.0
-# Time window (s) the sink rate is measured over. NOT a sample count: the loop
-# ticks at KAMIKAZE_TICK_INTERVAL but GLOBAL_POSITION_INT arrives far slower
-# (measured at ~2 Hz on a real link), so most ticks carry a repeat of the last
-# altitude. Counting repeats and dividing by the tick interval invents a rate --
-# it reported 0 between samples and a 17-27 m/s spike on the tick a new sample
-# landed, and the pull-out decision was being made off those spikes. Samples are
-# now timestamped and only distinct altitudes are recorded, so this window works
-# at any telemetry rate.
+# Alçalma hızının ölçüldüğü zaman penceresi (s) -- örnek SAYISI değil:
+# GLOBAL_POSITION_INT (~2 Hz) döngüden (TICK_INTERVAL) çok yavaş geldiği için
+# örnekler zaman damgalı ve yalnızca farklı irtifalar kaydediliyor.
 KAMIKAZE_SINK_WINDOW: float = 0.6
 KAMIKAZE_TICK_INTERVAL: int = 100
-# Motor power (%) during the run-in, the dive and the recovery climb.
-#
-# Kurtarma gazı bilerek CRUISE_THR_MAX'ın TA KENDİSİ, ayrı bir sayı değil.
-# Eskiden 90'dı ve iki ayrı sorun üretiyordu. Birincisi giriş: dalış gazı 0
-# olduğu için pervane tek adımda 0'dan %90'a çıkıyor, bu da yüksek hücum
-# açısında tork/P-faktör ile uçağı sola yuvarlayan en büyük tek darbe.
-# İkincisi çıkış: koşu bitince THR_MAX 90'dan 60'a düşüyor, yani uçak alçak
-# irtifada tırmanırken gücü kesiliyordu. Seyir tavanıyla aynı olunca iki geçiş
-# de yumuşuyor ve koşu biterken gaz tarafında HİÇBİR adım kalmıyor.
-# Aşağıdaki TECS_CLMB_MAX (5 m/s) bu güçle rahat tırmanılan bir taleptir.
+# Hizalanma, dalış ve kurtarma tırmanışındaki motor gücü (%). Kurtarma gazı
+# bilerek CRUISE_THR_MAX'ın TA KENDİSİ: 90 iken girişte pervane tek adımda
+# 0'dan %90'a çıkıp uçağı sola yuvarlıyor, çıkışta ise koşu bitince 60'a düşüp
+# alçak irtifadaki tırmanışın ortasında gücü kesiyordu.
 KAMIKAZE_APPROACH_THR_MAX: float = 60.0
 KAMIKAZE_DIVE_THR_MAX: float = 0.0
 KAMIKAZE_RECOVER_THR_MAX: float = CRUISE_THR_MAX
-# Bank limit (deg) for the run-in. More than the planned-route baseline because
-# the run-in has to line up on the target bearing; released back to
-# CRUISE_ROLL_LIMIT at the end.
+# Hizalanmadaki yatış limiti (derece). Hedef kerterizine oturması gerektiği için
+# baseline'dan geniş; koşu bitince CRUISE_ROLL_LIMIT'e bırakılıyor.
 KAMIKAZE_APPROACH_ROLL_LIMIT: float = 55.0
-# Bank limit (deg) for the recovery. The dive pins it at DIVE_ROLL_LIMIT, which
-# is too tight to steer around an HSS zone, but the run-in value is too loose
-# for the bottom of the pull-out: banking hard while already pulling g stacks
-# the load factor.
-#
-# 35 iken KAMIKAZE_RECOVER_HEADING_OFFSETS'in istediği en büyük sapmayı tam
-# uçacak kadardı; 25'te o sapmalar da uçuluyor, sadece daha geniş yarıçapla --
-# kurtarmanın işi tırmanmak olduğu için hizalanmanın birkaç saniye uzaması
-# sorun değil. Buna karşılık yatışın stall hızına katkısı 35'te 1.10x iken
-# 25'te 1.05x'e iniyor; uçağın tüm uçuştaki en yavaş anı burası olduğu için
-# o fark doğrudan marj demek. Yatış yetkisi koşu bitince 45'e (CRUISE_ROLL_
-# LIMIT) açılıyor -- o geçiş hâlâ ani, bkz. MainWindow.__finish_kamikaze.
+# Kurtarmadaki yatış limiti (derece). Dalışınki HSS bölgesinden kaçmaya yetmiyor,
+# hizalanmanınki ise dip toparlanma için fazla gevşek (g çekerken sert yatmak yük
+# faktörünü bindiriyor). 25'te stall hızı katkısı 1.05x, 35'te 1.10x'ti; uçağın
+# tüm uçuştaki en yavaş anı burası olduğu için o fark doğrudan marj.
 KAMIKAZE_RECOVER_ROLL_LIMIT: float = 25.0
-# Bank limit (deg) while diving. L1 gets very twitchy about bearing as the
-# target gets close, and a wing drop points the camera off the QR code, so the
-# dive is flown with barely enough roll authority to hold the line.
+# Dalıştaki yatış limiti. Hedef yaklaşırken L1 kerteriz konusunda çok sinirli
+# oluyor ve kanat düşmesi kamerayı QR'dan kaçırıyor.
 KAMIKAZE_DIVE_ROLL_LIMIT: float = 15.0
-# GUIDED flies on TECS, and TECS ignores a target slope it considers outside
-# its own envelope. Three separate limits have to be opened or the dive comes
-# out shallow and unsteady:
-#  - TECS_SINK_MAX caps the demanded descent rate, which caps the dive angle at
-#    asin(SINK_MAX/V): 20 m/s at 40 m/s airspeed is only 30 degrees.
-#  - ARSPD_FBW_MAX makes TECS raise the nose to bleed speed once passed, and a
-#    zero-throttle 45 degree dive builds up to roughly 35 m/s.
-#  - TECS_SPDWEIGHT splits pitch between holding the altitude demand and
-#    controlling airspeed. With the throttle at 0 TECS has no other way to
-#    control speed, so it fights its own descent demand with the elevator and
-#    the dive oscillates. 0 puts pitch fully on the altitude demand.
-# The CRUISE_ values below are put back when the run ends and are the ArduPlane
-# defaults, so adjust them if the airframe is tuned differently.
-#
-# SINK_MAX is deliberately set above anything the airframe will actually fly:
-# the achievable angle is atan(SINK_MAX/groundspeed), so a 30 m/s ceiling caps
-# the dive at 38 degrees once the groundspeed reaches 38 m/s -- which is exactly
-# what was measured. What really limits the descent is the pitch floor
-# (-(DIVE_ANGLE + DIVE_PITCH_MARGIN) = -60 deg) and drag, so this is left high
-# enough not to be the binding constraint and the angle is shaped by the trim
-# loop instead. Raise the pitch floor, not this, if the dive needs limiting.
+# GUIDED TECS ile uçuyor ve TECS kendi zarfı dışında gördüğü eğim talebini yok
+# sayıyor. Üç limit birden açılmazsa dalış sığ ve salınımlı çıkıyor:
+#  - TECS_SINK_MAX alçalma talebini, dolayısıyla açıyı asin(SINK_MAX/V) ile sınırlar.
+#  - ARSPD_FBW_MAX aşılınca TECS hız yakmak için burnu kaldırır (motorsuz 45
+#    derece dalış ~35 m/s'ye çıkıyor).
+#  - TECS_SPDWEIGHT pitch'i irtifa ve hız arasında paylaştırır; gaz 0 iken TECS'in
+#    hızı kontrol edecek başka yolu olmadığı için kendi alçalma talebiyle
+#    kavga edip dalışı salındırıyor. 0 pitch'i tamamen irtifaya verir.
+# CRUISE_ değerleri ArduPlane varsayılanları, koşu bitince geri yazılıyor.
+# SINK_MAX bilerek uçağın uçabileceğinden yüksek, yani bağlayıcı kısıt değil:
+# alçalmayı gerçekte pitch tabanı ve sürükleme sınırlıyor. Dalış sınırlanacaksa
+# bu değil pitch tabanı değiştirilmeli.
 KAMIKAZE_TECS_SINK_MAX: float = 40.0
 KAMIKAZE_TECS_CLMB_MAX: float = 15.0
 KAMIKAZE_ARSPD_FBW_MAX: float = 38.0
@@ -265,162 +168,116 @@ CRUISE_TECS_SINK_MAX: float = 5.0
 CRUISE_TECS_CLMB_MAX: float = 5.0
 CRUISE_ARSPD_FBW_MAX: float = 22.0
 CRUISE_TECS_SPDWEIGHT: float = 1.0
-# ALT_SLOPE_MIN (older firmware: GLIDE_SLOPE_MIN) at 0 turns off the altitude
-# slope entirely: ArduPlane stops spreading an altitude change over the distance
-# to the destination and demands it right away, leaving TECS_SINK_MAX as the
-# only thing shaping the descent. That is what lets the destination sit 500 m
-# past the target without dragging the dive shallow -- the angle comes from the
-# sink rate, not from where the destination happens to be. 15 is the default.
-#
-# This write was silently failing until the rename was found. With the slope
-# left active the demanded altitude followed a ~10 degree ramp to a destination
-# 665 m away, so every metre the dive gained on that ramp put the vehicle BELOW
-# its own altitude target and TECS pushed back -- which is the most likely
-# reason the dive settled at 38 degrees while being asked for 24 m/s of sink
-# and only delivering 15.
+# ALT_SLOPE_MIN (eski firmware: GLIDE_SLOPE_MIN) 0 iken irtifa eğimi tamamen
+# kapanır: ArduPlane irtifa değişimini mesafeye yaymayı bırakıp hemen ister,
+# dalışı şekillendiren tek şey TECS_SINK_MAX kalır. Hedefin 500 m ileride olması
+# dalışı bu sayede sığlaştırmıyor. Eğim açıkken talep hedefe ~10 derecelik rampa
+# çiziyor, dalışın kazandığı her metre uçağı kendi hedefinin ALTINA düşürüyor ve
+# TECS geri itiyordu.
 KAMIKAZE_GLIDE_SLOPE_MIN: float = 0.0
 CRUISE_GLIDE_SLOPE_MIN: float = 15.0
-# Ground speed below which telemetry is not trusted to slave the sink rate to,
-# and how much the slaved value has to move before it is worth a parameter
-# write.
+# Altında telemetrinin alçalma hızını beslemesine güvenilmeyen yer hızı, ve
+# hesaplanan değerin bir parametre yazısına değmesi için gereken değişim.
 KAMIKAZE_MIN_VALID_SPEED: float = 5.0
-# 0.5 iken talep ölçüm gürültüsünü kovalıyordu: ölçülen açı yarım saniyede bir
-# ±3 derece oynadığı için talep 24 ile 31 m/s arasında gidip geliyor ve her
-# seferinde bir parametre yazısı üretiyordu. TECS'in zaman sabiti 3 s, yani bu
-# salınımı zaten alçak geçiriyor -- tek etkisi boşuna telsiz trafiği.
+# 0.5 iken talep ölçüm gürültüsünü kovalıyordu: açı yarım saniyede bir ±3 derece
+# oynadığı için talep 24-31 m/s arasında gidip her seferinde bir yazı üretiyordu.
+# TECS'in 3 s'lik zaman sabiti bu salınımı zaten geçirmiyor.
 KAMIKAZE_SINK_STEP: float = 2.0
-# TECS_SINK_MAX is a ceiling, not a demand: TECS lags it by its own time
-# constant and settles a few degrees shallow of whatever is asked for. So the
-# angle actually being flown is measured and the ceiling is asked for the
-# shortfall on top, which both pushes the nose over harder at the entry and
-# trims the settled dive onto DIVE_ANGLE.
+# TECS_SINK_MAX bir tavan, talep değil: TECS geriden gelip istenenin birkaç
+# derece sığında oturuyor, o yüzden uçulan açı ölçülüp eksik kalan kadar fazlası
+# isteniyor. En kötü duruma, yani en kısa dalışa göre boyutlandı: 50 m'lik irtifa
+# bütçesi ~2.5 s sürüyor, TECS_TIME_CONST'tan KISA, yani uçulan şey oturmuş açı
+# değil dönme geçici rejimi (ölçülen açının 45 yerine 38 çıkma sebebi).
 #
-# These are sized against the WORST case, which is the shortest dive: the dive
-# ends on altitude, not on distance, so the altitude budget
-# (APPROACH_ALT - MIN_ALT) decides how long it lasts. At the current 55 m budget
-# that is roughly 2.5 s -- LESS than TECS_TIME_CONST below, so the vehicle never
-# reaches its settled angle and what gets flown is the rotation transient. That
-# is what put the measured angle at 38 instead of 45. The trim therefore has to
-# be aggressive enough to win inside one time constant.
-#
-# The trim is clamped to [0, TRIM_MAX], i.e. it can only ever ask for MORE than
-# DIVE_ANGLE, never less: once the flown angle passes DIVE_ANGLE the term goes
-# to zero and the demand falls back to exactly DIVE_ANGLE. So overshooting the
-# gain costs a slightly abrupt entry, not a runaway.
-#
-# TRIM_MAX must stay equal to KAMIKAZE_DIVE_PITCH_MARGIN (asserted below): the
-# steepest flight path the trim may demand is DIVE_ANGLE + TRIM_MAX, and the
-# steepest the vehicle is allowed to fly is the pitch floor,
-# -(DIVE_ANGLE + DIVE_PITCH_MARGIN). Demanding past the floor only saturates
-# the elevator and winds TECS up against a limit it can never reach.
+# Trim [0, TRIM_MAX] ile kırpılı, yani yalnızca DIVE_ANGLE'dan FAZLASINI
+# isteyebilir; kazancı abartmak sert giriş demek, kaçak değil. TRIM_MAX,
+# DIVE_PITCH_MARGIN'e eşit kalmalı (aşağıda assert): trim'in isteyebileceği en dik
+# açı pitch tabanını geçerse TECS yalnızca doyuma girer.
 KAMIKAZE_DIVE_TRIM_MAX: float = 15.0
 KAMIKAZE_DIVE_TRIM_GAIN: float = 1.2
-# TECS_TIME_CONST is what sets how long the vehicle takes to settle onto a new
-# descent rate, and a dive only lasts a few seconds -- at the 5 s default most
-# of the dive is spent rotating into the angle rather than holding it. 3 is the
-# bottom of the documented range.
+# Yeni bir alçalma hızına oturma süresini TECS_TIME_CONST belirliyor, dalış ise
+# birkaç saniye sürüyor: 5 s'lik varsayılanda dalışın çoğu açıya dönmekle geçer.
+# 3, belgelenmiş aralığın tabanı.
 KAMIKAZE_TECS_TIME_CONST: float = 3.0
 CRUISE_TECS_TIME_CONST: float = 5.0
-# TECS_VERT_ACC, yükseklik/hız hatasını düzeltirken kullanılabilecek azami
-# düşey ivme. Varsayılan 7 m/s²; talep 5'ten 40'a sıçradığında burnun aşağı
-# dönmesi bu ivmeyle sınırlanıyor ve ölçümde dalışın ilk 1.4 saniyesi (toplam
-# sürenin %24'ü) alçalma hızı 1.5 m/s'nin altında geçti. 10, parametrenin
-# belgelenmiş üst sınırı. Kısa bir dalışta kazanılan her yarım saniye
-# doğrudan açıya gidiyor.
+# TECS_VERT_ACC: hata düzeltilirken kullanılabilecek azami düşey ivme.
+# Varsayılan 7 m/s²; talep 5'ten 40'a sıçradığında burnun dönüşü bununla
+# sınırlanıyor ve ölçümde dalışın ilk 1.4 saniyesi (%24) 1.5 m/s'nin altında
+# geçti. 10, belgelenmiş üst sınır; kısa dalışta her yarım saniye açıya gidiyor.
 KAMIKAZE_TECS_VERT_ACC: float = 10.0
 CRUISE_TECS_VERT_ACC: float = 7.0
-# Extra distance the dive starts ahead of the nose-on point. Rotating from
-# level to DIVE_ANGLE takes a second or two, and during it the vehicle is
-# shallower than the line to the QR point, so the QR sits below the nose. This
-# spends the rotation before the QR comes onto the nose instead of during it.
+# Dalışın, QR burna gelmeden bu kadar önce başlaması. Seviyeden DIVE_ANGLE'a
+# dönmek bir iki saniye sürüyor ve o sırada uçak QR hattının üstünde kalıyor;
+# bu pay dönmeyi QR burna gelmeden önce harcatıyor.
 KAMIKAZE_DIVE_ROTATION_LEAD: float = 40.0
-# Kamikaze video kaydı dalıştan bu kadar saniye ÖNCE başlar; kayıt uçak
-# kurtarma tırmanışına geçtiği anda kapanır. Zaman değil mesafe üzerinden
-# tetikleniyor: dalış tetiği "hedefe kalan mesafe" ile veriliyor, o yüzden
-# tetik mesafesi bir saniyelik yol (yer hızı x bu değer) kadar dışarı alınıyor.
-# Böylece kayıt, dalış başlamadan önceki düz uçuşu da içeriyor -- hem hakem
-# incelemesi için başlangıç anını belgeliyor, hem de burnun aşağı dönüşünü
-# baştan yakaladığı için dalış davranışını çözümlemeye yarıyor.
+# Kamikaze video kaydı dalıştan bu kadar saniye ÖNCE başlar, kurtarmaya geçilince
+# kapanır. Dalış tetiği mesafeyle verildiği için tetik mesafesi bir saniyelik yol
+# (yer hızı x bu değer) kadar dışarı alınıyor. Böylece kayıt dalış öncesi düz
+# uçuşu da içerir: hem başlangıç anını belgeler hem burnun dönüşünü baştan yakalar.
 KAMIKAZE_VIDEO_LEAD_TIME: float = 1.0
-# Pitch floor headroom (deg) below the dive angle. Pinning the floor at exactly
-# DIVE_ANGLE leaves nothing for establishing the dive: the nose has to go past
-# the flight path angle for a moment to get there, and without that margin the
-# vehicle only ever creeps up on the angle.
+# Pitch tabanının dalış açısının ne kadar altında olacağı. Taban tam DIVE_ANGLE'a
+# sabitlenirse dalışa girmek için gereken pay kalmaz -- burnun bir an yol açısını
+# geçmesi gerekiyor.
 KAMIKAZE_DIVE_PITCH_MARGIN: float = 15.0
 # Trim, uçağın uçmasına izin verilenden daha dik bir yol açısı isteyemez.
 assert KAMIKAZE_DIVE_TRIM_MAX <= KAMIKAZE_DIVE_PITCH_MARGIN, \
     "Dalış trim'i pitch tabanının izin verdiğinden dik açı istiyor (TECS doyuma girer)"
-# Loiter radius sent with the guided target. It has to stay well below
-# KAMIKAZE_DIVE_START_DISTANCE, otherwise the vehicle starts turning onto its
-# loiter circle around the target before the dive triggers and enters it while
-# banked away.
+# Guided hedefiyle gönderilen loiter yarıçapı. KAMIKAZE_DIVE_START_DISTANCE'in
+# belirgin altında kalmalı, yoksa uçak dalış tetiklenmeden hedef çevresindeki
+# loiter çemberine dönmeye başlar ve dalışa yatık girer.
 KAMIKAZE_LOITER_RADIUS: float = 50.0
-# How often the guided destination is repeated during the run-in, purely so a
-# dropped command still gets through. It must never be used while diving: every
-# DO_REPOSITION makes ArduPlane rebuild its glide slope from the vehicle's
-# current position, which snaps the altitude demand back up to where the
-# vehicle already is. Repeating it mid-dive turns a steady descent demand into
-# a sawtooth and the vehicle porpoises down instead of tracking the slope.
+# Hizalanma sırasında guided hedefinin tekrar gönderilme sıklığı; sadece düşen
+# komut için. Dalış sırasında ASLA kullanılmamalı: her DO_REPOSITION ArduPlane'e
+# glide slope'u uçağın o anki konumundan yeniden kurduruyor, yani irtifa talebi
+# uçağın bulunduğu yere geri sıçrıyor ve düzgün alçalma testereye dönüyor.
 KAMIKAZE_TARGET_REFRESH: int = 2000
-# The recovery climb is flown towards a point this far ahead of the vehicle so
-# it pulls up wings level instead of turning back towards the target. Same
-# reasoning as KAMIKAZE_AIM_OVERSHOOT: far enough that L1 never starts the
-# circle capture.
+# Kurtarma tırmanışının hedefi uçağın bu kadar ilerisine konur ki hedefe geri
+# dönmek yerine kanatlar düz çeksin. Gerekçesi KAMIKAZE_AIM_OVERSHOOT ile aynı.
 KAMIKAZE_RECOVER_LEAD: float = 500.0
-# Never ask the vehicle to fly to a target below this (relative) altitude.
+# Araca bu (göreli) irtifanın altında bir hedef asla verilmez.
 KAMIKAZE_MIN_AIM_ALT: float = 5.0
-# Warn the operator if the dive starts this far off the target bearing: the
-# camera needs the nose pointed at the QR code.
+# Dalış hedef kerterizinden bu kadar sapmayla başlıyorsa operatörü uyar: kameranın
+# QR'a bakması için burnun hedefe dönük olması gerekiyor.
 KAMIKAZE_MAX_DIVE_HEADING_ERROR: float = 45.0
-# Hard ceiling (s) on a whole run, button press to release. The run-in has no
-# natural end of its own -- if the vehicle is too low to dive it recomputes the
-# destination and goes around, forever. While the run owns the vehicle the HSS
-# layer is frozen (no fence uploads, no replanning), so an unbounded run means
-# an unbounded blind spot. On expiry the run is cancelled and the vehicle is put
-# back into its baseline state.
+# Bir koşunun tavan süresi (s), düğmeden bırakmaya. Hizalanmanın kendiliğinden
+# biteceği yok -- irtifa yetmezse sonsuza kadar tur atar -- ve koşu sürerken HSS
+# katmanı donuk, yani sınırsız koşu sınırsız kör nokta demek. Süre dolunca koşu
+# iptal edilip araç baseline'a döndürülür.
 KAMIKAZE_MAX_RUN_TIME: float = 120.0
-# Candidate heading offsets (deg) and lead-distance fractions tried, in order,
-# when the straight-ahead recovery lead point falls inside an HSS zone.
+# Düz ileri kurtarma noktası HSS bölgesine düştüğünde sırayla denenen kerteriz
+# sapmaları (derece) ve mesafe oranları.
 KAMIKAZE_RECOVER_HEADING_OFFSETS: tuple = (0.0, 25.0, -25.0, 50.0, -50.0)
 KAMIKAZE_RECOVER_LEAD_FRACTIONS: tuple = (1.0, 0.6, 0.35)
 
 # --- BASELINE: aracın "normal" durumunun tek tanımı ------------------------
-# Kamikaze veya reposition ne açtıysa buradan kapanır. Bir manevranın dokunduğu
-# HER parametre burada olmak zorunda; olmayan bir parametre, manevra bittikten
-# sonra araçta manevra değeriyle kalır.
+# Bir manevranın dokunduğu HER parametre burada olmak zorunda; olmayan, manevra
+# bittikten sonra araçta manevra değeriyle kalır.
 #
-# (kanonik_isim, [(mavlink_param, değer), ...]) — ikinci listedeki isimler
-# birbirinin alias'ı; ArduPlane 4.1+ eski centidegree isimlerini yeniden
-# adlandırdığı için ikisi de yazılıyor ve HERHANGİ BİRİNDEN gelen PARAM_VALUE
-# teyit sayılıyor (firmware'de olmayan alias asla cevap vermez).
+# (kanonik_isim, [(mavlink_param, değer), ...]) — ikinci listedekiler birbirinin
+# alias'ı (ArduPlane 4.1+ eski centidegree isimlerini değiştirdi), ikisi de
+# yazılıyor ve HERHANGİ BİRİNDEN gelen PARAM_VALUE teyit sayılıyor.
 BASELINE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('THR_MAX',          [(b'THR_MAX', CRUISE_THR_MAX)]),
     ('ROLL_LIMIT_DEG',   [(b'ROLL_LIMIT_DEG', CRUISE_ROLL_LIMIT),
                           (b'LIM_ROLL_CD', CRUISE_ROLL_LIMIT * 100.0)]),
     ('PTCH_LIM_MIN_DEG', [(b'PTCH_LIM_MIN_DEG', CRUISE_PITCH_MIN),
                           (b'LIM_PITCH_MIN', CRUISE_PITCH_MIN * 100.0)]),
-    # 0 hands the pitch floor back to LIM_PITCH_MIN.
+    # 0, pitch tabanını LIM_PITCH_MIN'e geri bırakır.
     ('TECS_PITCH_MIN',   [(b'TECS_PITCH_MIN', 0.0)]),
     ('TECS_SINK_MAX',    [(b'TECS_SINK_MAX', CRUISE_TECS_SINK_MAX)]),
     ('TECS_CLMB_MAX',    [(b'TECS_CLMB_MAX', CRUISE_TECS_CLMB_MAX)]),
-    # ArduPlane 4.4 renamed the airspeed limits: ARSPD_FBW_MIN/MAX became
-    # AIRSPEED_MIN/MAX (same units, m/s), in the same rename as
-    # TRIM_ARSPD_CM -> AIRSPEED_CRUISE. Writing only the old name on 4.4+ fails
-    # silently, which is exactly what pinned the dive: the kamikaze run raises
-    # this limit so the dive can build speed, and with the write lost TECS held
-    # the nose up at the cruise limit and the dive stalled out at ~35 degrees.
+    # ArduPlane 4.4 ARSPD_FBW_MIN/MAX'i AIRSPEED_MIN/MAX yaptı; 4.4+ üzerinde
+    # yalnızca eski ismi yazmak sessizce başarısız oluyor ve dalış ~35 derecede
+    # kalıyordu.
     ('ARSPD_FBW_MAX',    [(b'AIRSPEED_MAX', CRUISE_ARSPD_FBW_MAX),
                           (b'ARSPD_FBW_MAX', CRUISE_ARSPD_FBW_MAX)]),
     ('TECS_SPDWEIGHT',   [(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)]),
     ('TECS_TIME_CONST',  [(b'TECS_TIME_CONST', CRUISE_TECS_TIME_CONST)]),
     ('TECS_VERT_ACC',    [(b'TECS_VERT_ACC', CRUISE_TECS_VERT_ACC)]),
-    # Newer ArduPlane renamed GLIDE_SLOPE_MIN to ALT_SLOPE_MIN (and
-    # GLIDE_SLOPE_THR to ALT_SLOPE_MAXHGT). Same meaning, same units, same
-    # default of 15 m. Confirmed against the vehicle's own parameter list.
+    # Yeni ArduPlane GLIDE_SLOPE_MIN'i ALT_SLOPE_MIN yaptı; aynı anlam, aynı birim.
     ('ALT_SLOPE_MIN',    [(b'ALT_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN),
                           (b'GLIDE_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN)]),
-    # ArduPlane 4.4+ renamed TRIM_ARSPD_CM (cm/s) to AIRSPEED_CRUISE (m/s).
-
+    # ArduPlane 4.4+ TRIM_ARSPD_CM'i (cm/s) AIRSPEED_CRUISE (m/s) yaptı.
     ('AIRSPEED_CRUISE',  [(b'AIRSPEED_CRUISE', CRUISE_AIRSPEED_MS),
                           (b'TRIM_ARSPD_CM', CRUISE_AIRSPEED_MS * 100.0)]),
     ('NAVL1_PERIOD',     [(b'NAVL1_PERIOD', CRUISE_NAVL1_PERIOD)]),
@@ -429,22 +286,17 @@ BASELINE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
 
 
 # --- Kamikaze fazlarının parametreleri -------------------------------------
-# Koşunun üç fazı, BASELINE_PARAMS ile aynı biçimde. Buradaki HER kanonik isim
-# BASELINE_PARAMS'ta da bulunmak zorunda, yoksa koşu bittiğinde o parametre
-# manevra değeriyle araçta kalır; bunu aşağıdaki assert kontrol ediyor.
-#
-# Dalış sırasında TECS_SINK_MAX ayrıca ve sürekli yazılıyor
-# (MainWindow.__update_dive_sink_rate) -- o bir denetim döngüsü, faz ön ayarı
-# değil, o yüzden bu tablolarda yok.
+# Buradaki HER kanonik isim BASELINE_PARAMS'ta da bulunmak zorunda (aşağıdaki
+# assert kontrol ediyor). Dalış sırasında TECS_SINK_MAX ayrıca ve sürekli
+# yazılıyor (MainWindow.__update_dive_sink_rate) -- o bir denetim döngüsü, faz
+# ön ayarı değil, o yüzden bu tablolarda yok.
 
-# Burun tabanı: uçağın dalışa girebilmesi için yol açısını bir an geçmesi
-# gerekiyor, o yüzden taban dalış açısının DIVE_PITCH_MARGIN kadar altında.
+# Burun tabanı: dalışa girmek için yol açısını bir an geçmek gerekiyor.
 KAMIKAZE_DIVE_PITCH_FLOOR: float = -(KAMIKAZE_DIVE_ANGLE + KAMIKAZE_DIVE_PITCH_MARGIN)
 
-# Hedefe hizalanma fazı. Eski (centidegree: LIM_*) ve yeni (degree: *_DEG)
-# ArduPlane isimleri birlikte yazılıyor; 4.1+ bunları yeniden adlandırdı.
+# Hedefe hizalanma fazı.
 KAMIKAZE_APPROACH_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
-    # Hâlâ süren bir reposition ya da önceki faz THR_MAX'ı başka yerde bırakmış
+    # Süren bir reposition ya da önceki faz THR_MAX'ı başka yerde bırakmış
     # olabilir, o yüzden açıkça yazılıyor.
     ('THR_MAX',          [(b'THR_MAX', KAMIKAZE_APPROACH_THR_MAX)]),
     ('PTCH_LIM_MIN_DEG', [(b'PTCH_LIM_MIN_DEG', KAMIKAZE_DIVE_PITCH_FLOOR),
@@ -456,17 +308,16 @@ KAMIKAZE_APPROACH_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('ROLL_LIMIT_DEG',   [(b'ROLL_LIMIT_DEG', KAMIKAZE_APPROACH_ROLL_LIMIT),
                           (b'LIM_ROLL_CD', KAMIKAZE_APPROACH_ROLL_LIMIT * 100.0)]),
     ('TECS_CLMB_MAX',    [(b'TECS_CLMB_MAX', KAMIKAZE_TECS_CLMB_MAX)]),
-    # Bu yazı düştüğünde TECS hızı seyir limitinde tutuyor ve dalış hiç
-    # gelişmiyor -- isim değişikliği bulunana kadar sessizce olan buydu.
+    # Bu yazı düştüğünde TECS hızı seyir limitinde tutuyor ve dalış hiç gelişmiyor.
     ('ARSPD_FBW_MAX',    [(b'AIRSPEED_MAX', KAMIKAZE_ARSPD_FBW_MAX),
                           (b'ARSPD_FBW_MAX', KAMIKAZE_ARSPD_FBW_MAX)]),
     ('ALT_SLOPE_MIN',    [(b'ALT_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN),
                           (b'GLIDE_SLOPE_MIN', KAMIKAZE_GLIDE_SLOPE_MIN)]),
 ]
 
-# Dalış. Motor kapalı, kanatlar sabitlenmiş ve pitch tamamen irtifa talebine
-# bırakılmış: SPDWEIGHT 0 olmazsa TECS alçalma talebiyle hava hızını
-# birbirine karşı oynatıp dalışı salındırıyor.
+# Dalış. Motor kapalı, kanatlar sabitlenmiş, pitch tamamen irtifa talebinde:
+# SPDWEIGHT 0 olmazsa TECS alçalma talebiyle hava hızını birbirine karşı oynatıp
+# dalışı salındırıyor.
 KAMIKAZE_DIVE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('THR_MAX',          [(b'THR_MAX', KAMIKAZE_DIVE_THR_MAX)]),
     ('TECS_SPDWEIGHT',   [(b'TECS_SPDWEIGHT', KAMIKAZE_TECS_SPDWEIGHT)]),
@@ -476,42 +327,24 @@ KAMIKAZE_DIVE_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
                           (b'LIM_ROLL_CD', KAMIKAZE_DIVE_ROLL_LIMIT * 100.0)]),
 ]
 
-# Kurtarma tırmanışı. Pitch tabanı seviyeye çekiliyor: dalışın -60'ı burada
-# kalırsa TECS burnu aşağıda tutup gereksiz irtifa yiyor ve MIN_ALT tutmuyor.
-# Yatış yetkisi kısmen geri veriliyor -- bkz. KAMIKAZE_RECOVER_ROLL_LIMIT.
-#
-# Bu tablo eskiden yalnızca gaz, SPDWEIGHT, pitch tabanı ve yatışa dokunuyordu.
-# Dalışın ve yaklaşmanın açtığı TECS zarfı ise olduğu gibi kalıyordu, yani
-# tırmanış dalışın agresif ayarlarıyla uçuluyordu: ALT_SLOPE_MIN=0 ("hedef
-# irtifayı mesafeye yayma, HEMEN iste"), TECS_CLMB_MAX=15, TECS_VERT_ACC=10,
-# TECS_TIME_CONST=3. Dördü birlikte "APPROACH_ALT'a olabildiğince sert çek"
-# demek ve bunu uçağın tüm uçuştaki en yavaş anında, motorsuz bir dalıştan
-# hemen sonra istiyordu. Üstüne pitch tabanı 0 olduğu için uçak hız kaybını
-# burnunu indirerek telafi de edemiyordu. 2026-08-21 uçuşunda dalıştan
-# çıkarken 40-50 m'de sola yatıp takla atmasının en olası açıklaması bu.
-#
-# Artık kurtarma seyir TECS'iyle uçuluyor. Özellikle ALT_SLOPE_MIN'in geri
-# verilmesi belirleyici: irtifa farkı hedefe olan mesafeye yayıldığı için
-# tırmanış bir basamak talebi değil, yumuşak bir rampa oluyor. Kurtarma hedef
-# irtifasına bu yüzden dokunulmadı -- eğim geri açıkken hedefi düşürmeye gerek
-# yok, düşürmek ayrıca koşunun çıkış şartıyla (RECOVER_ALT) çakışırdı.
-#
-# Buradaki her kanonik isim BASELINE_PARAMS'ta da var, yani koşu bitince
-# hepsi kapanıyor; dosyanın sonundaki assert bunu garanti ediyor.
+# Kurtarma tırmanışı, seyir TECS'iyle uçuluyor. Dalışın açtığı zarf
+# (ALT_SLOPE_MIN=0, CLMB_MAX=15, VERT_ACC=10, TIME_CONST=3) burada bırakılırsa
+# "APPROACH_ALT'a olabildiğince sert çek" demek oluyor ve bu uçağın en yavaş
+# anında, motorsuz bir dalıştan hemen sonra isteniyor; 2026-08-21 uçuşunda
+# çıkışta 40-50 m'de sola yatıp takla atmasının en olası açıklaması bu.
+# Özellikle ALT_SLOPE_MIN'in geri verilmesi belirleyici: irtifa farkı mesafeye
+# yayıldığı için tırmanış basamak değil yumuşak rampa oluyor.
 KAMIKAZE_RECOVER_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
     ('THR_MAX',          [(b'THR_MAX', KAMIKAZE_RECOVER_THR_MAX)]),
     ('TECS_SPDWEIGHT',   [(b'TECS_SPDWEIGHT', CRUISE_TECS_SPDWEIGHT)]),
-    # Tırmanışı şekillendiren dört ayar. Dalış/yaklaşma değerlerinde
-    # bırakılmaları koşunun en sert komutlarını en kritik faza taşıyordu.
+    # Tırmanışı şekillendiren dört ayar.
     ('ALT_SLOPE_MIN',    [(b'ALT_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN),
                           (b'GLIDE_SLOPE_MIN', CRUISE_GLIDE_SLOPE_MIN)]),
     ('TECS_CLMB_MAX',    [(b'TECS_CLMB_MAX', CRUISE_TECS_CLMB_MAX)]),
     ('TECS_VERT_ACC',    [(b'TECS_VERT_ACC', CRUISE_TECS_VERT_ACC)]),
     ('TECS_TIME_CONST',  [(b'TECS_TIME_CONST', CRUISE_TECS_TIME_CONST)]),
-    # Dalış boyunca MainWindow.__update_dive_sink_rate bunu 30-40'a kadar
-    # yazıyor. Tavan olduğu için tırmanışı doğrudan etkilemez, ama açık
-    # bırakmak TECS'e kurtarma sırasında hiç ihtiyaç duymadığı bir alçalma
-    # serbestliği tanıyor; seyir değeri zarfı tamamen kapatıyor.
+    # Dalışta __update_dive_sink_rate bunu 30-40'a kadar yazıyor; açık bırakmak
+    # TECS'e kurtarmada gereksiz bir alçalma serbestliği tanır.
     ('TECS_SINK_MAX',    [(b'TECS_SINK_MAX', CRUISE_TECS_SINK_MAX)]),
     ('PTCH_LIM_MIN_DEG', [(b'PTCH_LIM_MIN_DEG', KAMIKAZE_RECOVER_PITCH_MIN),
                           (b'LIM_PITCH_MIN', KAMIKAZE_RECOVER_PITCH_MIN * 100.0)]),
@@ -520,8 +353,7 @@ KAMIKAZE_RECOVER_PARAMS: list[tuple[str, list[tuple[bytes, float]]]] = [
                           (b'LIM_ROLL_CD', KAMIKAZE_RECOVER_ROLL_LIMIT * 100.0)]),
 ]
 
-# Bir manevranın açtığı her parametrenin baseline'da bir karşılığı olmak
-# zorunda; olmayan, koşu bittiğinde araçta manevra değeriyle kalır.
+# Bir manevranın açtığı her parametrenin baseline'da karşılığı olmak zorunda.
 _BASELINE_KEYS = {k for k, _ in BASELINE_PARAMS}
 for _table, _name in ((KAMIKAZE_APPROACH_PARAMS, 'APPROACH'),
                       (KAMIKAZE_DIVE_PARAMS, 'DIVE'),
