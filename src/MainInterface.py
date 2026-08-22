@@ -1415,80 +1415,46 @@ class MainWindow(QMainWindow):
 
             qDebug("Sending fence with position %s" % coords[index - ads_list_len])
 
-            if use_item_int:
-                self.mavlink_connection.mav.mission_item_int_send(
-                    self.mavlink_connection.target_system,
-                    self.mavlink_connection.target_component,
-                    index,
-                    MAV_FRAME_GLOBAL_INT,
-                    MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
-                    0,
-                    0,
-                    4,
-                    0,
-                    0,
-                    0,
-                    int(coords[index - ads_list_len].latitude() * 1e7),
-                    int(coords[index - ads_list_len].longitude() * 1e7),
-                    0,
-                    MAV_MISSION_TYPE_FENCE
-                )
-            else:
-                self.mavlink_connection.mav.mission_item_send(
-                    self.mavlink_connection.target_system,
-                    self.mavlink_connection.target_component,
-                    index,
-                    MAV_FRAME_GLOBAL,
-                    MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
-                    0,
-                    0,
-                    4,
-                    0,
-                    0,
-                    0,
-                    coords[index - ads_list_len].latitude(),
-                    coords[index - ads_list_len].longitude(),
-                    0,
-                    MAV_MISSION_TYPE_FENCE
-                )
+            # Modern firmware (ArduPlane v4.5+) float formatını yanlış yorumladığı için,
+            # gelen istek eski tip olsa bile her zaman INT formatında gönderiyoruz.
+            self.mavlink_connection.mav.mission_item_int_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                index,
+                MAV_FRAME_GLOBAL_INT,
+                MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                0,
+                0,
+                4,
+                0,
+                0,
+                0,
+                int(coords[index - ads_list_len].latitude() * 1e7),
+                int(coords[index - ads_list_len].longitude() * 1e7),
+                0,
+                MAV_MISSION_TYPE_FENCE
+            )
         else:
             qDebug("Sending ads with position %s" % self.ads_list_cache[index].position)
-            if use_item_int:
-                self.mavlink_connection.mav.mission_item_int_send(
-                    self.mavlink_connection.target_system,
-                    self.mavlink_connection.target_component,
-                    index,
-                    MAV_FRAME_GLOBAL_INT,
-                    MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION,
-                    0,
-                    0,
-                    self.ads_list_cache[index].size,
-                    0,
-                    0,
-                    0,
-                    int(self.ads_list_cache[index].position.latitude() * 1e7),
-                    int(self.ads_list_cache[index].position.longitude() * 1e7),
-                    0,
-                    MAV_MISSION_TYPE_FENCE
-                )
-            else:
-                self.mavlink_connection.mav.mission_item_send(
-                    self.mavlink_connection.target_system,
-                    self.mavlink_connection.target_component,
-                    index,
-                    MAV_FRAME_GLOBAL,
-                    MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION,
-                    0,
-                    0,
-                    self.ads_list_cache[index].size,
-                    0,
-                    0,
-                    0,
-                    self.ads_list_cache[index].position.latitude(),
-                    self.ads_list_cache[index].position.longitude(),
-                    0,
-                    MAV_MISSION_TYPE_FENCE
-                )
+            # Dairesel dışlama bölgeleri (HSS) için de aynı şekilde
+            # sadece INT (1e7 ölçeklendirilmiş) formatı kullanılıyor.
+            self.mavlink_connection.mav.mission_item_int_send(
+                self.mavlink_connection.target_system,
+                self.mavlink_connection.target_component,
+                index,
+                MAV_FRAME_GLOBAL_INT,
+                MAV_CMD_NAV_FENCE_CIRCLE_EXCLUSION,
+                0,
+                0,
+                self.ads_list_cache[index].size,
+                0,
+                0,
+                0,
+                int(self.ads_list_cache[index].position.latitude() * 1e7),
+                int(self.ads_list_cache[index].position.longitude() * 1e7),
+                0,
+                MAV_MISSION_TYPE_FENCE
+            )
         self.fence_upload_timout.start()
         size: int = ads_list_len + 4 if self.requested_to_send_fence_with_fence else ads_list_len
         if size == index + 1:
