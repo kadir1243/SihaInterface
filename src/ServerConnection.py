@@ -87,8 +87,13 @@ class TelemetryResponseUavData:
 
 class TelemetryResponseData:
     konumBilgileri: list[TelemetryResponseUavData]
+    # Sunucu saati (gun/saat/dakika/saniye/milisaniye) telemetri cevabından
+    # geliyor; değerlendirme videosuna yazılacak "sunucu saati" bunun üstünden
+    # hesaplanıyor (bkz. MainWindow._update_server_time_offset). Sunucu yoksa None.
+    sunucusaati: dict | None
     def __init__(self):
         self.konumBilgileri = []
+        self.sunucusaati = None
 
 SERVER_IS_UNREACHABLE_COUNTER: int = 0 # When this hits 100, disconnect from server
 
@@ -143,8 +148,8 @@ def send_telemetry(target_address: str, telemetry_data: TelemetryData) -> Teleme
             data.zaman_farki = int(s["zaman_farki"])
             uav_s.append(data)
         d.konumBilgileri = uav_s
+        d.sunucusaati = jdata.get("sunucusaati")
         qDebug("Received telemetry response %s" % r.json())
-        # FIXME: I don't need any other data for now, i will add it when i needed
         return d
     except RequestException:
         global SERVER_IS_UNREACHABLE_COUNTER

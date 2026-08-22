@@ -18,10 +18,26 @@ class KamikazeState(Enum):
 
 class TrackableDataPacketTimer(Enum):
     # (msg id, msg name, type, update interval (microsecond), watch value ids that uses this packet)
+    #
+    # Hızlar telemetri linkinin taşıyabileceğine göre seçildi: 57600'lük SiK
+    # linkinde bant ~2-4 kB/s, hepsini 10 Hz istemek linki dolduruyor ve araç
+    # cevapları 3 saniye geciktiriyordu.
+    #
+    # ÖNEMLİ: ArduPilot SET_MESSAGE_INTERVAL'ı mesajın değil, ait olduğu
+    # STREAM'in hızı olarak uyguluyor; aynı stream'e farklı hız yazmak sessizce
+    # sonuncuyu kazandırır. Bu yüzden gruplar kendi içinde aynı hızda:
+    #   EXTRA1 -> ATTITUDE, EXTRA2 -> VFR_HUD, POSITION -> GLOBAL_POSITION_INT,
+    #   EXTENDED_STATUS -> GPS_RAW_INT, SYSTEM_TIME, FENCE_STATUS,
+    #                      BATTERY_STATUS, MISSION_CURRENT
+    # EXTENDED_STATUS kalabalık bir stream, 2 Hz'in üstü pahalı. Sunucuya
+    # gönderim 700 ms'de bir olduğu için 2 Hz bile taze veri; 4 Hz'ler arayüz ve
+    # kamikaze dalış döngüsü için.
     BATTERY_STATUS = (147, "BATTERY_STATUS", MAVLink_battery_status_message, 500000, [10])
     ATTITUDE = (30, "ATTITUDE", MAVLink_attitude_message, 250000, [3, 4, 5])
     GPS_RAW_INT = (24, "GPS_RAW_INT", MAVLink_gps_raw_int_message, 500000, [1, 8, 9])
     VFR_HUD = (74, "VFR_HUD", MAVLink_vfr_hud_message, 250000, [0, 6])
+    # ArduPilot heartbeat'i zaten 1 Hz yayınlıyor; daha hızlısını istemek işe
+    # yaramıyor, sadece komut kuyruğunda yer kaplıyordu.
     HEARTBEAT = (0, "HEARTBEAT", MAVLink_heartbeat_message, 1000000, [11, 14])
     GLOBAL_POSITION_INT = (33, "GLOBAL_POSITION_INT", MAVLink_global_position_int_message, 250000, [2, 12])
     SYSTEM_TIME = (2, "SYSTEM_TIME", MAVLink_system_time_message, 500000, [7])

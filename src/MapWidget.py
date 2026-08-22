@@ -197,19 +197,15 @@ class MouseInputHandler(QObject):
         cfg = self.get_input_config()
         for e in cfg.keys():
             v = cfg[e]
-            # qDebug("Checking %s Inputs for match: %s %s %s" % (e, v.mouse_input.value, v.key_input.value, v.mod.value))
             if (mouse_input & v.mouse_input.value) != 0 and mod == v.mod.value:
                 self.input2Action[e](coord, mouseX, mouseY)
             elif (not e.value[4]) and (key_input & v.key_input.value) != 0 and mod == v.mod.value:
                 self.input2Action[e](coord, mouseX, mouseY)
             else:
-                # qDebug("Can not match with any input key currently: %s" % e)
                 pass
 
     def _set_param(self, name: bytes, value: float):
-        # Kamikaze koşusu sürerken araç onun; reposition'ın parametre yazması
-        # (veya reposition komutu göndermesi) koşuyla çakışır. MainWindow bu
-        # bayrağı koşu boyunca açık tutuyor.
+        # Kamikaze koşusu sürerken araç onun; reposition'ın yazması çakışır.
         if self.parent.vehicle_locked:
             qWarning("Kamikaze koşusu sürüyor, harita parametre yazısı engellendi: %s" % name)
             return
@@ -225,8 +221,7 @@ class MouseInputHandler(QObject):
         self._set_param(b'THR_MAX', value)
 
     def _set_roll_limit(self, degrees: float):
-        # Set both the new (degree) and old (centidegree) ArduPlane parameter
-        # names so this works regardless of firmware version.
+        # Yeni (derece) ve eski (centidegree) isim birlikte: firmware bağımsız.
         self._set_param(b'ROLL_LIMIT_DEG', degrees)
         self._set_param(b'LIM_ROLL_CD', degrees * 100.0)
 
@@ -420,20 +415,17 @@ class MouseInputHandler(QObject):
 
 ZERO_GEO_COORDS: QGeoCoordinate = QGeoCoordinate()
 
-# Throttle ceiling (%) outside takeoff and kamikaze. The airframe has ~1.7
-# thrust-to-weight, so full power is only needed during the takeoff climb;
-# TKOFF_THR_MAX stays at 100 and covers that phase on its own.
+# Kalkış ve kamikaze dışındaki gaz tavanı (%). Gövdenin itki/ağırlık oranı ~1.7,
+# tam güç yalnızca kalkış tırmanışında gerekiyor (TKOFF_THR_MAX 100'de kalıyor).
 CRUISE_THR_MAX: float = 60.0
 
-# Baseline bank limit (deg). This is the SAME number the HSS route planner sizes
-# its turn radius and avoidance buffers from (RoutePreplanner.MAX_BANK_DEG), so
-# the plan and the vehicle can never disagree about how tightly it can turn.
-# Anything that raises the limit for a manoeuvre must put THIS value back, not a
-# literal -- see MainWindow.apply_baseline_params.
+# Baseline yatış limiti (derece). HSS rota planlayıcısının dönüş yarıçapını ve
+# tamponlarını boyutladığı sayının TA KENDİSİ, yani plan ile araç dönüş
+# keskinliği konusunda asla ayrışamıyor. Limiti açan her manevra literal değil
+# BU değeri geri yazmalı (bkz. MainWindow.apply_baseline_params).
 CRUISE_ROLL_LIMIT: float = MAX_BANK_DEG
-# Repositioning is a hand-flown "go there now" order, so it gets more bank
-# authority than the planned route does. Released back to CRUISE_ROLL_LIMIT when
-# the reposition target is removed or times out.
+# Reposition elle verilen "hemen oraya git" emri, planlı rotadan daha çok yatış
+# yetkisi alıyor; hedef silinince veya zaman aşımında geri bırakılıyor.
 REPOSITION_ROLL_LIMIT: float = 55.0
 
 class GeofenceData(QObject):
@@ -528,9 +520,8 @@ class MapWidget(QQuickWidget):
     reposition_speed: float = DEFAULT_SPEED
     reposition_timer: QTimer
     input_config_reference: Callable[[], dict[KeybindingsEnum, InputMapping]]
-    # MainWindow tarafından kamikaze koşusu boyunca True tutulur: araç o sırada
-    # kamikaze'nin, harita üzerinden parametre yazılamaz ve reposition
-    # gönderilemez. Bkz. MainWindow.apply_baseline_params / __start_kamikaze.
+    # Kamikaze koşusu boyunca MainWindow tarafından True tutulur: harita
+    # üzerinden parametre yazılamaz ve reposition gönderilemez.
     vehicle_locked: bool = False
 
     def __init__(self, parent: QWidget | None = None):
@@ -591,10 +582,9 @@ class MapWidget(QQuickWidget):
         self.plane_data_model.layoutChanged.emit()
 
     def update_server_ads_data(self, ads_list: list[ServerAdsData], notify: bool = True):
-        # notify=False: caller uploads the fence itself. The HSS path does that,
-        # because the radii stored here are the RAW zone radii for display and
-        # uploading them as-is would put an unbuffered fence on the vehicle.
-        # See MainWindow._build_fence_ads_list.
+        # notify=False: çiti çağıran yüklüyor. HSS yolu böyle yapıyor, çünkü
+        # burada tutulan yarıçaplar gösterim için HAM değerler; olduğu gibi
+        # yüklemek araca tamponsuz bir çit koyar (bkz. _build_fence_ads_list).
         self.server_ads_data_model.m_datas.clear()
         for ads in ads_list:
             data: AdsData = AdsData()
