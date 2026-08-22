@@ -44,6 +44,20 @@ PLANNER_ZONE_MARGIN_M = 500.0
 
 
 # ---------------------------------------------------------------------------
+# Mekansal Olmayan Komutlar — (0,0) koordinatı doğal/geçerli olan MAV_CMD'ler
+# ---------------------------------------------------------------------------
+# Bu komutlarda enlem/boylam ya kullanılmaz ya da (0,0) özel bir anlam taşır.
+# Outlier filtreleri bu komutları (0,0) diye silmemeli.
+_NON_SPATIAL_COMMANDS: frozenset[int] = frozenset({
+    22,   # MAV_CMD_NAV_TAKEOFF      — kalkış; sadece irtifa kullanır, konum yok
+    20,   # MAV_CMD_NAV_RETURN_TO_LAUNCH — RTL; konum parametresi yok
+    177,  # MAV_CMD_DO_JUMP           — görev atlama; konum parametresi yok
+    178,  # MAV_CMD_DO_CHANGE_SPEED   — hız değiştir; konum parametresi yok
+    206,  # MAV_CMD_DO_SET_CAM_TRIGG_DIST — kamera tetikleme; konum yok
+    201,  # MAV_CMD_DO_SET_ROI        — (0,0) = ROI sıfırla anlamı taşır
+})
+
+# ---------------------------------------------------------------------------
 # Veri Yapıları
 # ---------------------------------------------------------------------------
 
@@ -466,6 +480,8 @@ def compute_safe_route(
         commands = [16] * len(waypoints)
 
     # Outlier filtreleme: (0,0) Null Island ve Home (ilk WP) noktasından >50km uzak noktaları çıkar
+    # NOT: Mekansal olmayan komutlar (_NON_SPATIAL_COMMANDS) bu filtreden muaftır —
+    #      TAKEOFF gibi komutlarda (0,0) normal bir değerdir, GPS hatası değil.
     OUTLIER_THRESHOLD_M = 50_000.0  # 50 km
     filtered_wps = []
     filtered_cmds = []
@@ -479,12 +495,14 @@ def compute_safe_route(
             
     if home_coord is not None:
         for wp, cmd in zip(waypoints, commands):
-            # Null Island (0,0) filtresi
-            if abs(wp.latitude()) < 1e-6 and abs(wp.longitude()) < 1e-6:
-                continue
-            # Home noktasından 50 km filtresi
-            if wp.distanceTo(home_coord) > OUTLIER_THRESHOLD_M:
-                continue
+            # Mekansal olmayan komutları asla filtreleme — (0,0) bu komutlar için doğaldır
+            if cmd not in _NON_SPATIAL_COMMANDS:
+                # Null Island (0,0) filtresi — sadece mekansal komutlar için geçerli
+                if abs(wp.latitude()) < 1e-6 and abs(wp.longitude()) < 1e-6:
+                    continue
+                # Home noktasından 50 km filtresi
+                if wp.distanceTo(home_coord) > OUTLIER_THRESHOLD_M:
+                    continue
                 
             filtered_wps.append(wp)
             filtered_cmds.append(cmd)

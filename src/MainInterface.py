@@ -52,7 +52,7 @@ from src.KeybindingConfigInterface import KeybindingConfigInterface
 from src.input_types import InputMapping, KeybindingsEnum
 from src.HSSPollingWorker import HSSPollingWorker
 from src.RoutePreplanner import compute_safe_route, fence_radius_for_hss, point_hits_zone, segment_hits_zone, \
-    RoutePlanResult, RoutePoint, MissionItem
+    RoutePlanResult, RoutePoint, MissionItem, _NON_SPATIAL_COMMANDS
 from ui_files_python.uav_interface import Ui_MainWindow
 
 def to_degree(x: float) -> float:
@@ -752,6 +752,14 @@ class MainWindow(QMainWindow):
     # Rota yükleme sırasında orijinal frame, param, autocontinue değerlerini
     # geri yüklemek için kullanılır.
     _raw_mission_items: list[MissionItem] = []
+    # Mekansal olmayan komutların (TAKEOFF, DO_JUMP vb.) _raw_mission_items
+    # içindeki orijinal indeksleri. Upload sırasında bu öğeler doğru pozisyona
+    # geri eklenir. Anahtar: raw indeks, Değer: MissionItem referansı.
+    _non_spatial_indices: dict[int, MissionItem] = {}
+    # Uzamsal waypoint indeksini (_current_mission_waypoints) ham indekse
+    # (_raw_mission_items) eşleyen liste. compute_safe_route'tan dönen
+    # origin_idx değerleri bu listeyle doğru raw pozisyona çevrilir.
+    _spatial_to_raw_idx: list[int] = []
     _pixhawk_current_seq: int = 0
     _last_planned_hash = None
     _last_corrected_route: list[RoutePoint] = []
@@ -1008,15 +1016,33 @@ class MainWindow(QMainWindow):
             self.ui.map_view.mission_geopath.mission_geopath_changed.emit()
 
             # HSS entegrasyonu: indirilen mission kaydedilir, rota düzeltme tetiklenir
-            # Outlier filtreleme: (0.0, 0.0) koordinatlı noktaları hem
-            # _current_mission_waypoints hem de _raw_mission_items'dan çıkar
+            # Outlier filtreleme: (0.0, 0.0) koordinatlı MEKANSAL noktaları filtrele.
+            # Mekansal olmayan komutlar (TAKEOFF, DO_JUMP vb.) bu filtreden
+            # muaftır — (0,0) bu komutlar için doğal bir değerdir.
             self._current_mission_waypoints = []
+            self._non_spatial_indices = {}
+            self._spatial_to_raw_idx = []
             filtered_raw: list[MissionItem] = []
-            for mi in self._raw_mission_items:
+            for raw_idx, mi in enumerate(self._raw_mission_items):
+                # Mekansal olmayan komut → _raw_mission_items'da koru,
+                # ama _current_mission_waypoints'a EKLEME (haritayı bozar)
+                if mi.command in _NON_SPATIAL_COMMANDS:
+                    filtered_raw.append(mi)
+                    # Orijinal pozisyonunu kaydet — upload'da geri eklenecek
+                    self._non_spatial_indices[len(filtered_raw) - 1] = mi
+                    qDebug("[Mission] Mekansal olmayan komut korunuyor: "
+                           "seq=%d cmd=%d (0,0 filtresi atlandı)"
+                           % (mi.seq, mi.command))
+                    continue
+                # Mekansal komut — (0,0) outlier kontrolü uygula
                 if abs(mi.x) < 0.01 and abs(mi.y) < 0.01:
                     qDebug("[Mission] Filtering outlier WP seq=%d at (%.4f, %.4f)"
                            % (mi.seq, mi.x, mi.y))
                     continue
+                # Uzamsal waypoint indeksini raw indekse eşle —
+                # compute_safe_route'tan dönen origin_idx bu eşlemeyle
+                # doğru raw MissionItem'a çevrilecek.
+                self._spatial_to_raw_idx.append(len(filtered_raw))
                 self._current_mission_waypoints.append(
                     QGeoCoordinate(mi.x, mi.y, mi.z)
                 )
@@ -2859,8 +2885,14 @@ class MainWindow(QMainWindow):
 
         # Hesap havuz thread'inde yapılıyor; sonuç _on_route_plan_ready'e
         # sinyalle geliyor. Bkz. RoutePlanTask.
-        # _raw_mission_items'dan orijinal komut kodlarını çıkar (komut-agnostik aktarım)
-        mission_commands = [mi.command for mi in self._raw_mission_items]
+        # Sadece uzamsal (mekansal) komutların kodlarını çıkar —
+        # _current_mission_waypoints ile birebir eşleşmeli.
+        # Mekansal olmayan komutlar zaten _current_mission_waypoints'ta yok,
+        # dolayısıyla komut listesinden de çıkarılmalı.
+        mission_commands = [
+            mi.command for i, mi in enumerate(self._raw_mission_items)
+            if i not in self._non_spatial_indices
+        ]
         self._plan_in_flight = True
         QThreadPool.globalInstance().start(RoutePlanTask(
             list(self._current_mission_waypoints), combined_hss,
@@ -3048,12 +3080,14 @@ class MainWindow(QMainWindow):
                 return
 
         # RoutePoint → MissionItem birleştirme
-        # Orijinal noktalar: origin_idx üzerinden _raw_mission_items'a erişilir,
-        #   TÜM alanlar korunur, sadece koordinat (x, y, z) güncellenir.
+        # origin_idx: compute_safe_route'un döndürdüğü indeks — _current_mission_waypoints
+        #   (uzamsal) indeksidir. _spatial_to_raw_idx eşlemesiyle _raw_mission_items'taki
+        #   doğru MissionItem'a erişilir. TÜM alanlar korunur, sadece koordinat güncellenir.
         # Bypass noktaları: en yakın orijinalin frame'i miras alınır,
         #   komut olarak WAYPOINT (16) atanır.
         upload_items: list[MissionItem] = []
         raw = self._raw_mission_items
+        s2r = self._spatial_to_raw_idx  # uzamsal indeks → raw indeks eşlemesi
 
         # Bypass noktaları için varsayılan frame belirleme:
         # Eğer ham mission listesinde en az 2 öğe varsa (Home + ilk uçuş noktası),
@@ -3062,23 +3096,39 @@ class MainWindow(QMainWindow):
         default_bypass_frame = raw[1].frame if len(raw) > 1 else 6
 
         for seq, rp in enumerate(corrected_coords):
-            if rp.origin_idx is not None and rp.origin_idx < len(raw):
-                # Orijinal görev öğesi — TÜM MAVLink alanları korunuyor
-                orig = raw[rp.origin_idx]
-                mi = MissionItem(
-                    seq=seq,
-                    frame=orig.frame,           # Orijinal frame korunuyor
-                    command=orig.command,        # Orijinal komut korunuyor
-                    current=0,
-                    autocontinue=orig.autocontinue,
-                    param1=orig.param1,          # Orijinal parametreler korunuyor
-                    param2=orig.param2,
-                    param3=orig.param3,
-                    param4=orig.param4,
-                    x=rp.lat,                   # Koordinat güncellenmiş olabilir (radyal çıkış)
-                    y=rp.lon,
-                    z=rp.alt
-                )
+            if rp.origin_idx is not None:
+                # origin_idx → raw indekse çevir (uzamsal→ham eşleme)
+                mapped_raw_idx = (s2r[rp.origin_idx]
+                                  if rp.origin_idx < len(s2r)
+                                  else rp.origin_idx)
+                if mapped_raw_idx < len(raw):
+                    # Orijinal görev öğesi — TÜM MAVLink alanları korunuyor
+                    orig = raw[mapped_raw_idx]
+                    mi = MissionItem(
+                        seq=seq,
+                        frame=orig.frame,           # Orijinal frame korunuyor
+                        command=orig.command,        # Orijinal komut korunuyor
+                        current=0,
+                        autocontinue=orig.autocontinue,
+                        param1=orig.param1,          # Orijinal parametreler korunuyor
+                        param2=orig.param2,
+                        param3=orig.param3,
+                        param4=orig.param4,
+                        x=rp.lat,                   # Koordinat güncellenmiş olabilir (radyal çıkış)
+                        y=rp.lon,
+                        z=rp.alt
+                    )
+                else:
+                    # Eşleme sınır dışı — güvenli bypass noktası oluştur
+                    mi = MissionItem(
+                        seq=seq,
+                        frame=default_bypass_frame,
+                        command=16,
+                        current=0,
+                        autocontinue=1,
+                        param1=0.0, param2=0.0, param3=0.0, param4=0.0,
+                        x=rp.lat, y=rp.lon, z=rp.alt
+                    )
             else:
                 # Bypass / kaçınma ara noktası — yeni MissionItem oluştur
                 # Komşu orijinal noktanın frame'ini miras al
@@ -3092,6 +3142,19 @@ class MainWindow(QMainWindow):
                     x=rp.lat, y=rp.lon, z=rp.alt
                 )
             upload_items.append(mi)
+
+        # Mekansal olmayan komutları (TAKEOFF, DO_JUMP vb.) orijinal
+        # pozisyonlarına geri ekle — HSS algoritması bunları görmedi
+        # ama ArduPilot'a eksiksiz geri yüklenmeli.
+        for raw_idx, non_spatial_mi in sorted(self._non_spatial_indices.items()):
+            # raw_idx: orijinal _raw_mission_items içindeki pozisyon.
+            # Upload listesine aynı pozisyona ekle (sınır kontrolü ile).
+            insert_pos = min(raw_idx, len(upload_items))
+            upload_items.insert(insert_pos, non_spatial_mi)
+
+        # Tüm seq numaralarını yeniden ata — insert sonrası sıralama bozulmuş olabilir
+        for i, mi in enumerate(upload_items):
+            mi.seq = i
 
         self.mavlink_worker._mission_upload_items = upload_items
         self.mavlink_worker._start_mission_upload = True
